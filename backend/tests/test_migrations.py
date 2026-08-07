@@ -1,0 +1,149 @@
+"""Verify the Alembic initial schema migration against SQLite.
+
+These tests never touch MySQL: they build a throwaway SQLite file database
+per test and drive Alembic programmatically.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+
+from alembic import command
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+EXPECTED_TABLES = {
+    "geo_admin_users",
+    "geo_customers",
+    "geo_projects",
+    "geo_project_prompts",
+    "geo_project_keywords",
+    "geo_project_platforms",
+    "geo_competitors",
+    "geo_schedule_runs",
+    "geo_tasks",
+    "geo_subtasks",
+    "geo_callback_events",
+    "geo_compensation_events",
+}
+
+# v2 removed these: schedule config is embedded in geo_projects.
+REMOVED_TABLES = {"geo_schedules", "geo_schedule_slots"}
+
+
+def make_config(db_path: Path) -> Config:
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
+    return cfg
+
+
+@pytest.fixture()
+def sqlite_db(tmp_path: Path) -> Path:
+    return tmp_path / "migration_test.db"
+
+
+@pytest.fixture()
+def upgraded(sqlite_db: Path):
+    cfg = make_config(sqlite_db)
+    command.upgrade(cfg, "head")
+    engine = create_engine(f"sqlite+pysqlite:///{sqlite_db}")
+    try:
+        yield inspect(engine), cfg
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_creates_all_expected_tables(upgraded):
+    inspector, _ = upgraded
+    tables = set(inspector.get_table_names())
+    assert EXPECTED_TABLES <= tables
+
+
+def test_upgrade_does_not_create_v1_schedule_tables(upgraded):
+    inspector, _ = upgraded
+    assert REMOVED_TABLES & set(inspector.get_table_names()) == set()
+
+
+def test_projects_have_embedded_schedule_columns(upgraded):
+    inspector, _ = upgraded
+    cols = {c["name"] for c in inspector.get_columns("geo_projects")}
+    assert {
+        "schedule_enabled",
+        "slot1_hour",
+        "slot1_minute",
+        "slot2_hour",
+        "slot2_minute",
+        "description",
+    } <= cols
+
+
+def test_projects_unique_customer_code(upgraded):
+    inspector, _ = upgraded
+    constraints = inspector.get_unique_constraints("geo_projects")
+    assert any(
+        c["column_names"] == ["customer_id", "code"] for c in constraints
+    ), constraints
+
+
+def test_schedule_runs_keyed_by_project(upgraded):
+    inspector, _ = upgraded
+    cols = {c["name"] for c in inspector.get_columns("geo_schedule_runs")}
+    assert "project_id" in cols
+    assert "schedule_id" not in cols
+
+    indexes = inspector.get_indexes("geo_schedule_runs")
+    assert any(
+        ix["column_names"] == ["project_id", "slot_index", "triggered_at"]
+        for ix in indexes
+    ), indexes
+
+    uniques = inspector.get_unique_constraints("geo_schedule_runs")
+    assert any(u["column_names"] == ["cooldown_key"] for u in uniques), uniques
+
+
+def test_tasks_extension_columns(upgraded):
+    inspector, _ = upgraded
+    cols = {c["name"] for c in inspector.get_columns("geo_tasks")}
+    assert {"customer_id", "project_id", "schedule_run_id"} <= cols
+    assert "schedule_id" not in cols
+
+    indexes = inspector.get_indexes("geo_tasks")
+    index_cols = [ix["column_names"] for ix in indexes]
+    assert ["project_id", "created_local_at"] in index_cols, index_cols
+    assert ["customer_id", "created_local_at"] in index_cols, index_cols
+
+
+def test_admin_users_have_role_and_customer(upgraded):
+    inspector, _ = upgraded
+    cols = {c["name"] for c in inspector.get_columns("geo_admin_users")}
+    assert {"role", "customer_id"} <= cols
+
+
+def test_downgrade_base_drops_everything(sqlite_db: Path):
+    cfg = make_config(sqlite_db)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "base")
+
+    engine = create_engine(f"sqlite+pysqlite:///{sqlite_db}")
+    try:
+        remaining = {
+            t for t in inspect(engine).get_table_names() if t.startswith("geo_")
+        }
+    finally:
+        engine.dispose()
+    assert remaining == set()
+
+
+def test_mysql_offline_ddl_is_generated(sqlite_db: Path, capsys):
+    """Offline mode against a MySQL URL must render valid MySQL DDL."""
+    cfg = make_config(sqlite_db)
+    cfg.set_main_option("sqlalchemy.url", "mysql+pymysql://u:p@localhost/windx")
+    command.upgrade(cfg, "head", sql=True)
+    sql = capsys.readouterr().out
+    assert "CREATE TABLE geo_projects" in sql
+    assert "ENUM" in sql.upper()
