@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=2560, initial-scale=1">
+    <title>风球GEO监控 · WINDx GEO Monitor</title>
+    <meta name="description" content="风球科技 GEO 监控平台 - 大模型品牌提及分析与竞品监控系统">
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+</head>
+<body>
+    <!-- ========== 登录页 ========== -->
+    <div id="page-login" class="page page-login active">
+        <div class="login-bg">
+            <div class="login-bg-shape shape-1"></div>
+            <div class="login-bg-shape shape-2"></div>
+            <div class="login-bg-shape shape-3"></div>
+        </div>
+        <div class="login-container">
+            <div class="login-left">
+                <div class="brand-block">
+                    <div class="brand-logo">
+                        <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+                            <circle cx="28" cy="28" r="22" fill="#1a55e8"/>
+                            <path d="M28 6a22 22 0 1 0 22 22" fill="#4d80f0"/>
+                            <path d="M28 28 L48 22 L46 26 L28 30 Z" fill="#ff6b1a"/>
+                            <path d="M28 28 L48 34 L46 30 L28 26 Z" fill="#ff8c42"/>
+                        </svg>
+                    </div>
+                    <div class="brand-text">
+                        <h1>WINDx</h1>
+                        <p>风球科技 GEO 监控平台</p>
+                    </div>
+                </div>
+                <div class="login-slogan">
+                    <h2>看见品牌在 AI 世界中的样子</h2>
+                    <p>实时监测 7 大主流大模型对您品牌的提及、推荐与情感倾向，洞察竞品动态，掌握信源话语权。</p>
+                </div>
+                <div class="login-features">
+                    <div class="feature-item">
+                        <div class="feature-icon icon-monitor"></div>
+                        <div class="feature-text">
+                            <strong>全模型覆盖</strong>
+                            <span>豆包 · 元宝 · 通义千问 · Kimi · DeepSeek · 文心一言 · 蚂蚁阿福</span>
+                        </div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon icon-chart"></div>
+                        <div class="feature-text">
+                            <strong>多维数据分析</strong>
+                            <span>提及率 · 排名 · 情感 · 引用源 · 竞品对比</span>
+                        </div>
+                    </div>
+                    <div class="feature-item">
+                        <div class="feature-icon icon-alert"></div>
+                        <div class="feature-text">
+                            <strong>实时告警</strong>
+                            <span>排名骤降 · 竞品超越 · 负面提及 · 信源异动</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="login-right">
+                <div class="login-card">
+                    <div class="login-card-header">
+                        <h3>登录账号</h3>
+                        <p>欢迎回来，继续监控您的品牌影响力</p>
+                    </div>
+                    <div class="form-group">
+                        <label>账号 / 邮箱</label>
+                        <div class="input-wrap">
+                            <span class="input-icon icon-user"></span>
+                            <input type="text" placeholder="请输入账号或邮箱" value="demo@windx.com">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>密码</label>
+                        <div class="input-wrap">
+                            <span class="input-icon icon-lock"></span>
+                            <input type="password" placeholder="请输入密码" value="••••••••••">
+                            <span class="input-action">👁</span>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label class="checkbox">
+                            <input type="checkbox" checked>
+                            <span>7 天内自动登录</span>
+                        </label>
+                        <a class="link" href="javascript:void(0)">忘记密码？</a>
+                    </div>
+                    <button class="btn btn-primary btn-block btn-lg" onclick="App.go('overview')">
+                        登 录
+                    </button>
+                    <div class="login-divider"><span>其他登录方式</span></div>
+                    <div class="login-social">
+                        <button class="social-btn" title="微信登录">微信</button>
+                        <button class="social-btn" title="企业微信">企微</button>
+                        <button class="social-btn" title="钉钉">钉钉</button>
+                        <button class="social-btn" title="SSO 单点登录">SSO</button>
+                    </div>
+                    <div class="login-footer">
+                        还没有账号？<a class="link" href="javascript:void(0)">立即注册</a>
+                    </div>
+                </div>
+                <div class="login-meta">
+                    © 2026 风球科技 · WINDx Technology · 京ICP备2024xxxxxx号
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 主应用框架 ========== -->
+    <div id="page-app" class="page page-app">
+        <!-- 左侧主导航 -->
+        <aside class="app-sidebar">
+            <div class="sidebar-logo">
+                <svg width="36" height="36" viewBox="0 0 56 56" fill="none">
+                    <circle cx="28" cy="28" r="22" fill="#1a55e8"/>
+                    <path d="M28 6a22 22 0 1 0 22 22" fill="#4d80f0"/>
+                    <path d="M28 28 L48 22 L46 26 L28 30 Z" fill="#ff6b1a"/>
+                    <path d="M28 28 L48 34 L46 30 L28 26 Z" fill="#ff8c42"/>
+                </svg>
+                <div class="sidebar-logo-text">
+                    <strong>WINDx</strong>
+                    <span>GEO 监控</span>
+                </div>
+            </div>
+
+            <div class="sidebar-project">
+                <div class="project-label">当前项目</div>
+                <button class="project-selector" onclick="App.openProjectSwitch()">
+                    <span class="project-icon">🏷️</span>
+                    <span class="project-name">某护肤品品牌 · 2026 Q2</span>
+                    <span class="project-arrow">▾</span>
+                </button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-group">
+                    <div class="nav-group-title">数据洞察</div>
+                    <a class="nav-item active" data-tab="overview" onclick="App.switchTab('overview')">
+                        <span class="nav-icon icon-overview"></span>
+                        <span class="nav-text">首屏概览</span>
+                    </a>
+                    <a class="nav-item" data-tab="question" onclick="App.switchTab('question')">
+                        <span class="nav-icon icon-question"></span>
+                        <span class="nav-text">问题提及分析</span>
+                        <span class="nav-badge">42</span>
+                    </a>
+                    <a class="nav-item" data-tab="competitor" onclick="App.switchTab('competitor')">
+                        <span class="nav-icon icon-competitor"></span>
+                        <span class="nav-text">竞品分析</span>
+                    </a>
+                    <a class="nav-item" data-tab="source" onclick="App.switchTab('source')">
+                        <span class="nav-icon icon-source"></span>
+                        <span class="nav-text">信源偏好</span>
+                    </a>
+                    <a class="nav-item" data-tab="citation" onclick="App.switchTab('citation')">
+                        <span class="nav-icon icon-citation"></span>
+                        <span class="nav-text">引用源分析</span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-title">数据中心</div>
+                    <a class="nav-item" data-tab="answer" onclick="App.switchTab('answer')">
+                        <span class="nav-icon icon-answer"></span>
+                        <span class="nav-text">AI 回答详情</span>
+                    </a>
+                    <a class="nav-item" data-tab="qmanage" onclick="App.switchTab('qmanage')">
+                        <span class="nav-icon icon-qmanage"></span>
+                        <span class="nav-text">问题管理</span>
+                    </a>
+                    <a class="nav-item" data-tab="cmanage" onclick="App.switchTab('cmanage')">
+                        <span class="nav-icon icon-cmanage"></span>
+                        <span class="nav-text">竞品管理</span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-title">系统</div>
+                    <a class="nav-item" data-tab="settings" onclick="App.switchTab('settings')">
+                        <span class="nav-icon icon-settings"></span>
+                        <span class="nav-text">设置</span>
+                    </a>
+                </div>
+            </nav>
+
+            <div class="sidebar-shortcuts">
+                <div class="shortcut-title">快捷键 <kbd>Ctrl</kbd> + <kbd>K</kbd></div>
+                <div class="shortcut-list">
+                    <div class="shortcut-item" onclick="App.quickAction('question')">
+                        <span class="kbd">Q</span> 新建问题
+                    </div>
+                    <div class="shortcut-item" onclick="App.quickAction('keyword')">
+                        <span class="kbd">K</span> 新建关键词
+                    </div>
+                    <div class="shortcut-item" onclick="App.quickAction('project')">
+                        <span class="kbd">P</span> 新建项目
+                    </div>
+                    <div class="shortcut-item" onclick="App.quickAction('export-raw')">
+                        <span class="kbd">E</span> 导出原始数据
+                    </div>
+                    <div class="shortcut-item" onclick="App.quickAction('export-weekly')">
+                        <span class="kbd">W</span> 导出周报
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-user" onclick="App.toggleUserMenu()">
+                <div class="user-avatar">研</div>
+                <div class="user-info">
+                    <strong>研究员 · 小敏</strong>
+                    <span>windx.com</span>
+                </div>
+                <span class="user-arrow">▾</span>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="app-main">
+            <!-- 顶部栏 -->
+            <header class="app-header">
+                <div class="header-left">
+                    <button class="header-btn icon-collapse" onclick="App.toggleSidebar()"></button>
+                    <div class="header-crumbs">
+                        <span>项目：某护肤品品牌 · 2026 Q2</span>
+                        <span class="crumbs-sep">/</span>
+                        <strong id="header-crumb-tab">首屏概览</strong>
+                    </div>
+                </div>
+                <div class="header-search">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" placeholder="全局搜索：问题、关键词、竞品、引用源...">
+                    <kbd class="search-kbd">Ctrl K</kbd>
+                </div>
+                <div class="header-right">
+                    <button class="header-btn" title="导出">
+                        <span class="icon-export"></span>
+                    </button>
+                    <button class="header-btn notification-btn" title="通知" onclick="App.toggleNotify()">
+                        <span class="icon-bell"></span>
+                        <span class="notify-dot">3</span>
+                    </button>
+                    <button class="header-btn" title="帮助">
+                        <span class="icon-help"></span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- 通知栏（按需显示） -->
+            <div id="notify-bar" class="notify-bar">
+                <div class="notify-item notify-warning">
+                    <span class="notify-icon">⚠️</span>
+                    <div class="notify-body">
+                        <strong>排名异动告警</strong>
+                        <span>问题「敏感肌护肤品牌推荐」在豆包中本周排名从 Top1 跌至 Top4，建议关注。</span>
+                    </div>
+                    <span class="notify-time">5 分钟前</span>
+                    <button class="notify-close" onclick="this.parentElement.remove()">×</button>
+                </div>
+                <div class="notify-item notify-info">
+                    <span class="notify-icon">ℹ️</span>
+                    <div class="notify-body">
+                        <strong>新增竞品发现</strong>
+                        <span>Agent 自动发现新竞品「珂润 Curel」，建议确认是否纳入监控列表。</span>
+                    </div>
+                    <span class="notify-time">2 小时前</span>
+                    <button class="notify-close" onclick="this.parentElement.remove()">×</button>
+                </div>
+            </div>
+
+            <!-- Tab 1: 首屏概览 -->
+            <section id="tab-overview" class="tab-pane active">
+                <!-- 二级 Tab 导航 -->
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active" data-sub="summary">总览数据</div>
+                    <div class="secondary-tab" data-sub="trend">趋势分析</div>
+                    <div class="secondary-tab" data-sub="model">模型维度</div>
+                    <div class="secondary-tab" data-sub="alert">告警中心</div>
+                    <div class="secondary-tabs-right">
+                        <div class="time-selector">
+                            <button class="time-btn" data-range="7">7 天</button>
+                            <button class="time-btn active" data-range="15">15 天</button>
+                            <button class="time-btn" data-range="30">30 天</button>
+                            <button class="time-btn" data-range="60">2 个月</button>
+                            <button class="time-btn" data-range="custom">自定义</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 概览主内容 -->
+                <div class="overview-content">
+                    <!-- KPI 卡片组 -->
+                    <div class="kpi-grid">
+                        <div class="kpi-card kpi-primary">
+                            <div class="kpi-label">总提及次数</div>
+                            <div class="kpi-value">12,486</div>
+                            <div class="kpi-trend up">
+                                <span class="trend-icon">↑</span>
+                                <span>较上周 +18.3%</span>
+                            </div>
+                            <div class="kpi-chart" id="kpi-spark-1"></div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">Top1 提及率</div>
+                            <div class="kpi-value">36.4<span class="kpi-unit">%</span></div>
+                            <div class="kpi-trend up">
+                                <span class="trend-icon">↑</span>
+                                <span>较上周 +4.2%</span>
+                            </div>
+                            <div class="kpi-chart" id="kpi-spark-2"></div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">Top3 提及率</div>
+                            <div class="kpi-value">68.2<span class="kpi-unit">%</span></div>
+                            <div class="kpi-trend up">
+                                <span class="trend-icon">↑</span>
+                                <span>较上周 +2.1%</span>
+                            </div>
+                            <div class="kpi-chart" id="kpi-spark-3"></div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">提问总数</div>
+                            <div class="kpi-value">3,420</div>
+                            <div class="kpi-trend up">
+                                <span class="trend-icon">↑</span>
+                                <span>较上周 +12.5%</span>
+                            </div>
+                            <div class="kpi-chart" id="kpi-spark-4"></div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">收到答案数</div>
+                            <div class="kpi-value">23,940</div>
+                            <div class="kpi-trend up">
+                                <span class="trend-icon">↑</span>
+                                <span>较上周 +15.8%</span>
+                            </div>
+                            <div class="kpi-chart" id="kpi-spark-5"></div>
+                        </div>
+                    </div>
+
+                    <!-- 主图表区 -->
+                    <div class="overview-grid">
+                        <div class="panel panel-main">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>总提及趋势（近 15 天）</h3>
+                                    <p>按模型维度展示每日提及次数变化</p>
+                                </div>
+                                <div class="panel-actions">
+                                    <div class="legend">
+                                        <span class="legend-item"><span class="dot" style="background:#1a55e8"></span>豆包</span>
+                                        <span class="legend-item"><span class="dot" style="background:#ff6b1a"></span>元宝</span>
+                                        <span class="legend-item"><span class="dot" style="background:#52c41a"></span>通义千问</span>
+                                        <span class="legend-item"><span class="dot" style="background:#722ed1"></span>Kimi</span>
+                                        <span class="legend-item"><span class="dot" style="background:#13c2c2"></span>DeepSeek</span>
+                                        <span class="legend-item"><span class="dot" style="background:#eb2f96"></span>文心一言</span>
+                                        <span class="legend-item"><span class="dot" style="background:#faad14"></span>蚂蚁阿福</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-trend-main" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>Top1 率排行</h3>
+                                    <p>各模型 Top1 提及率</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-top1-ranking" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>今日告警概览</h3>
+                                    <p>最近 24 小时系统告警</p>
+                                </div>
+                                <button class="btn btn-text">查看全部</button>
+                            </div>
+                            <div class="panel-body">
+                                <div class="alert-list">
+                                    <div class="alert-item alert-danger">
+                                        <span class="alert-tag">紧急</span>
+                                        <div class="alert-content">
+                                            <strong>排名骤降</strong>
+                                            <p>「敏感肌护肤推荐」豆包 Top1→Top4</p>
+                                        </div>
+                                        <span class="alert-time">10 分钟前</span>
+                                    </div>
+                                    <div class="alert-item alert-warning">
+                                        <span class="alert-tag">警告</span>
+                                        <div class="alert-content">
+                                            <strong>竞品超越</strong>
+                                            <p>「珂润」通义千问 Top1 占位</p>
+                                        </div>
+                                        <span class="alert-time">2 小时前</span>
+                                    </div>
+                                    <div class="alert-item alert-info">
+                                        <span class="alert-tag">提示</span>
+                                        <div class="alert-content">
+                                            <strong>信源变化</strong>
+                                            <p>小红书引用率上升 12%</p>
+                                        </div>
+                                        <span class="alert-time">5 小时前</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tab 2: 问题提及分析 -->
+            <section id="tab-question" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active" data-sub="all">全部问题</div>
+                    <div class="secondary-tab" data-sub="引流感">引流感</div>
+                    <div class="secondary-tab" data-sub="场景类">场景类</div>
+                    <div class="secondary-tab" data-sub="用户人群">用户人群</div>
+                    <div class="secondary-tab" data-sub="对比类">对比类</div>
+                    <div class="secondary-tab" data-sub="可及性">可及性</div>
+                    <div class="secondary-tab" data-sub="售后">售后</div>
+                    <div class="secondary-tab" data-sub="毒副作用">毒副作用</div>
+                    <div class="secondary-tabs-right">
+                        <button class="btn btn-primary" onclick="App.quickAction('question')">
+                            <span>+</span> 新建问题
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 分屏布局：左列表 + 右详情 -->
+                <div class="split-layout">
+                    <div class="split-left">
+                        <div class="search-bar">
+                            <input type="text" placeholder="搜索问题..." class="search-input">
+                            <select class="select-input">
+                                <option>全模型</option>
+                                <option>豆包</option>
+                                <option>元宝</option>
+                                <option>通义千问</option>
+                            </select>
+                            <select class="select-input">
+                                <option>全部排名</option>
+                                <option>Top1</option>
+                                <option>Top3</option>
+                                <option>Top10</option>
+                            </select>
+                        </div>
+                        <div class="question-list" id="question-list">
+                            <!-- JS 动态填充 -->
+                        </div>
+                    </div>
+                    <div class="split-right" id="question-detail">
+                        <!-- JS 动态填充选中问题详情 -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tab 3: 竞品分析 -->
+            <section id="tab-competitor" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active" data-sub="all">全部竞品</div>
+                    <div class="secondary-tab" data-sub="trend">趋势对比</div>
+                    <div class="secondary-tab" data-sub="diff">差异化分析</div>
+                    <div class="secondary-tabs-right">
+                        <button class="btn btn-primary" onclick="App.quickAction('competitor')">
+                            <span>+</span> 新增竞品
+                        </button>
+                    </div>
+                </div>
+
+                <div class="competitor-content">
+                    <!-- 输入提示区 -->
+                    <div class="input-hint-panel">
+                        <div class="hint-icon">💡</div>
+                        <div class="hint-body">
+                            <strong>竞争化优势分析需您输入客户关注点或产品优势</strong>
+                            <p>已配置 5 条客户关注点，涵盖「成分安全」「敏感肌适用」「性价比」「品牌口碑」「使用效果」</p>
+                        </div>
+                        <button class="btn btn-default">编辑关注点</button>
+                    </div>
+
+                    <div class="competitor-grid">
+                        <!-- 竞品列表 -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h3>竞品概览</h3>
+                            </div>
+                            <div class="panel-body">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>品牌</th>
+                                            <th>提及率 Top3</th>
+                                            <th>推荐度</th>
+                                            <th>情感</th>
+                                            <th>趋势</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="competitor-tbody">
+                                        <!-- JS 填充 -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- 趋势对比图 -->
+                        <div class="panel panel-wide">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>提及趋势对比（自身 vs 竞品）</h3>
+                                    <p>近 15 天，每日被各模型提及次数对比</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-competitor-trend" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <!-- 差异化分析 -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h3>差异化标签云</h3>
+                                <p>基于 AI 回答中高频提及的属性词</p>
+                            </div>
+                            <div class="panel-body">
+                                <div class="tag-cloud">
+                                    <span class="tag tag-brand" style="--size:1.4">敏感肌友好</span>
+                                    <span class="tag tag-positive" style="--size:1.2">成分安全</span>
+                                    <span class="tag tag-positive" style="--size:1.3">高性价比</span>
+                                    <span class="tag" style="--size:1.0">修护屏障</span>
+                                    <span class="tag tag-positive" style="--size:1.1">口碑好</span>
+                                    <span class="tag" style="--size:1.0">补水保湿</span>
+                                    <span class="tag tag-warn" style="--size:1.2">价格偏高</span>
+                                    <span class="tag tag-negative" style="--size:0.9">油腻感</span>
+                                    <span class="tag tag-positive" style="--size:1.1">温和不刺激</span>
+                                    <span class="tag" style="--size:1.0">孕妇可用</span>
+                                    <span class="tag tag-positive" style="--size:1.2">医院推荐</span>
+                                    <span class="tag" style="--size:0.9">美白</span>
+                                    <span class="tag tag-positive" style="--size:1.1">不含酒精</span>
+                                    <span class="tag" style="--size:1.0">舒缓泛红</span>
+                                    <span class="tag tag-negative" style="--size:0.8">搓泥</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h3>竞争优势矩阵</h3>
+                            </div>
+                            <div class="panel-body">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>客户关注点</th>
+                                            <th>自身</th>
+                                            <th>竞品A</th>
+                                            <th>竞品B</th>
+                                            <th>竞品C</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>成分安全</td>
+                                            <td><span class="rate-high">86%</span></td>
+                                            <td><span class="rate-mid">62%</span></td>
+                                            <td><span class="rate-mid">58%</span></td>
+                                            <td><span class="rate-low">42%</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td>敏感肌适用</td>
+                                            <td><span class="rate-high">92%</span></td>
+                                            <td><span class="rate-mid">55%</span></td>
+                                            <td><span class="rate-low">38%</span></td>
+                                            <td><span class="rate-low">28%</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td>性价比</td>
+                                            <td><span class="rate-mid">58%</span></td>
+                                            <td><span class="rate-high">78%</span></td>
+                                            <td><span class="rate-mid">65%</span></td>
+                                            <td><span class="rate-high">82%</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td>品牌口碑</td>
+                                            <td><span class="rate-high">88%</span></td>
+                                            <td><span class="rate-high">82%</span></td>
+                                            <td><span class="rate-mid">68%</span></td>
+                                            <td><span class="rate-mid">72%</span></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tab 4: 信源偏好 -->
+            <section id="tab-source" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active" data-sub="all">全部信源</div>
+                    <div class="secondary-tab" data-sub="official">官方网站</div>
+                    <div class="secondary-tab" data-sub="news">新闻网站</div>
+                    <div class="secondary-tab" data-sub="social">社交媒体</div>
+                    <div class="secondary-tab" data-sub="wiki">百科</div>
+                    <div class="secondary-tab" data-sub="overseas">海外网站</div>
+                    <div class="secondary-tab" data-sub="forum">垂类论坛</div>
+                    <div class="secondary-tab" data-sub="self">自媒体</div>
+                    <div class="secondary-tabs-right">
+                        <button class="btn btn-default" onclick="App.quickAction('source-dict')">
+                            导入官方媒体字典
+                        </button>
+                    </div>
+                </div>
+
+                <div class="source-content">
+                    <div class="source-grid">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>信源引用分布</h3>
+                                    <p>各分类信源被引用的绝对数量</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-source-pie" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>官方信源对比</h3>
+                                    <p>自身品牌官方信源 vs 竞品</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-source-compare" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-wide">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>按模型细分的信源偏好</h3>
+                                    <p>每个大模型引用最多的信源类型 TOP3</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div class="model-source-grid" id="model-source-grid">
+                                    <!-- JS 填充 -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>信源变化趋势</h3>
+                                    <p>近 15 天新增/流失信源</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="chart-source-trend" class="chart-area"></div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>稳定信源（跨模型）</h3>
+                                    <p>在所有模型中持续被引用的信源</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div class="stable-source-list">
+                                    <div class="stable-item">
+                                        <div class="stable-rank">1</div>
+                                        <div class="stable-info">
+                                            <strong>知乎 - 敏感话题专栏</strong>
+                                            <span>被 7 个模型引用 · 1,234 次</span>
+                                        </div>
+                                        <span class="stable-tag stable-tag-7">7/7</span>
+                                    </div>
+                                    <div class="stable-item">
+                                        <div class="stable-rank">2</div>
+                                        <div class="stable-info">
+                                            <strong>小红书 - 成分党话题</strong>
+                                            <span>被 6 个模型引用 · 986 次</span>
+                                        </div>
+                                        <span class="stable-tag stable-tag-6">6/7</span>
+                                    </div>
+                                    <div class="stable-item">
+                                        <div class="stable-rank">3</div>
+                                        <div class="stable-info">
+                                            <strong>品牌官网</strong>
+                                            <span>被 6 个模型引用 · 745 次</span>
+                                        </div>
+                                        <span class="stable-tag stable-tag-6">6/7</span>
+                                    </div>
+                                    <div class="stable-item">
+                                        <div class="stable-rank">4</div>
+                                        <div class="stable-info">
+                                            <strong>丁香医生</strong>
+                                            <span>被 5 个模型引用 · 632 次</span>
+                                        </div>
+                                        <span class="stable-tag stable-tag-5">5/7</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>优化建议</h3>
+                                    <p>基于信源分析的可操作建议</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div class="suggestion-list">
+                                    <div class="suggestion-item">
+                                        <span class="suggestion-icon">🎯</span>
+                                        <div>
+                                            <strong>高频复用信源</strong>
+                                            <p>「知乎-敏感肌专栏」可同时被 23 个问题采纳，建议重点运营</p>
+                                        </div>
+                                    </div>
+                                    <div class="suggestion-item">
+                                        <span class="suggestion-icon">📈</span>
+                                        <div>
+                                            <strong>短板信源补充</strong>
+                                            <p>文心一言缺少「医生推荐」类信源，建议补充丁香、好大夫等内容</p>
+                                        </div>
+                                    </div>
+                                    <div class="suggestion-item">
+                                        <span class="suggestion-icon">⚖️</span>
+                                        <div>
+                                            <strong>权威性平衡</strong>
+                                            <p>海外信源占比较低，竞品 K 占据 28%，建议增加权威外文资料</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tab 5: 引用源分析 -->
+            <section id="tab-citation" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active" data-sub="all">全部引用</div>
+                    <div class="secondary-tab" data-sub="official">官方网站</div>
+                    <div class="secondary-tab" data-sub="media">新闻媒体</div>
+                    <div class="secondary-tab" data-sub="self">自媒体</div>
+                    <div class="secondary-tabs-right">
+                        <div class="time-selector">
+                            <button class="time-btn" data-range="7">7 天</button>
+                            <button class="time-btn active" data-range="15">15 天</button>
+                            <button class="time-btn" data-range="30">30 天</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="citation-content">
+                    <!-- 筛选区 -->
+                    <div class="filter-bar">
+                        <div class="filter-group">
+                            <label>模型</label>
+                            <select class="select-input">
+                                <option>全部模型</option>
+                                <option>豆包</option>
+                                <option>元宝</option>
+                                <option>通义千问</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>业务排名</label>
+                            <select class="select-input">
+                                <option>全部</option>
+                                <option>Top1</option>
+                                <option>Top2-3</option>
+                                <option>Top4-10</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>域名权重</label>
+                            <select class="select-input">
+                                <option>全部</option>
+                                <option>高（DR>80）</option>
+                                <option>中（DR 40-80）</option>
+                                <option>低（DR<40）</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>关键词</label>
+                            <input type="text" class="search-input" placeholder="搜索 URL 或标题">
+                        </div>
+                        <button class="btn btn-primary">应用筛选</button>
+                    </div>
+
+                    <div class="citation-grid">
+                        <div class="panel panel-wide">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>引用源列表</h3>
+                                    <p>按引用次数倒序 · 共 1,286 条</p>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <table class="data-table data-table-hover">
+                                    <thead>
+                                        <tr>
+                                            <th>引用源</th>
+                                            <th>类型</th>
+                                            <th>域名权重</th>
+                                            <th>流量</th>
+                                            <th>引用次数</th>
+                                            <th>排名位置</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="citation-tbody">
+                                        <!-- JS 填充 -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- AI 回答详情页 -->
+            <section id="tab-answer" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active">AI 回答原始内容</div>
+                    <div class="secondary-tab">对比视图</div>
+                </div>
+                <div class="answer-content">
+                    <div class="answer-filters">
+                        <select class="select-input">
+                            <option>问题：敏感肌护肤品牌推荐</option>
+                        </select>
+                        <select class="select-input">
+                            <option>全部模型</option>
+                        </select>
+                        <select class="select-input">
+                            <option>最新采集</option>
+                        </select>
+                    </div>
+                    <div class="answer-grid" id="answer-grid">
+                        <!-- JS 填充 -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- 问题管理 -->
+            <section id="tab-qmanage" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active">问题列表</div>
+                    <div class="secondary-tab">标签管理</div>
+                    <div class="secondary-tab">导入导出</div>
+                    <div class="secondary-tabs-right">
+                        <button class="btn btn-default">📥 导入问题</button>
+                        <button class="btn btn-default">📤 导出问题</button>
+                        <button class="btn btn-primary" onclick="App.quickAction('question')">
+                            <span>+</span> 新建问题
+                        </button>
+                    </div>
+                </div>
+                <div class="manage-content">
+                    <table class="data-table data-table-hover">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox"></th>
+                                <th>问题内容</th>
+                                <th>分类标签</th>
+                                <th>监控模型</th>
+                                <th>创建时间</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>敏感肌护肤品牌推荐</strong></td>
+                                <td><span class="table-tag tag-blue">引流感</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-12</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>换季皮肤干燥怎么护肤</strong></td>
+                                <td><span class="table-tag tag-green">场景类</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-12</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>学生党平价护肤品</strong></td>
+                                <td><span class="table-tag tag-purple">用户人群</span></td>
+                                <td>5 个</td>
+                                <td>2026-07-10</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>A 品牌 vs B 品牌哪个好</strong></td>
+                                <td><span class="table-tag tag-orange">对比类</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-09</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>孕妇能用的护肤品</strong></td>
+                                <td><span class="table-tag tag-cyan">可及性</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-08</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>敏感肌护肤品使用后刺痛</strong></td>
+                                <td><span class="table-tag tag-red">毒副作用</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-08</td>
+                                <td><span class="status status-alert">需关注</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>敏感肌护肤品过敏了怎么办</strong></td>
+                                <td><span class="table-tag tag-yellow">售后</span></td>
+                                <td>7 个</td>
+                                <td>2026-07-08</td>
+                                <td><span class="status status-on">监控中</span></td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 竞品管理 -->
+            <section id="tab-cmanage" class="tab-pane">
+                <div class="secondary-tabs">
+                    <div class="secondary-tab active">竞品列表</div>
+                    <div class="secondary-tab">Agent 自动发现</div>
+                    <div class="secondary-tabs-right">
+                        <button class="btn btn-default">📥 批量导入</button>
+                        <button class="btn btn-primary" onclick="App.quickAction('competitor')">
+                            <span>+</span> 新增竞品
+                        </button>
+                    </div>
+                </div>
+                <div class="manage-content">
+                    <table class="data-table data-table-hover">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox"></th>
+                                <th>品牌名称</th>
+                                <th>类别</th>
+                                <th>添加方式</th>
+                                <th>监控模型</th>
+                                <th>提及次数</th>
+                                <th>添加时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>珂润 Curel</strong></td>
+                                <td>敏感肌护肤</td>
+                                <td><span class="table-tag tag-green">Agent 发现</span></td>
+                                <td>7 个</td>
+                                <td>2,840</td>
+                                <td>2026-07-15</td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>薇诺娜 Winona</strong></td>
+                                <td>敏感肌护肤</td>
+                                <td><span class="table-tag tag-blue">手动添加</span></td>
+                                <td>7 个</td>
+                                <td>3,256</td>
+                                <td>2026-07-10</td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>玉泽 Dr.Yu</strong></td>
+                                <td>敏感肌护肤</td>
+                                <td><span class="table-tag tag-blue">手动添加</span></td>
+                                <td>7 个</td>
+                                <td>1,932</td>
+                                <td>2026-07-10</td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                            <tr>
+                                <td><input type="checkbox"></td>
+                                <td><strong>雅漾 Avène</strong></td>
+                                <td>敏感肌护肤</td>
+                                <td><span class="table-tag tag-blue">手动添加</span></td>
+                                <td>7 个</td>
+                                <td>1,548</td>
+                                <td>2026-07-08</td>
+                                <td><button class="btn-text">编辑</button> · <button class="btn-text">删除</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 设置 -->
+            <section id="tab-settings" class="tab-pane">
+                <div class="settings-content">
+                    <div class="panel">
+                        <div class="panel-header"><h3>账号设置</h3></div>
+                        <div class="panel-body">
+                            <p>账号、个人信息、密码管理等基础设置...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- ========== 浮层组件 ========== -->
+    <!-- 全局搜索浮层 -->
+    <div id="global-search-modal" class="modal-overlay" onclick="App.closeSearch(event)">
+        <div class="modal modal-search" onclick="event.stopPropagation()">
+            <div class="search-modal-input">
+                <span class="search-icon">🔍</span>
+                <input type="text" placeholder="搜索问题、关键词、竞品、引用源..." autofocus>
+                <kbd>ESC</kbd>
+            </div>
+            <div class="search-modal-results">
+                <div class="search-section">
+                    <div class="search-section-title">问题</div>
+                    <div class="search-result-item">
+                        <span class="search-result-icon">❓</span>
+                        <span>敏感肌护肤品牌推荐</span>
+                        <span class="search-result-tag">引流感</span>
+                    </div>
+                    <div class="search-result-item">
+                        <span class="search-result-icon">❓</span>
+                        <span>换季皮肤干燥怎么护肤</span>
+                        <span class="search-result-tag">场景类</span>
+                    </div>
+                </div>
+                <div class="search-section">
+                    <div class="search-section-title">竞品</div>
+                    <div class="search-result-item">
+                        <span class="search-result-icon">🏷️</span>
+                        <span>珂润 Curel</span>
+                        <span class="search-result-tag">敏感肌</span>
+                    </div>
+                </div>
+                <div class="search-section">
+                    <div class="search-section-title">引用源</div>
+                    <div class="search-result-item">
+                        <span class="search-result-icon">🔗</span>
+                        <span>zhihu.com / question / 敏感肌</span>
+                        <span class="search-result-tag">垂类论坛</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通知浮层 -->
+    <div id="notify-dropdown" class="notify-dropdown">
+        <div class="notify-dropdown-header">
+            <strong>通知中心</strong>
+            <a>全部已读</a>
+        </div>
+        <div class="notify-dropdown-list">
+            <div class="notify-mini">
+                <span class="notify-mini-dot warn"></span>
+                <div><strong>排名异动</strong><span>「敏感肌护肤推荐」豆包 Top1→Top4</span></div>
+            </div>
+            <div class="notify-mini">
+                <span class="notify-mini-dot info"></span>
+                <div><strong>新增竞品</strong><span>Agent 发现「珂润」建议确认</span></div>
+            </div>
+            <div class="notify-mini">
+                <span class="notify-mini-dot ok"></span>
+                <div><strong>采集完成</strong><span>今日 7 个模型共采集 1,602 条回答</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script src="js/data.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
