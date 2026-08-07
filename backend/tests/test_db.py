@@ -1,51 +1,51 @@
 """Tests for the SQLAlchemy engine and session factory.
 
-These tests override DATABASE_URL via monkeypatch to use an in-memory SQLite
-engine so they don't depend on MySQL being available. They directly import
-``app.db`` and inspect ``app.db.engine`` after rebuilding it with the swapped
-settings.
+These tests override ``DATABASE_URL`` via ``monkeypatch`` to point at an
+in-memory SQLite engine so they don't depend on MySQL being available.
+They then call :func:`app.db.reset_engine` so the lazy engine factory
+rebuilds itself against the new URL. Accessing ``db_module.engine`` or
+``db_module.SessionLocal`` triggers the rebuild.
 """
 
-import importlib
 from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+import app.db as db_module
 
 
 @pytest.fixture
 def db_module_with_sqlite(monkeypatch: pytest.MonkeyPatch):
-    """Reload app.db with DATABASE_URL pointing at in-memory SQLite.
+    """Reset the cached engine after pointing DATABASE_URL at SQLite.
 
-    Yields the reloaded module so tests can inspect ``db_module.engine`` and
-    ``db_module.SessionLocal`` after the env override.
+    ``JWT_SECRET`` is forced for the same reason: ``Settings`` now requires
+    it, so the lazy ``_build_engine`` call would otherwise raise during
+    the test.
     """
     monkeypatch.setenv("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-    monkeypatch.setenv("JWT_SECRET", "test-secret")  # required by Settings
-
-    from app import config
-
-    config.get_settings.cache_clear()
-    from app import db as db_module
-
-    importlib.reload(db_module)
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    db_module.reset_engine()
     try:
         yield db_module
     finally:
-        importlib.reload(db_module)
+        db_module.reset_engine()
 
 
 def test_engine_uses_sqlite_url(db_module_with_sqlite) -> None:
     """After overriding DATABASE_URL, the engine URL should not be mysql."""
     db_module = db_module_with_sqlite
-    assert "sqlite" in str(db_module.engine.url)
+    engine: Engine = db_module.engine
+    assert "sqlite" in str(engine.url)
 
 
 def test_sessionlocal_produces_usable_session(db_module_with_sqlite) -> None:
     """SessionLocal opens a session that can execute SELECT 1."""
     db_module = db_module_with_sqlite
-    session: Session = db_module.SessionLocal()
+    factory: sessionmaker = db_module.SessionLocal
+    session: Session = factory()
     try:
         result = session.execute(text("SELECT 1")).scalar_one()
         assert result == 1

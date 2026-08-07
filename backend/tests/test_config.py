@@ -1,17 +1,26 @@
 """Tests for the Settings class loaded via pydantic-settings.
 
-Each test clears the lru_cache on `get_settings` so a fresh Settings() is
-constructed from the current process environment.
+Each test uses pytest's ``monkeypatch`` fixture to isolate environment
+variable changes, and clears ``get_settings`` cache before/after so the
+next Settings() instance is constructed from the patched environment.
 """
+
+import pytest
 
 from app.config import Settings, get_settings
 
 
-def setup_function(_fn: object) -> None:
+@pytest.fixture(autouse=True)
+def _isolated_env(monkeypatch: pytest.MonkeyPatch):
+    """Provide a clean env for every test: JWT_SECRET set, cache cleared.
+
+    ``conftest.py`` already sets ``JWT_SECRET`` for the whole session, but we
+    clear the ``get_settings`` cache both before and after the test so a
+    fresh ``Settings()`` is constructed from the (possibly monkey-patched)
+    environment, and so we never leak state into the next test.
+    """
     get_settings.cache_clear()
-
-
-def teardown_function(_fn: object) -> None:
+    yield
     get_settings.cache_clear()
 
 

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     logo_storage_dir: str = Field(default="/data/logos")
     logo_max_bytes: int = 2 * 1024 * 1024
 
-    jwt_secret: str = "CHANGE-ME-IN-PROD"
+    jwt_secret: str = Field(... , min_length=1)
     jwt_algorithm: str = "HS256"
     jwt_expire_days: int = 7
 
