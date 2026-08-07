@@ -1,0 +1,19 @@
+# Python venv (created via `uv venv` & `uv pip install -e .[dev]`)
+.venv/
+
+# Build / install artifacts
+build/
+dist/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Environment overrides (do not commit secrets)
+.env
