@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import customers, projects
+from app.api import auth, customers, projects
 from app.config import get_settings
 
 
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="windx-backend", lifespan=lifespan)
+app.include_router(auth.router)
 app.include_router(customers.router)
 app.include_router(projects.router)
 
