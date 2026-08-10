@@ -1,11 +1,11 @@
 import {
   Button,
   Card,
+  Dropdown,
   Form,
   Input,
   Modal,
   Select,
-  Space,
   Switch,
   Table,
   Tag,
@@ -13,9 +13,15 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import {
+  MoreOutlined,
+  PauseOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import dayjs from "dayjs";
 import {
   createProject,
@@ -24,6 +30,7 @@ import {
   listRuns,
   toggleSchedule,
   triggerRun,
+  type ProjectDetailOut,
   type ProjectOut,
   type RunSummary,
 } from "../../api/projects";
@@ -37,26 +44,77 @@ interface CreateFormValues {
 }
 
 interface RowDetail {
+  prompts: number;
   platforms: string[];
   lastRun: RunSummary | null;
 }
 
-const STATUS_TAG: Record<string, { color: string; text: string }> = {
-  success: { color: "green", text: "成功" },
-  failed: { color: "red", text: "失败" },
-  partial_completed: { color: "warning", text: "部分完成" },
-  skipped: { color: "default", text: "已跳过" },
-  queued: { color: "processing", text: "排队中" },
-  running: { color: "orange", text: "执行中" },
+const STATUS_TAG: Record<string, { color: string; bg: string; text: string }> = {
+  success: { color: "#16a34a", bg: "#dcfce7", text: "成功" },
+  failed: { color: "#dc2626", bg: "#fee2e2", text: "失败" },
+  partial_completed: { color: "#ea580c", bg: "#ffedd5", text: "部分完成" },
+  skipped: { color: "#6b7280", bg: "#f3f4f6", text: "跳过" },
+  queued: { color: "#2563eb", bg: "#dbeafe", text: "排队" },
+  running: { color: "#2563eb", bg: "#dbeafe", text: "执行中" },
 };
 
-function StatusTag({ status }: { status: string }) {
-  const cfg = STATUS_TAG[status] ?? { color: "default", text: status };
-  return <Tag color={cfg.color}>{cfg.text}</Tag>;
+function StatusBadge({ status }: { status: string }) {
+  const cfg = STATUS_TAG[status] ?? { color: "#6b7280", bg: "#f3f4f6", text: status };
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "1px 8px",
+        borderRadius: 4,
+        fontSize: 12,
+        color: cfg.color,
+        background: cfg.bg,
+        fontWeight: 500,
+        lineHeight: 1.6,
+      }}
+    >
+      {cfg.text}
+    </span>
+  );
+}
+
+// Per-letter pastel avatar colors used in the mockup.
+const AVATAR_PALETTE = [
+  { bg: "#dbeafe", fg: "#1d4ed8" }, // blue
+  { bg: "#dcfce7", fg: "#16a34a" }, // green
+  { bg: "#fee2e2", fg: "#dc2626" }, // red
+  { bg: "#fef3c7", fg: "#d97706" }, // amber
+  { bg: "#ede9fe", fg: "#7c3aed" }, // purple
+  { bg: "#fce7f3", fg: "#db2777" }, // pink
+  { bg: "#cffafe", fg: "#0891b2" }, // cyan
+  { bg: "#ffedd5", fg: "#ea580c" }, // orange
+];
+
+function avatarFor(seed: string): { bg: string; fg: string } {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length];
 }
 
 function formatTime(v: string | null) {
   return v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "—";
+}
+
+function relative(v: string | null): string {
+  if (!v) return "";
+  const ms = dayjs(v).valueOf() - Date.now();
+  const abs = Math.abs(ms);
+  const future = ms > 0;
+  const sec = Math.round(abs / 1000);
+  const min = Math.round(sec / 60);
+  const hr = Math.round(min / 60);
+  const day = Math.round(hr / 24);
+  let body = "";
+  if (abs < 60_000) body = `${sec}秒`;
+  else if (abs < 3_600_000) body = `${min}分钟`;
+  else if (abs < 86_400_000) body = `${hr}小时${min % 60}分钟`;
+  else body = `${day}天${hr % 24}小时`;
+  return future ? `${body}后` : `${body}前`;
 }
 
 export default function ProjectsList() {
@@ -64,7 +122,7 @@ export default function ProjectsList() {
   const [items, setItems] = useState<ProjectOut[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const [pageSize] = useState(10);
   const [loading, setLoading] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [customerFilter, setCustomerFilter] = useState<number | undefined>(undefined);
@@ -86,8 +144,31 @@ export default function ProjectsList() {
     try {
       const data = await listCustomers({ page: 1, size: 100 });
       setCustomers(data.items);
-    } catch (err) {
+    } catch {
       // ignore — filter will just lack labels
+    }
+  };
+
+  const ingestDetail = async (projectId: number): Promise<RowDetail | null> => {
+    try {
+      const [detail, runs] = await Promise.all([
+        getProject(projectId).catch(() => null as ProjectDetailOut | null),
+        listRuns(projectId, { page: 1, size: 1 }).catch(() => null),
+      ]);
+      return {
+        prompts: detail?.prompts?.length ?? 0,
+        platforms: detail?.platforms?.map((p) => p.platform) ?? [],
+        lastRun: runs?.items?.[0]
+          ? {
+              id: runs.items[0].id,
+              status: runs.items[0].status,
+              triggered_at: runs.items[0].triggered_at,
+              finished_at: runs.items[0].finished_at,
+            }
+          : null,
+      };
+    } catch {
+      return null;
     }
   };
 
@@ -102,29 +183,11 @@ export default function ProjectsList() {
       });
       setItems(data.items);
       setTotal(data.total);
-      // fetch detail + last run for visible rows in parallel
       const next: Record<number, RowDetail> = {};
       await Promise.all(
         data.items.map(async (it) => {
-          try {
-            const [detail, runs] = await Promise.all([
-              getProject(it.id).catch(() => null),
-              listRuns(it.id, { page: 1, size: 1 }).catch(() => null),
-            ]);
-            next[it.id] = {
-              platforms: detail?.platforms?.map((p) => p.platform) ?? [],
-              lastRun: runs?.items?.[0]
-                ? {
-                    id: runs.items[0].id,
-                    status: runs.items[0].status,
-                    triggered_at: runs.items[0].triggered_at,
-                    finished_at: runs.items[0].finished_at,
-                  }
-                : null,
-            };
-          } catch {
-            next[it.id] = { platforms: [], lastRun: null };
-          }
+          const d = await ingestDetail(it.id);
+          next[it.id] = d ?? { prompts: 0, platforms: [], lastRun: null };
         }),
       );
       setDetails(next);
@@ -191,9 +254,8 @@ export default function ProjectsList() {
 
   const onTrigger = async (record: ProjectOut) => {
     try {
-      const r = await triggerRun(record.id);
+      await triggerRun(record.id);
       message.success("已开始执行");
-      // refresh short status
       load(page);
     } catch (err) {
       const e = err as { response?: { status?: number; data?: { detail?: string } } };
@@ -209,106 +271,198 @@ export default function ProjectsList() {
     {
       title: "项目",
       dataIndex: "name",
+      width: 280,
       render: (name: string, record) => {
         const customer = customerMap[record.customer_id];
+        const a = avatarFor(record.code || name);
+        const letter = (name?.trim().charAt(0) ?? "?").toUpperCase();
         return (
-          <div>
-            <Link
-              to={`/admin/projects/${record.id}`}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
               style={{
-                color: "var(--brand-blue)",
-                fontWeight: 500,
-                lineHeight: 1.4,
+                width: 36,
+                height: 36,
+                borderRadius: 8,
+                background: a.bg,
+                color: a.fg,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 16,
+                fontWeight: 600,
+                flexShrink: 0,
               }}
             >
-              {name}
-            </Link>
-            <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 }}>
-              {customer?.name ?? `客户 #${record.customer_id}`} · 编号 {record.code}
+              {letter}
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <button
+                type="button"
+                onClick={() => navigate(`/admin/projects/${record.id}`)}
+                style={{
+                  background: "none",
+                  border: 0,
+                  padding: 0,
+                  color: "var(--brand-blue)",
+                  fontSize: 14,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  lineHeight: 1.4,
+                }}
+              >
+                {name}
+              </button>
+              <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 }}>
+                {customer?.name ?? `客户 #${record.customer_id}`}
+              </div>
             </div>
           </div>
         );
       },
     },
     {
+      title: "问题数",
+      key: "prompts",
+      width: 80,
+      render: (_, record) => {
+        const n = details[record.id]?.prompts ?? 0;
+        return (
+          <span
+            style={{
+              color: n > 0 ? "var(--text-primary)" : "var(--text-quaternary)",
+              fontWeight: 500,
+            }}
+          >
+            {n}
+          </span>
+        );
+      },
+    },
+    {
       title: "模型",
       key: "platforms",
-      width: 130,
+      width: 180,
       render: (_, record) => {
-        const d = details[record.id];
-        const count = d?.platforms?.length ?? 0;
-        if (count === 0) {
+        const ps = details[record.id]?.platforms ?? [];
+        if (ps.length === 0) {
           return <span style={{ color: "var(--text-quaternary)" }}>—</span>;
         }
         return (
-          <Tooltip title={d!.platforms.join("、")}>
-            <Tag color="blue">{count} 个</Tag>
-          </Tooltip>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {ps.slice(0, 4).map((p) => (
+              <Tag key={p} color="blue" style={{ margin: 0 }}>
+                {p}
+              </Tag>
+            ))}
+            {ps.length > 4 && (
+              <Tooltip title={ps.slice(4).join("、")}>
+                <Tag style={{ margin: 0 }}>×{ps.length - 4}</Tag>
+              </Tooltip>
+            )}
+          </div>
         );
       },
     },
     {
       title: "调度",
       key: "scheduleEnabled",
-      width: 90,
+      width: 80,
       render: (_, record) => (
         <Switch
           checked={record.schedule_enabled}
           onChange={(v) => onToggle(record, v)}
-          checkedChildren="开"
-          unCheckedChildren="关"
+          size="small"
         />
       ),
     },
     {
       title: "下一执行",
       dataIndex: "next_run_at",
-      width: 170,
+      width: 160,
       render: (v: string | null, record) => {
         if (!record.schedule_enabled) {
           return <span style={{ color: "var(--text-quaternary)" }}>—</span>;
         }
         return (
-          <span style={{ color: "var(--brand-blue)", fontSize: 13 }}>
-            {formatTime(v)}
-          </span>
+          <div>
+            <div style={{ color: "var(--brand-blue)", fontSize: 13, fontWeight: 500 }}>
+              {formatTime(v)}
+            </div>
+            <div style={{ color: "var(--text-tertiary)", fontSize: 12, marginTop: 2 }}>
+              {relative(v)}
+            </div>
+          </div>
         );
       },
     },
     {
       title: "最近一次",
       key: "lastRun",
-      width: 110,
+      width: 140,
       render: (_, record) => {
         const r = details[record.id]?.lastRun;
         if (!r) {
           return <span style={{ color: "var(--text-quaternary)" }}>—</span>;
         }
-        return <StatusTag status={r.status} />;
+        return (
+          <div>
+            <StatusBadge status={r.status} />
+            <div style={{ color: "var(--text-tertiary)", fontSize: 12, marginTop: 2 }}>
+              {relative(r.triggered_at)}
+            </div>
+          </div>
+        );
       },
     },
     {
       title: "操作",
       key: "actions",
-      width: 180,
+      width: 110,
       render: (_, record) => (
-        <Space size="small">
-          <Button
-            size="small"
-            type="link"
-            onClick={() => navigate(`/admin/projects/${record.id}`)}
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <Tooltip title={record.schedule_enabled ? "暂停本次调度" : "立即执行"}>
+            <Button
+              type="text"
+              size="small"
+              icon={
+                record.schedule_enabled ? (
+                  <PauseOutlined style={{ color: "var(--text-tertiary)" }} />
+                ) : (
+                  <PlayCircleOutlined style={{ color: "var(--brand-blue)" }} />
+                )
+              }
+              onClick={() => onToggle(record, !record.schedule_enabled)}
+            />
+          </Tooltip>
+          <Tooltip title="立即执行">
+            <Button
+              type="text"
+              size="small"
+              icon={<ThunderboltOutlined style={{ color: "var(--brand-blue)" }} />}
+              onClick={() => onTrigger(record)}
+            />
+          </Tooltip>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: "open",
+                  label: "打开",
+                  onClick: () => navigate(`/admin/projects/${record.id}`),
+                },
+                { type: "divider" },
+                {
+                  key: "trigger",
+                  label: "立即执行",
+                  onClick: () => onTrigger(record),
+                },
+              ],
+            }}
+            trigger={["click"]}
           >
-            打开
-          </Button>
-          <Button
-            size="small"
-            type="link"
-            icon={<ThunderboltOutlined />}
-            onClick={() => onTrigger(record)}
-          >
-            立即执行
-          </Button>
-        </Space>
+            <Button type="text" size="small" icon={<MoreOutlined />} />
+          </Dropdown>
+        </div>
       ),
     },
   ];
@@ -324,12 +478,19 @@ export default function ProjectsList() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 600, margin: 0 }}>监控项目</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text-primary)" }}>
+            监控项目
+          </h1>
           <div style={{ fontSize: 13, color: "var(--text-tertiary)", marginTop: 4 }}>
-            配置监控问题、AI 模型、品牌关键字、竞品与每日调度时间
+            配置监控问题、配置调度、查看执行历史
           </div>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={openCreate}
+          style={{ background: "var(--brand-blue)", borderColor: "var(--brand-blue)" }}
+        >
           新建项目
         </Button>
       </div>
@@ -341,19 +502,20 @@ export default function ProjectsList() {
             gap: 12,
             marginBottom: 12,
             flexWrap: "wrap",
+            alignItems: "center",
           }}
         >
           <Input.Search
-            placeholder="搜索项目名 / 编号"
+            placeholder="搜索项目名 / 关键词"
             allowClear
-            style={{ width: 240 }}
+            style={{ width: 280 }}
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={(v) => setKeyword(v)}
           />
           <Select
             placeholder="全部客户"
             allowClear
-            style={{ width: 200 }}
+            style={{ width: 180 }}
             value={customerFilter}
             onChange={(v) => setCustomerFilter(v)}
             options={customers.map((c) => ({ value: c.id, label: c.name }))}
@@ -361,7 +523,7 @@ export default function ProjectsList() {
             optionFilterProp="label"
           />
           <Select
-            placeholder="项目状态"
+            placeholder="全部状态"
             allowClear
             style={{ width: 140 }}
             value={statusFilter}
@@ -382,7 +544,7 @@ export default function ProjectsList() {
             pageSize,
             total,
             showSizeChanger: false,
-            showTotal: (t) => `共 ${t} 个项目`,
+            showTotal: (t) => `共 ${t} 条 · 每页 ${pageSize} 条`,
             onChange: (p) => {
               setPage(p);
               load(p);
