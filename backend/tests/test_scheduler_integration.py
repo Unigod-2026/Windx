@@ -137,14 +137,18 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
 
     project_id = _create_project()
 
+    counter = {"i": 0}
+
     async def fake_submit(self, payload):
+        counter["i"] += 1
+        i = counter["i"]
         return {
-            "taskId": "remote-1",
+            "taskId": f"remote-{i}",
             "status": "pending",
             "totalTask": 1,
             "subTaskList": [
                 {
-                    "subTaskId": "sub-1",
+                    "subTaskId": f"sub-{i}",
                     "prompt": "first question",
                     "platform": "deepseek",
                     "mode": "search",
@@ -156,7 +160,7 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
     monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
 
     # First cron call at 09:00 lands in bucket 0 → real run.
-    with freeze_time("2026-08-07 09:00:00", tz_offset=8):
+    with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
         first_run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
     assert first_run_id is not None
     with TestSessionLocal() as db:
@@ -165,7 +169,7 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
         assert first.cooldown_key == "project-1-slot-1-20260807090"
 
     # 09:04 is still bucket 0 → manual trigger collides on the unique index.
-    with freeze_time("2026-08-07 09:04:00", tz_offset=8):
+    with freeze_time("2026-08-07 09:04:00", tz_offset=-8):
         second_run_id = scheduler.run_project(project_id, 1, RunTrigger.MANUAL)
     assert second_run_id is None
     skipped_id = _record_skipped_run(project_id, 1)
@@ -174,7 +178,7 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
         assert skipped.status == RunStatus.SKIPPED
 
     # Jump past the bucket boundary (09:05 → bucket 1) → fresh run.
-    with freeze_time("2026-08-07 09:05:00", tz_offset=8):
+    with freeze_time("2026-08-07 09:05:00", tz_offset=-8):
         third_run_id = scheduler.run_project(project_id, 1, RunTrigger.MANUAL)
     assert third_run_id is not None
     assert third_run_id != first_run_id
@@ -204,9 +208,13 @@ def test_freezegun_cooldown_does_not_cross_slots(monkeypatch):
 
     project_id = _create_project()
 
+    counter = {"i": 0}
+
     async def fake_submit(self, payload):
+        counter["i"] += 1
+        i = counter["i"]
         return {
-            "taskId": "remote-1",
+            "taskId": f"remote-{i}",
             "status": "pending",
             "totalTask": 0,
             "subTaskList": [],
@@ -214,7 +222,7 @@ def test_freezegun_cooldown_does_not_cross_slots(monkeypatch):
 
     monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
 
-    with freeze_time("2026-08-07 09:00:00", tz_offset=8):
+    with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
         run_one = scheduler.run_project(project_id, 1, RunTrigger.CRON)
         run_two = scheduler.run_project(project_id, 2, RunTrigger.CRON)
 
@@ -245,9 +253,13 @@ def test_freezegun_run_records_timestamps_in_shanghai(monkeypatch):
 
     project_id = _create_project()
 
+    counter = {"i": 0}
+
     async def fake_submit(self, payload):
+        counter["i"] += 1
+        i = counter["i"]
         return {
-            "taskId": "remote-1",
+            "taskId": f"remote-{i}",
             "status": "pending",
             "totalTask": 0,
             "subTaskList": [],
@@ -255,7 +267,7 @@ def test_freezegun_run_records_timestamps_in_shanghai(monkeypatch):
 
     monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
 
-    with freeze_time("2026-08-07 09:00:00", tz_offset=8):
+    with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
         run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
     assert run_id is not None
 
