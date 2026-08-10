@@ -1,5 +1,4 @@
 import {
-  Alert,
   Button,
   Input,
   InputNumber,
@@ -89,8 +88,18 @@ function Chip(props: {
       onClick={onClick}
       style={
         placeholder
-          ? { ...baseStyle, background: "#fafafa", border: "1px dashed var(--border-strong)", color: "var(--text-quaternary)" }
-          : { ...baseStyle, background: "#eff6ff", border: "1px solid #bfdbfe", color: "var(--brand-blue)" }
+          ? {
+              ...baseStyle,
+              background: "#fafafa",
+              border: "1px dashed var(--border-strong)",
+              color: "var(--text-quaternary)",
+            }
+          : {
+              ...baseStyle,
+              background: "#eff6ff",
+              border: "1px solid #bfdbfe",
+              color: "var(--brand-blue)",
+            }
       }
     >
       {text}
@@ -107,14 +116,18 @@ function Chip(props: {
   );
 }
 
-function SectionTitle(props: { title: string; required?: boolean; extra?: React.ReactNode }) {
+function SectionTitle(props: {
+  title: string;
+  required?: boolean;
+  extra?: React.ReactNode;
+}) {
   return (
     <div
       style={{
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        marginBottom: 10,
+        marginBottom: 8,
       }}
     >
       <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>
@@ -130,9 +143,10 @@ function Field(props: {
   label: string;
   extra?: React.ReactNode;
   children: React.ReactNode;
+  style?: React.CSSProperties;
 }) {
   return (
-    <div style={{ marginBottom: 18 }}>
+    <div style={{ marginBottom: 14, ...props.style }}>
       <div
         style={{
           display: "flex",
@@ -174,14 +188,13 @@ export default function BatchQuestionModal({
   const [brand, setBrand] = useState("");
   const [questions, setQuestions] = useState("");
   const [keywords, setKeywords] = useState<string[]>([]);
-  const [productBrands, setProductBrands] = useState<string[]>([]);
   const [platforms, setPlatforms] = useState<Record<string, PlatformCardConfig>>({});
   const [modelFilterAll, setModelFilterAll] = useState(true);
   const [thinkingMode, setThinkingMode] = useState(false);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [comboMode, setComboMode] = useState(false);
 
-  const [frequency, setFrequency] = useState<"daily" | "once">("daily");
+  const [frequency, setFrequency] = useState<"start" | "daily">("daily");
   const [dayInterval, setDayInterval] = useState(1);
   const [questionPosition, setQuestionPosition] = useState<"national_random" | "fixed">(
     "national_random",
@@ -189,11 +202,11 @@ export default function BatchQuestionModal({
   const [regionCodesText, setRegionCodesText] = useState("");
   const [sentiment, setSentiment] = useState<"on" | "off">("on");
   const [ranking, setRanking] = useState("overall");
-  const [region, setRegion] = useState<string>("national");
+  const [pushCustomer, setPushCustomer] = useState<string | undefined>(undefined);
+  const [migrate, setMigrate] = useState(false);
 
   const [competitorDraft, setCompetitorDraft] = useState("");
   const [keywordDraft, setKeywordDraft] = useState("");
-  const [productDraft, setProductDraft] = useState("");
   const [editingCompetitor, setEditingCompetitor] = useState<CompetitorOut | null>(null);
 
   useEffect(() => {
@@ -204,7 +217,6 @@ export default function BatchQuestionModal({
     setBrand("");
     setQuestions("");
     setKeywords([]);
-    setProductBrands([]);
     setPlatforms({});
     setQuestionPosition("national_random");
     setRegionCodesText("");
@@ -212,7 +224,8 @@ export default function BatchQuestionModal({
     setFrequency("daily");
     setDayInterval(1);
     setRanking("overall");
-    setRegion("national");
+    setPushCustomer(undefined);
+    setMigrate(false);
 
     if (projectId === undefined) return;
     setLoading(true);
@@ -236,11 +249,13 @@ export default function BatchQuestionModal({
           }
           return init;
         });
-        setFrequency(d.schedule_enabled ? "daily" : "once");
+        setFrequency(d.schedule_enabled ? "daily" : "start");
         setQuestionPosition(d.region_strategy);
         setRegionCodesText((d.region_codes ?? []).join(","));
         setSentiment(d.sentiment_enabled ? "on" : "off");
-        const comp = await listCompetitors(projectId).catch(() => ({ items: [] as CompetitorOut[] }));
+        const comp = await listCompetitors(projectId).catch(() => ({
+          items: [] as CompetitorOut[],
+        }));
         setCompetitors(comp.items);
       } catch (err) {
         message.error((err as Error).message || "加载失败");
@@ -286,12 +301,6 @@ export default function BatchQuestionModal({
     if (!v || keywords.includes(v)) return;
     setKeywords([...keywords, v]);
     setKeywordDraft("");
-  };
-  const addProduct = () => {
-    const v = productDraft.trim();
-    if (!v || productBrands.includes(v)) return;
-    setProductBrands([...productBrands, v]);
-    setProductDraft("");
   };
 
   // ---- competitor CRUD via API (must persist) ----
@@ -374,7 +383,7 @@ export default function BatchQuestionModal({
         region_codes: regionCodes,
       });
       await putPrompts(data.id, questionList);
-      await putKeywords(data.id, [...keywords, ...productBrands]);
+      await putKeywords(data.id, keywords);
       await putPlatforms(data.id, platformsOut);
       message.success("已保存为草稿");
       onSaved();
@@ -403,9 +412,9 @@ export default function BatchQuestionModal({
         region_codes: regionCodes,
       });
       await putPrompts(data.id, questionList);
-      await putKeywords(data.id, [...keywords, ...productBrands]);
+      await putKeywords(data.id, keywords);
       await putPlatforms(data.id, platformsOut);
-      if (frequency === "once") {
+      if (frequency === "start") {
         await updateSchedule(data.id, { schedule_enabled: false, slots: [] });
       } else if (data.slots.length > 0) {
         const slots: SlotOut[] = data.slots;
@@ -442,7 +451,7 @@ export default function BatchQuestionModal({
       open={open}
       onCancel={onClose}
       footer={null}
-      width={960}
+      width={1100}
       centered
       closable={false}
       destroyOnClose
@@ -452,23 +461,23 @@ export default function BatchQuestionModal({
       }}
       maskStyle={{ background: "rgba(15, 23, 42, 0.45)" }}
     >
-      {/* ===== dark navy header bar ===== */}
+      {/* ===== light header bar ===== */}
       <div
         style={{
-          background: "linear-gradient(180deg, #0a2540 0%, #0f172a 100%)",
-          color: "#fff",
-          padding: "16px 24px",
+          background: "#fff",
+          padding: "14px 24px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          borderBottom: "1px solid var(--border-light)",
         }}
       >
-        <div style={{ fontSize: 18, fontWeight: 500, letterSpacing: 0.5 }}>
+        <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
           {isEdit ? "编辑监控项目" : "批量添加问题"}
         </div>
         <Button
           type="text"
-          icon={<CloseOutlined style={{ color: "#fff", fontSize: 18 }} />}
+          icon={<CloseOutlined style={{ color: "var(--text-tertiary)", fontSize: 16 }} />}
           onClick={onClose}
         />
       </div>
@@ -476,13 +485,13 @@ export default function BatchQuestionModal({
       {/* ===== body ===== */}
       <div
         style={{
-          padding: "20px 24px",
-          maxHeight: "calc(100vh - 240px)",
+          padding: "16px 24px",
+          maxHeight: "calc(100vh - 200px)",
           overflowY: "auto",
           background: "#f5f6f8",
         }}
       >
-        {/* ----- top section: 3-col grid ----- */}
+        {/* ========== Top card: 监控名称/品牌 | 模型选择 ========== */}
         <div
           style={{
             background: "#fff",
@@ -491,35 +500,28 @@ export default function BatchQuestionModal({
             marginBottom: 16,
           }}
         >
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "200px 200px 1fr",
-              gap: 20,
-              alignItems: "start",
-            }}
-          >
-            {/* 监控名称 */}
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 20 }}>
+            {/* LEFT: 监控名称 + 监控品牌 */}
             <div>
-              <SectionTitle title="监控名称" required />
-              <Input
-                placeholder="请输入监控名称"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                size="middle"
-              />
+              <div style={{ marginBottom: 14 }}>
+                <SectionTitle title="监控名称" required />
+                <Input
+                  placeholder="请输入监控名称"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              <div>
+                <SectionTitle title="监控品牌" required />
+                <Input
+                  placeholder="点击添加监控品牌"
+                  value={brand}
+                  onChange={(e) => setBrand(e.target.value)}
+                />
+              </div>
             </div>
-            {/* 监控品牌 */}
-            <div>
-              <SectionTitle title="监控品牌" required />
-              <Input
-                placeholder="点击添加监控品牌"
-                value={brand}
-                onChange={(e) => setBrand(e.target.value)}
-                size="middle"
-              />
-            </div>
-            {/* 模型选择 */}
+
+            {/* RIGHT: 模型选择 */}
             <div>
               <SectionTitle
                 title="模型选择"
@@ -531,15 +533,11 @@ export default function BatchQuestionModal({
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 6,
-                        fontSize: 13,
+                        fontSize: 12,
                         color: "var(--text-secondary)",
                       }}
                     >
-                      <Switch
-                        size="small"
-                        checked={modelFilterAll}
-                        onChange={setModelFilterAll}
-                      />
+                      <Switch size="small" checked={modelFilterAll} onChange={setModelFilterAll} />
                       全部模型
                     </span>
                     <Button
@@ -572,12 +570,7 @@ export default function BatchQuestionModal({
                     >
                       拍照助手
                     </Button>
-                    <span
-                      style={{
-                        position: "relative",
-                        display: "inline-block",
-                      }}
-                    >
+                    <span style={{ position: "relative", display: "inline-block" }}>
                       <Button
                         size="small"
                         type={comboMode ? "primary" : "default"}
@@ -605,6 +598,7 @@ export default function BatchQuestionModal({
                           borderRadius: 3,
                           fontWeight: 500,
                           lineHeight: 1.2,
+                          border: comboMode ? "1px solid var(--brand-blue)" : "none",
                         }}
                       >
                         Step组合
@@ -625,7 +619,7 @@ export default function BatchQuestionModal({
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(4, 1fr)",
+                  gridTemplateColumns: "repeat(3, 1fr)",
                   gap: 8,
                 }}
               >
@@ -703,21 +697,20 @@ export default function BatchQuestionModal({
           </div>
         </div>
 
-        {/* ----- middle section: 2-col body ----- */}
+        {/* ========== Middle card: chips/textarea | settings ========== */}
         <div
           style={{
             background: "#fff",
             borderRadius: 8,
             padding: 20,
             display: "grid",
-            gridTemplateColumns: "1fr 280px",
+            gridTemplateColumns: "minmax(0, 1fr) 280px",
             gap: 20,
           }}
         >
-          {/* Left column */}
+          {/* LEFT: 竞品品牌 / 核心词 / 监控问题 */}
           <div>
-            {/* 竞品品牌 */}
-            <div style={{ marginBottom: 18 }}>
+            <div style={{ marginBottom: 14 }}>
               <SectionTitle
                 title="竞品品牌"
                 extra={
@@ -757,46 +750,7 @@ export default function BatchQuestionModal({
               />
             </div>
 
-            {/* 商品品牌 */}
-            <div style={{ marginBottom: 18 }}>
-              <SectionTitle
-                title="商品品牌"
-                extra={
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<PlusOutlined />}
-                    onClick={addProduct}
-                  >
-                    新增
-                  </Button>
-                }
-              />
-              <Space size={6} wrap style={{ marginBottom: 8 }}>
-                {productBrands.length === 0 ? (
-                  <Chip text="暂未添加" placeholder />
-                ) : (
-                  productBrands.map((b) => (
-                    <Chip
-                      key={b}
-                      text={b}
-                      onRemove={() => setProductBrands(productBrands.filter((x) => x !== b))}
-                    />
-                  ))
-                )}
-              </Space>
-              <Input
-                placeholder="请输入商品品牌"
-                value={productDraft}
-                onChange={(e) => setProductDraft(e.target.value)}
-                onPressEnter={addProduct}
-                style={{ maxWidth: 280 }}
-                size="small"
-              />
-            </div>
-
-            {/* 核心词 */}
-            <div style={{ marginBottom: 18 }}>
+            <div style={{ marginBottom: 14 }}>
               <SectionTitle
                 title="核心词"
                 extra={
@@ -833,7 +787,6 @@ export default function BatchQuestionModal({
               />
             </div>
 
-            {/* 监控问题 */}
             <div>
               <SectionTitle title="监控问题" required />
               <Input.TextArea
@@ -858,7 +811,7 @@ export default function BatchQuestionModal({
             </div>
           </div>
 
-          {/* Right column: settings panel */}
+          {/* RIGHT: settings panel */}
           <div>
             <div
               style={{
@@ -883,20 +836,15 @@ export default function BatchQuestionModal({
                 保存
               </Button>
 
-              {/* 循环频次 */}
-              <div style={{ marginBottom: 18 }}>
-                <div
-                  style={{ fontSize: 13, color: "var(--text-tertiary)", marginBottom: 8 }}
-                >
-                  循环频次
-                </div>
+              {/* 监控频次 */}
+              <Field label="监控频次">
                 <Segmented
                   block
                   value={frequency}
-                  onChange={(v) => setFrequency(v as "daily" | "once")}
+                  onChange={(v) => setFrequency(v as "start" | "daily")}
                   options={[
-                    { label: "每日重复", value: "daily" },
-                    { label: "单次执行", value: "once" },
+                    { label: "开始", value: "start" },
+                    { label: "每日", value: "daily" },
                   ]}
                 />
                 <div
@@ -908,18 +856,16 @@ export default function BatchQuestionModal({
                   }}
                 >
                   <InputNumber
-                    min={1}
+                    min={0}
                     max={30}
                     value={dayInterval}
-                    onChange={(v) => setDayInterval(Number(v ?? 1))}
-                    style={{ width: 80 }}
-                    disabled={frequency === "once"}
+                    onChange={(v) => setDayInterval(Number(v ?? 0))}
+                    style={{ width: "100%" }}
+                    disabled={frequency === "start"}
                   />
-                  <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                    天 / 次
-                  </span>
+                  <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>天</span>
                 </div>
-              </div>
+              </Field>
 
               <Field label="提问位置">
                 <Select
@@ -954,12 +900,7 @@ export default function BatchQuestionModal({
                 />
               </Field>
 
-              <Field
-                label="排名设置"
-                extra={
-                  <a style={{ fontSize: 12, color: "var(--brand-blue)" }}>+ 退出客户</a>
-                }
-              >
+              <Field label="排名设置">
                 <Select
                   value={ranking}
                   onChange={setRanking}
@@ -972,29 +913,39 @@ export default function BatchQuestionModal({
                 />
               </Field>
 
-              <Field label="区域设置">
+              <Field
+                label="推送客户"
+                extra={
+                  <a style={{ fontSize: 12, color: "var(--brand-blue)" }}>+ 新增客户</a>
+                }
+              >
                 <Select
-                  placeholder="请选择区域"
-                  value={region}
-                  onChange={setRegion}
+                  placeholder="选择客户"
+                  value={pushCustomer}
+                  onChange={setPushCustomer}
+                  allowClear
                   options={[
-                    { value: "national", label: "全国" },
-                    { value: "north", label: "华北" },
-                    { value: "east", label: "华东" },
-                    { value: "south", label: "华南" },
-                    { value: "northwest", label: "西北" },
+                    { value: "acme", label: "ACME 集团" },
+                    { value: "beta", label: "Beta 科技" },
                   ]}
                   style={{ width: "100%" }}
                 />
               </Field>
 
-              <Alert
-                type="info"
-                showIcon
-                icon={<InfoCircleOutlined />}
-                message="修改后点击保存生效"
-                style={{ marginTop: 8, fontSize: 12, padding: "6px 10px" }}
-              />
+              <Field
+                label="迁移设置"
+                style={{ marginBottom: 0 }}
+                extra={
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Switch size="small" checked={migrate} onChange={setMigrate} />
+                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>同步</span>
+                  </span>
+                }
+              >
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                  {migrate ? "已开启同步" : "未开启同步"}
+                </div>
+              </Field>
             </div>
           </div>
         </div>
@@ -1024,9 +975,7 @@ export default function BatchQuestionModal({
           <span style={{ fontSize: 16, fontWeight: 600, color: "var(--brand-blue)" }}>
             ¥0.00
           </span>
-          <span style={{ color: "var(--text-tertiary)" }}>
-            / 次 · {subtasks} 个子任务
-          </span>
+          <span style={{ color: "var(--text-tertiary)" }}>/ 次</span>
           <Tooltip title="按当前问题 × 模型 计算,实际费用以远端 API 报价为准">
             <InfoCircleOutlined style={{ color: "var(--text-tertiary)" }} />
           </Tooltip>
@@ -1034,7 +983,7 @@ export default function BatchQuestionModal({
         <Space size={10}>
           <Button onClick={onClose}>取消</Button>
           <Button onClick={saveDraft} disabled={!data}>
-            保存草稿 ({subtasks})
+            保存草稿({subtasks}份待存)
           </Button>
           <Button
             type="primary"
