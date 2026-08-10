@@ -121,7 +121,20 @@ async def test_project_crud_and_config_tabs(client, h):
     data = r.json()
     assert data["prompts"] == ["q1", "q2"]
     assert data["keywords"] == ["k1"]
-    assert data["platforms"] == [{"platform": "deepseek", "mode": "search", "screenshot": 1}]
+    assert data["platforms"] == [
+        {
+            "id": data["platforms"][0]["id"],
+            "platform": "deepseek",
+            "mode": "search",
+            "delivery_mode": "web",
+            "thinking_mode": False,
+            "screenshot": 1,
+        }
+    ]
+    # 需求文档 §4 默认字段
+    assert data["sentiment_enabled"] is False
+    assert data["region_strategy"] == "fixed"
+    assert data["region_codes"] is None
 
 
 @pytest.mark.asyncio
@@ -317,4 +330,29 @@ async def test_platforms_roundtrip_multiple(client, h):
     r = await client.put(f"/api/projects/{pid}/platforms", json={"platforms": payload}, headers=h)
     assert r.json() == {"ok": True, "count": 2}
     r = await client.get(f"/api/projects/{pid}", headers=h)
-    assert r.json()["platforms"] == payload
+    platforms = r.json()["platforms"]
+    assert [p["platform"] for p in platforms] == ["deepseek", "doubao"]
+    assert [p["screenshot"] for p in platforms] == [1, 0]
+    assert [p["delivery_mode"] for p in platforms] == ["web", "web"]
+    assert [p["thinking_mode"] for p in platforms] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_platforms_roundtrip_with_thinking_and_mobile(client, h):
+    """需求文档 §3: each platform row carries delivery_mode + thinking_mode."""
+    cid = await _customer(client, h)
+    pid = await _project(client, h, cid)
+    payload = [
+        {
+            "platform": "deepseek",
+            "mode": "mobile",
+            "delivery_mode": "mobile",
+            "thinking_mode": True,
+            "screenshot": 0,
+        },
+    ]
+    r = await client.put(f"/api/projects/{pid}/platforms", json={"platforms": payload}, headers=h)
+    assert r.status_code == 200, r.text
+    r = await client.get(f"/api/projects/{pid}", headers=h)
+    assert r.json()["platforms"][0]["delivery_mode"] == "mobile"
+    assert r.json()["platforms"][0]["thinking_mode"] is True

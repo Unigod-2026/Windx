@@ -13,7 +13,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ProjectStatus, RunStatus, RunTrigger
+from app.models.enums import (
+    DeliveryMode,
+    ProjectStatus,
+    RegionStrategy,
+    RunStatus,
+    RunTrigger,
+)
 
 
 class SlotIn(BaseModel):
@@ -30,9 +36,28 @@ class SlotOut(BaseModel):
 
 
 class PlatformIn(BaseModel):
+    """One AI platform + the multi-dimensional config from the 需求 doc §3.
+
+    ``mode`` is kept for backwards compatibility but is no longer the
+    source of truth; new code reads ``delivery_mode`` + ``thinking_mode``.
+    """
+
     platform: str = Field(..., min_length=1, max_length=32)
-    mode: str = Field(..., min_length=1, max_length=32)
+    mode: str = Field(default="web", min_length=1, max_length=32)
+    delivery_mode: DeliveryMode = DeliveryMode.WEB
+    thinking_mode: bool = False
     screenshot: int = Field(default=0, ge=0, le=1)
+
+
+class PlatformOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    platform: str
+    mode: str
+    delivery_mode: DeliveryMode
+    thinking_mode: bool
+    screenshot: int
 
 
 class ProjectCreate(BaseModel):
@@ -41,6 +66,9 @@ class ProjectCreate(BaseModel):
     description: str | None = None
     schedule_enabled: bool = False
     slots: list[SlotIn] = Field(default_factory=list, max_length=2)
+    sentiment_enabled: bool = False
+    region_strategy: RegionStrategy = RegionStrategy.FIXED
+    region_codes: list[str] | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -49,6 +77,9 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = None
     status: ProjectStatus | None = None
+    sentiment_enabled: bool | None = None
+    region_strategy: RegionStrategy | None = None
+    region_codes: list[str] | None = None
 
 
 class ProjectOut(BaseModel):
@@ -63,6 +94,9 @@ class ProjectOut(BaseModel):
     schedule_enabled: bool
     slots: list[SlotOut] = Field(default_factory=list)
     next_run_at: datetime | None = None
+    sentiment_enabled: bool
+    region_strategy: RegionStrategy
+    region_codes: list[str] | None
     created_at: datetime
     updated_at: datetime
 
@@ -70,7 +104,7 @@ class ProjectOut(BaseModel):
 class ProjectDetailOut(ProjectOut):
     prompts: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
-    platforms: list[PlatformIn] = Field(default_factory=list)
+    platforms: list[PlatformOut] = Field(default_factory=list)
 
 
 class ProjectListOut(BaseModel):
@@ -171,3 +205,30 @@ class ProjectTaskListOut(BaseModel):
     total: int
     page: int
     size: int
+
+
+# --------------------------------------------------------------------------
+# Competitors (user-defined seed list per project)
+# --------------------------------------------------------------------------
+
+
+class CompetitorIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=255)
+
+
+class CompetitorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    note: str | None
+    sort: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompetitorListOut(BaseModel):
+    items: list[CompetitorOut]
+    total: int

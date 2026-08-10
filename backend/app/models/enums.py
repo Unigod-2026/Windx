@@ -52,3 +52,21 @@ class CallbackProcessStatus(str, Enum):
     PROCESSED = "processed"
     DUPLICATE = "duplicate"
     FAILED = "failed"
+
+
+class RegionStrategy(str, Enum):
+    """How ``run_project`` picks region codes for the remote submit.
+
+    - ``FIXED``: use the project's ``region_codes`` list verbatim.
+    - ``NATIONAL_RANDOM``: pick a random subset from a national pool.
+    """
+
+    FIXED = "fixed"
+    NATIONAL_RANDOM = "national_random"
+
+
+class DeliveryMode(str, Enum):
+    """Which surface the remote AI platform should answer from."""
+
+    WEB = "web"
+    MOBILE = "mobile"

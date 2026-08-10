@@ -174,7 +174,7 @@ def test_run_project_submits_project_configuration_and_persists_results(monkeypa
     assert captured["payload"] == {
         "prompts": ["first question", "second question"],
         "platforms": [
-            {"platform": "deepseek", "mode": "search", "screenshot": 1}
+            {"platform": "deepseek", "mode": "web", "screenshot": 1, "thinkingMode": False}
         ],
         "monitorKeywords": "alpha,beta",
         "callbackUrl": "https://callback.test/hook",
@@ -190,7 +190,7 @@ def test_run_project_submits_project_configuration_and_persists_results(monkeypa
         assert task.task_id == "remote-1"
         assert task.prompts_json == ["first question", "second question"]
         assert task.platforms_json == [
-            {"platform": "deepseek", "mode": "search", "screenshot": 1}
+            {"platform": "deepseek", "mode": "web", "screenshot": 1, "thinkingMode": False}
         ]
         assert task.total_items == 1
         assert task.raw_request_json == captured["payload"]

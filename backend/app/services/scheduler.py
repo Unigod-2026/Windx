@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import datetime
 from functools import partial
 
@@ -10,11 +11,26 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session_factory
 from app.models.common import now_local
-from app.models.enums import RunStatus, RunTrigger
+from app.models.enums import RegionStrategy, RunStatus, RunTrigger
 from app.models.project import Project
 from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.services.molizhishu_client import MolizhishuClient
+
+
+# Province-level codes used when a project's ``region_strategy`` is
+# ``NATIONAL_RANDOM``. Eight major provinces cover the four macro regions;
+# the Molizhishu API accepts at most one element so we sample one per run.
+NATIONAL_RANDOM_POOL: tuple[str, ...] = (
+    "110000",  # 北京
+    "310000",  # 上海
+    "330000",  # 浙江
+    "320000",  # 江苏
+    "440000",  # 广东
+    "510000",  # 四川
+    "420000",  # 湖北
+    "370000",  # 山东
+)
 
 
 def cooldown_key(project_id: int, slot_index: int, when: datetime) -> str:
@@ -24,10 +40,32 @@ def cooldown_key(project_id: int, slot_index: int, when: datetime) -> str:
     )
 
 
+def _resolve_region_code(project: Project, *, rand: random.Random | None = None) -> str | None:
+    """Pick the region code that ``run_project`` will send to the remote.
+
+    - ``FIXED`` + ``region_codes`` set → first element
+    - ``NATIONAL_RANDOM`` → one sampled from the national pool
+    - otherwise → ``None`` (the API accepts an unset regionCode)
+    """
+    if project.region_strategy is RegionStrategy.FIXED:
+        if project.region_codes:
+            return project.region_codes[0]
+        return None
+    sampler = rand or random
+    return sampler.choice(NATIONAL_RANDOM_POOL)
+
+
 def run_project(
-    project_id: int, slot_index: int, trigger_type: str | RunTrigger
+    project_id: int,
+    slot_index: int,
+    trigger_type: str | RunTrigger,
+    *,
+    rand: random.Random | None = None,
 ) -> int | None:
-    """Submit one project run and persist its local task summary."""
+    """Submit one project run and persist its local task summary.
+
+    ``rand`` is injectable so tests can pin the "national random" pick.
+    """
     db = get_session_factory()()
     now = now_local()
     run = ScheduleRun(
@@ -66,11 +104,16 @@ def run_project(
         if not prompts:
             raise RuntimeError("prompts 为空")
         keywords = [item.keyword for item in project.keywords]
+        # Use the multi-dimensional config (需求文档 §3) instead of the
+        # legacy ``mode`` string. Remote expects delivery_mode + thinking
+        # as nested flags; we forward both so the answer surface + reasoning
+        # mode can be controlled per platform row.
         platforms = [
             {
                 "platform": item.platform,
-                "mode": item.mode,
+                "mode": item.delivery_mode.value,
                 "screenshot": item.screenshot,
+                "thinkingMode": item.thinking_mode,
             }
             for item in project.platforms
         ]
@@ -78,11 +121,14 @@ def run_project(
             raise RuntimeError("platforms 为空")
 
         settings = get_settings()
-        payload = {"prompts": prompts, "platforms": platforms}
+        payload: dict = {"prompts": prompts, "platforms": platforms}
         if keywords:
             payload["monitorKeywords"] = ",".join(keywords)
         if settings.molizhishu_callback_url:
             payload["callbackUrl"] = settings.molizhishu_callback_url
+        region = _resolve_region_code(project, rand=rand)
+        if region:
+            payload["regionCode"] = [region]
 
         client = MolizhishuClient(
             settings.molizhishu_base_url,
@@ -96,6 +142,7 @@ def run_project(
             status=data.get("status", "pending"),
             prompts_json=prompts,
             platforms_json=platforms,
+            region_code_json=[region] if region else None,
             callback_url=data.get("callbackUrl"),
             total_items=data.get("totalTask"),
             poll_url=data.get("pollUrl"),

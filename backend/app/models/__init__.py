@@ -23,13 +23,16 @@ from app.models.enums import (  # noqa: F401
     CallbackProcessStatus,
     CompetitorSource,
     CustomerStatus,
+    DeliveryMode,
     ProjectStatus,
+    RegionStrategy,
     RunStatus,
     RunTrigger,
 )
 from app.models.project import (  # noqa: F401
     Competitor,
     Project,
+    ProjectCompetitor,
     ProjectKeyword,
     ProjectPlatform,
     ProjectPrompt,

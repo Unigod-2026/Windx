@@ -28,7 +28,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.common import created_at_column, updated_at_column
-from app.models.enums import CompetitorSource, ProjectStatus
+from app.models.enums import CompetitorSource, DeliveryMode, ProjectStatus, RegionStrategy
 
 if TYPE_CHECKING:
     from app.models.customer import Customer
@@ -72,6 +72,21 @@ class Project(Base):
     slot2_hour: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     slot2_minute: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
+    # Monitoring extensions (需求文档 §3 / §4): sentiment + region strategy.
+    sentiment_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    region_strategy: Mapped[RegionStrategy] = mapped_column(
+        Enum(
+            RegionStrategy,
+            name="region_strategy",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
+        nullable=False,
+        default=RegionStrategy.FIXED,
+    )
+    region_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
 
@@ -93,6 +108,12 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="ProjectPlatform.sort",
+    )
+    project_competitors: Mapped[list["ProjectCompetitor"]] = relationship(
+        "ProjectCompetitor",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="ProjectCompetitor.sort",
     )
     runs: Mapped[list["ScheduleRun"]] = relationship(
         "ScheduleRun", back_populates="project"
@@ -194,7 +215,24 @@ class ProjectPlatform(Base):
         nullable=False,
     )
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Legacy single-axis mode (kept for backwards compatibility with rows
+    # written before the multi-dimensional split).
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    # New multi-dimensional fields (需求文档 §3):
+    #   delivery_mode: web / mobile — which surface to ask from
+    #   thinking_mode: enable reasoning/thinking mode on the remote
+    delivery_mode: Mapped[DeliveryMode] = mapped_column(
+        Enum(
+            DeliveryMode,
+            name="delivery_mode",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
+        nullable=False,
+        default=DeliveryMode.WEB,
+    )
+    thinking_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     screenshot: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -203,8 +241,43 @@ class ProjectPlatform(Base):
     def __repr__(self) -> str:
         return (
             f"<ProjectPlatform id={self.id} platform={self.platform!r} "
-            f"mode={self.mode!r} sort={self.sort}>"
+            f"delivery={self.delivery_mode.value!r} sort={self.sort}>"
         )
+
+
+class ProjectCompetitor(Base):
+    """User-defined competitor seed list for a monitoring project.
+
+    Distinct from the existing ``geo_competitors`` table (Task 9 ingestion):
+    those rows are *auto-extracted* competitor mentions recorded against
+    individual ``geo_tasks``. This table is the project's curated watchlist
+    that the user enters in the UI and that the answer-comparison pipeline
+    will eventually be scored against.
+    """
+
+    __tablename__ = "geo_project_competitors"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_project_competitors_project_name"),
+        Index("ix_project_competitors_project_id", "project_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("geo_projects.id", name="fk_project_competitors_project", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = created_at_column()
+    updated_at: Mapped[datetime] = updated_at_column()
+
+    project: Mapped["Project"] = relationship("Project", back_populates="project_competitors")
+
+    def __repr__(self) -> str:
+        return f"<ProjectCompetitor id={self.id} project_id={self.project_id} name={self.name!r}>"
 
 
 class Competitor(Base):

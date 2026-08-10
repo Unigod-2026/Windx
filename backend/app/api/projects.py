@@ -24,6 +24,7 @@ from app.models.customer import AdminUser, Customer
 from app.models.enums import ProjectStatus, RunStatus, RunTrigger
 from app.models.project import (
     Project,
+    ProjectCompetitor,
     ProjectKeyword,
     ProjectPlatform,
     ProjectPrompt,
@@ -31,6 +32,9 @@ from app.models.project import (
 from app.models.schedule import ScheduleRun
 from app.models.task import Task
 from app.schemas.project import (
+    CompetitorIn,
+    CompetitorListOut,
+    CompetitorOut,
     KeywordsUpdate,
     PlatformsUpdate,
     ProjectCreate,
@@ -116,7 +120,14 @@ def _to_detail(p: Project, db: Session) -> ProjectDetailOut:
             )
         ],
         platforms=[
-            {"platform": r.platform, "mode": r.mode, "screenshot": r.screenshot}
+            {
+                "id": r.id,
+                "platform": r.platform,
+                "mode": r.mode,
+                "delivery_mode": r.delivery_mode,
+                "thinking_mode": r.thinking_mode,
+                "screenshot": r.screenshot,
+            }
             for r in db.scalars(
                 select(ProjectPlatform)
                 .where(ProjectPlatform.project_id == p.id)
@@ -165,6 +176,9 @@ def create_project(
         code=payload.code,
         description=payload.description,
         status=ProjectStatus.ACTIVE,
+        sentiment_enabled=payload.sentiment_enabled,
+        region_strategy=payload.region_strategy,
+        region_codes=payload.region_codes,
     )
     _apply_slots(p, payload.slots, payload.schedule_enabled)
     db.add(p)
@@ -474,3 +488,103 @@ def list_project_tasks(
         page=page,
         size=size,
     )
+
+
+# --------------------------------------------------------------------------
+# Competitors (user-defined seed list per project)
+# --------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_id}/competitors", response_model=CompetitorListOut)
+def list_competitors(
+    project_id: int,
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    _get_project(db, project_id)
+    items = db.scalars(
+        select(ProjectCompetitor)
+        .where(ProjectCompetitor.project_id == project_id)
+        .order_by(ProjectCompetitor.sort, ProjectCompetitor.id)
+    ).all()
+    return CompetitorListOut(
+        items=[CompetitorOut.model_validate(c) for c in items],
+        total=len(items),
+    )
+
+
+@router.post(
+    "/projects/{project_id}/competitors",
+    response_model=CompetitorOut,
+    status_code=201,
+)
+def create_competitor(
+    project_id: int,
+    payload: CompetitorIn,
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    _get_project(db, project_id)
+    next_sort = (
+        db.scalar(
+            select(func.coalesce(func.max(ProjectCompetitor.sort), -1)).where(
+                ProjectCompetitor.project_id == project_id
+            )
+        )
+        or -1
+    ) + 1
+    c = ProjectCompetitor(
+        project_id=project_id,
+        name=payload.name.strip(),
+        note=payload.note,
+        sort=next_sort,
+    )
+    db.add(c)
+    try:
+        db.commit()
+    except IntegrityError:
+        # ``uq_project_competitors_project_name`` — name already in this project.
+        db.rollback()
+        raise HTTPException(400, "competitor name already exists in this project")
+    db.refresh(c)
+    return CompetitorOut.model_validate(c)
+
+
+@router.put(
+    "/projects/{project_id}/competitors/{competitor_id}",
+    response_model=CompetitorOut,
+)
+def update_competitor(
+    project_id: int,
+    competitor_id: int,
+    payload: CompetitorIn,
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    c = db.get(ProjectCompetitor, competitor_id)
+    if not c or c.project_id != project_id:
+        raise HTTPException(404, "competitor not found")
+    c.name = payload.name.strip()
+    c.note = payload.note
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(400, "competitor name already exists in this project")
+    db.refresh(c)
+    return CompetitorOut.model_validate(c)
+
+
+@router.delete("/projects/{project_id}/competitors/{competitor_id}")
+def delete_competitor(
+    project_id: int,
+    competitor_id: int,
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    c = db.get(ProjectCompetitor, competitor_id)
+    if not c or c.project_id != project_id:
+        raise HTTPException(404, "competitor not found")
+    db.delete(c)
+    db.commit()
+    return {"ok": True}
