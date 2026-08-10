@@ -146,7 +146,7 @@ function Field(props: {
   style?: React.CSSProperties;
 }) {
   return (
-    <div style={{ marginBottom: 14, ...props.style }}>
+    <div style={{ marginBottom: 10, ...props.style }}>
       <div
         style={{
           display: "flex",
@@ -176,6 +176,46 @@ function Card(props: { children: React.ReactNode; style?: React.CSSProperties })
     >
       {props.children}
     </div>
+  );
+}
+
+/** Generic small modal used to add or edit a single string (competitor / keyword). */
+function NameEditModal(props: {
+  open: boolean;
+  title: string;
+  initial: string;
+  onCancel: () => void;
+  onConfirm: (value: string) => Promise<void> | void;
+}) {
+  const [value, setValue] = useState(props.initial);
+  useEffect(() => {
+    if (props.open) setValue(props.initial);
+  }, [props.open, props.initial]);
+  return (
+    <Modal
+      open={props.open}
+      title={props.title}
+      okText="确定"
+      cancelText="取消"
+      onCancel={props.onCancel}
+      onOk={async () => {
+        const v = value.trim();
+        if (!v) return;
+        await props.onConfirm(v);
+      }}
+      destroyOnClose
+    >
+      <Input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onPressEnter={async () => {
+          const v = value.trim();
+          if (!v) return;
+          await props.onConfirm(v);
+        }}
+        autoFocus
+      />
+    </Modal>
   );
 }
 
@@ -221,9 +261,15 @@ export default function BatchQuestionModal({
   const [pushCustomer, setPushCustomer] = useState<string | undefined>(undefined);
   const [migrate, setMigrate] = useState(false);
 
-  const [competitorDraft, setCompetitorDraft] = useState("");
-  const [keywordDraft, setKeywordDraft] = useState("");
-  const [editingCompetitor, setEditingCompetitor] = useState<CompetitorOut | null>(null);
+  // competitor / keyword modal state
+  const [competitorModal, setCompetitorModal] = useState<
+    { mode: "add" } | { mode: "edit"; target: CompetitorOut } | null
+  >(null);
+  const [keywordModal, setKeywordModal] = useState<
+    { mode: "add" } | { mode: "edit"; index: number; original: string } | null
+  >(null);
+  // shows the last touched competitor in the read-only input box
+  const [competitorDisplay, setCompetitorDisplay] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -242,6 +288,9 @@ export default function BatchQuestionModal({
     setRanking("overall");
     setPushCustomer(undefined);
     setMigrate(false);
+    setCompetitorDisplay("");
+    setCompetitorModal(null);
+    setKeywordModal(null);
 
     if (projectId === undefined) return;
     setLoading(true);
@@ -311,26 +360,23 @@ export default function BatchQuestionModal({
     });
   };
 
-  // ---- chip handlers ----
-  const addKeyword = () => {
-    const v = keywordDraft.trim();
-    if (!v || keywords.includes(v)) return;
-    setKeywords([...keywords, v]);
-    setKeywordDraft("");
-  };
-
   // ---- competitor CRUD via API (must persist) ----
-  const addCompetitor = async () => {
-    const v = competitorDraft.trim();
-    if (!v || projectId === undefined) return;
+  const confirmCompetitor = async (value: string) => {
+    if (!competitorModal) return;
+    if (projectId === undefined) return;
     try {
-      await createCompetitor(projectId, { name: v });
-      setCompetitorDraft("");
+      if (competitorModal.mode === "add") {
+        await createCompetitor(projectId, { name: value });
+      } else {
+        await updateCompetitor(projectId, competitorModal.target.id, { name: value });
+      }
       const comp = await listCompetitors(projectId);
       setCompetitors(comp.items);
+      setCompetitorDisplay(value);
+      setCompetitorModal(null);
     } catch (err) {
       const e = err as { response?: { data?: { detail?: string } } };
-      message.error(e?.response?.data?.detail || (err as Error).message || "新增失败");
+      message.error(e?.response?.data?.detail || (err as Error).message || "操作失败");
     }
   };
 
@@ -340,22 +386,39 @@ export default function BatchQuestionModal({
       await deleteCompetitor(projectId, id);
       const comp = await listCompetitors(projectId);
       setCompetitors(comp.items);
+      if (competitorDisplay && competitors.find((c) => c.id === id)?.name === competitorDisplay) {
+        setCompetitorDisplay("");
+      }
     } catch (err) {
       message.error((err as Error).message || "删除失败");
     }
   };
 
-  const saveCompetitor = async (initial: CompetitorOut, name: string) => {
-    if (projectId === undefined) return;
-    try {
-      await updateCompetitor(projectId, initial.id, { name });
-      const comp = await listCompetitors(projectId);
-      setCompetitors(comp.items);
-      setEditingCompetitor(null);
-    } catch (err) {
-      const e = err as { response?: { data?: { detail?: string } } };
-      message.error(e?.response?.data?.detail || (err as Error).message || "更新失败");
+  // ---- keyword CRUD (local; persisted via putKeywords on save) ----
+  const confirmKeyword = (value: string) => {
+    if (!keywordModal) return;
+    if (keywordModal.mode === "add") {
+      if (keywords.includes(value)) {
+        message.warning("已存在相同的关键词");
+        setKeywordModal(null);
+        return;
+      }
+      setKeywords([...keywords, value]);
+    } else {
+      const next = [...keywords];
+      if (next[keywordModal.index] !== value && next.includes(value)) {
+        message.warning("已存在相同的关键词");
+        setKeywordModal(null);
+        return;
+      }
+      next[keywordModal.index] = value;
+      setKeywords(next);
     }
+    setKeywordModal(null);
+  };
+
+  const removeKeyword = (index: number) => {
+    setKeywords(keywords.filter((_, i) => i !== index));
   };
 
   // ---- save actions ----
@@ -459,7 +522,8 @@ export default function BatchQuestionModal({
   };
 
   const enabledCount = PLATFORM_CATALOG.filter((m) => platforms[m.name]?.enabled).length;
-  const questionCount = questions.split("\n").filter((s) => s.trim()).length;
+  const questionList = questions.split("\n").map((s) => s.trim()).filter(Boolean);
+  const questionCount = questionList.length;
   const subtasks = questionCount * enabledCount;
 
   return (
@@ -467,7 +531,7 @@ export default function BatchQuestionModal({
       open={open}
       onCancel={onClose}
       footer={null}
-      width={1100}
+      width={1440}
       centered
       closable={false}
       destroyOnClose
@@ -502,8 +566,6 @@ export default function BatchQuestionModal({
       <div
         style={{
           padding: "16px 24px",
-          maxHeight: "calc(100vh - 200px)",
-          overflowY: "auto",
           background: "#f5f6f8",
         }}
       >
@@ -538,23 +600,52 @@ export default function BatchQuestionModal({
               </div>
             </Card>
 
-            {/* ---- Card 2: 竞品品牌 ---- */}
+            {/* ---- Card 2: 竞品品牌 (read-only input + chip list) ---- */}
             <Card>
-              <SectionTitle
-                title="竞品品牌"
-                extra={
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<PlusOutlined />}
-                    onClick={addCompetitor}
-                    disabled={projectId === undefined}
-                  >
-                    新增
-                  </Button>
-                }
-              />
-              <Space size={6} wrap style={{ marginBottom: 8 }}>
+              <SectionTitle title="竞品品牌" />
+              <div style={{ position: "relative", marginBottom: 10 }}>
+                <Input
+                  readOnly
+                  value={competitorDisplay}
+                  placeholder="点击右侧 + 图标添加竞品品牌"
+                  style={{ paddingRight: 38 }}
+                  onClick={() => {
+                    if (projectId === undefined) {
+                      message.info("请先保存项目后再添加竞品");
+                      return;
+                    }
+                    setCompetitorModal({ mode: "add" });
+                  }}
+                />
+                <span
+                  onClick={() => {
+                    if (projectId === undefined) {
+                      message.info("请先保存项目后再添加竞品");
+                      return;
+                    }
+                    setCompetitorModal({ mode: "add" });
+                  }}
+                  style={{
+                    position: "absolute",
+                    right: 10,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    width: 22,
+                    height: 22,
+                    borderRadius: 4,
+                    background: "var(--brand-blue)",
+                    color: "#fff",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: projectId === undefined ? "not-allowed" : "pointer",
+                    opacity: projectId === undefined ? 0.5 : 1,
+                  }}
+                >
+                  <PlusOutlined style={{ fontSize: 12 }} />
+                </span>
+              </div>
+              <Space size={6} wrap>
                 {competitors.length === 0 ? (
                   <Chip text="暂未添加" placeholder />
                 ) : (
@@ -562,26 +653,18 @@ export default function BatchQuestionModal({
                     <Chip
                       key={c.id}
                       text={c.name}
-                      onClick={() => setEditingCompetitor(c)}
+                      onClick={() => setCompetitorModal({ mode: "edit", target: c })}
                       onRemove={() => removeCompetitor(c.id)}
                     />
                   ))
                 )}
               </Space>
-              <Input
-                placeholder="输入竞品名称后回车新增"
-                value={competitorDraft}
-                onChange={(e) => setCompetitorDraft(e.target.value)}
-                onPressEnter={addCompetitor}
-                disabled={projectId === undefined}
-                style={{ maxWidth: 280 }}
-                size="small"
-              />
             </Card>
 
-            {/* ---- Card 3: 核心词 + 监控问题 (split horizontally) ---- */}
+            {/* ---- Card 3: 核心词 (list) + 监控问题 ---- */}
             <Card style={{ marginBottom: 0 }}>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 18 }}>
+                {/* 核心词 list */}
                 <div>
                   <SectionTitle
                     title="核心词"
@@ -590,43 +673,86 @@ export default function BatchQuestionModal({
                         size="small"
                         type="link"
                         icon={<PlusOutlined />}
-                        onClick={addKeyword}
+                        onClick={() => setKeywordModal({ mode: "add" })}
                       >
                         新增
                       </Button>
                     }
                   />
-                  <Space size={6} wrap style={{ marginBottom: 8 }}>
+                  <div
+                    style={{
+                      border: "1px solid var(--border-light)",
+                      borderRadius: 6,
+                      overflow: "hidden",
+                    }}
+                  >
                     {keywords.length === 0 ? (
-                      <Chip text="请输入核心词" placeholder />
+                      <div
+                        style={{
+                          padding: "20px 12px",
+                          textAlign: "center",
+                          color: "var(--text-quaternary)",
+                          fontSize: 13,
+                        }}
+                      >
+                        暂无核心词,点击右上角新增
+                      </div>
                     ) : (
-                      keywords.map((k) => (
-                        <Chip
-                          key={k}
-                          text={k}
-                          onRemove={() => setKeywords(keywords.filter((x) => x !== k))}
-                        />
+                      keywords.map((k, i) => (
+                        <div
+                          key={`${k}-${i}`}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "8px 12px",
+                            borderBottom:
+                              i === keywords.length - 1 ? "none" : "1px solid var(--border-light)",
+                            background: i % 2 === 0 ? "#fff" : "#fafbfc",
+                          }}
+                        >
+                          <span
+                            onClick={() =>
+                              setKeywordModal({ mode: "edit", index: i, original: k })
+                            }
+                            style={{
+                              flex: 1,
+                              fontSize: 13,
+                              color: "var(--text-primary)",
+                              cursor: "pointer",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                            title={k}
+                          >
+                            {k}
+                          </span>
+                          <CloseOutlined
+                            onClick={() => removeKeyword(i)}
+                            style={{
+                              color: "var(--text-tertiary)",
+                              fontSize: 12,
+                              cursor: "pointer",
+                              padding: 4,
+                            }}
+                          />
+                        </div>
                       ))
                     )}
-                  </Space>
-                  <Input
-                    placeholder="输入关键词后回车新增"
-                    value={keywordDraft}
-                    onChange={(e) => setKeywordDraft(e.target.value)}
-                    onPressEnter={addKeyword}
-                    size="small"
-                  />
+                  </div>
                 </div>
 
+                {/* 监控问题 textarea */}
                 <div>
                   <SectionTitle title="监控问题" required />
                   <Input.TextArea
                     placeholder={
-                      "输入要监控的问题，每行一个问题\n例如：\n哪个智能客服系统最好用？\nAI智能和人工客服哪个效果更好？\n如何提升客服效率？"
+                      "每行输入一个监控问题，换行分隔\n例如：\n哪个智能客服系统最好用？\nAI智能和人工客服哪个效果更好？\n如何提升客服效率？"
                     }
                     value={questions}
                     onChange={(e) => setQuestions(e.target.value)}
-                    rows={8}
+                    rows={10}
                     style={{ fontSize: 13, lineHeight: 1.7 }}
                   />
                   <div
@@ -637,7 +763,7 @@ export default function BatchQuestionModal({
                       textAlign: "right",
                     }}
                   >
-                    已输入 {questionCount} 个问题
+                    已输入 {questionCount} 个问题（每行 1 个）
                   </div>
                 </div>
               </div>
@@ -757,13 +883,13 @@ export default function BatchQuestionModal({
                       style={{
                         border: `1px solid ${cfg ? "var(--brand-blue)" : "var(--border-default)"}`,
                         borderRadius: 8,
-                        padding: "8px 6px",
+                        padding: "6px 4px",
                         cursor: "pointer",
                         background: cfg ? "#eff6ff" : "#fff",
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        gap: 3,
+                        gap: 2,
                         transition: "all 0.15s",
                       }}
                     >
@@ -1001,28 +1127,29 @@ export default function BatchQuestionModal({
         </Space>
       </div>
 
-      {/* ===== edit competitor modal ===== */}
-      <Modal
-        open={editingCompetitor !== null}
-        title="编辑竞品"
-        okText="保存"
-        cancelText="取消"
-        onCancel={() => setEditingCompetitor(null)}
-        onOk={async () => {
-          if (!editingCompetitor) return;
-          await saveCompetitor(editingCompetitor, editingCompetitor.name);
-        }}
-        destroyOnClose
-      >
-        {editingCompetitor && (
-          <Input
-            value={editingCompetitor.name}
-            onChange={(e) =>
-              setEditingCompetitor({ ...editingCompetitor, name: e.target.value })
-            }
-          />
-        )}
-      </Modal>
+      {/* ===== competitor add/edit modal ===== */}
+      <NameEditModal
+        open={competitorModal !== null}
+        title={
+          competitorModal?.mode === "edit"
+            ? "编辑竞品品牌"
+            : "新增竞品品牌"
+        }
+        initial={
+          competitorModal?.mode === "edit" ? competitorModal.target.name : ""
+        }
+        onCancel={() => setCompetitorModal(null)}
+        onConfirm={confirmCompetitor}
+      />
+
+      {/* ===== keyword add/edit modal ===== */}
+      <NameEditModal
+        open={keywordModal !== null}
+        title={keywordModal?.mode === "edit" ? "编辑核心词" : "新增核心词"}
+        initial={keywordModal?.mode === "edit" ? keywordModal.original : ""}
+        onCancel={() => setKeywordModal(null)}
+        onConfirm={confirmKeyword}
+      />
     </Modal>
   );
 }
