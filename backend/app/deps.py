@@ -9,6 +9,8 @@ in the DB, which the test fixture creates).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -65,3 +67,16 @@ def require_super_admin(
             status_code=status.HTTP_403_FORBIDDEN, detail="admin disabled"
         )
     return current
+
+
+def create_access_token(sub: str | int) -> str:
+    """Sign a JWT whose ``sub`` is the AdminUser id and ``exp`` is now + ``jwt_expire_days``.
+
+    The frontend stores this in ``localStorage`` and sends it as
+    ``Authorization: Bearer <token>`` on every subsequent call.
+    """
+    payload = {
+        "sub": str(sub),
+        "exp": datetime.now(timezone.utc) + timedelta(days=_settings.jwt_expire_days),
+    }
+    return jwt.encode(payload, _settings.jwt_secret, algorithm=_settings.jwt_algorithm)
