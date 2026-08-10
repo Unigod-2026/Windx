@@ -163,6 +163,22 @@ function Field(props: {
   );
 }
 
+function Card(props: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return (
+    <div
+      style={{
+        background: "#fff",
+        borderRadius: 8,
+        padding: 18,
+        marginBottom: 14,
+        ...props.style,
+      }}
+    >
+      {props.children}
+    </div>
+  );
+}
+
 export interface BatchQuestionModalProps {
   open: boolean;
   /** When undefined the modal is in "create" mode; otherwise it's "edit". */
@@ -491,38 +507,147 @@ export default function BatchQuestionModal({
           background: "#f5f6f8",
         }}
       >
-        {/* ========== Top card: 监控名称/品牌 | 模型选择 ========== */}
         <div
           style={{
-            background: "#fff",
-            borderRadius: 8,
-            padding: 20,
-            marginBottom: 16,
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) 380px",
+            gap: 14,
           }}
         >
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 20 }}>
-            {/* LEFT: 监控名称 + 监控品牌 */}
-            <div>
-              <div style={{ marginBottom: 14 }}>
-                <SectionTitle title="监控名称" required />
-                <Input
-                  placeholder="请输入监控名称"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
+          {/* ============= LEFT COLUMN ============= */}
+          <div>
+            {/* ---- Card 1: 监控名称 + 监控品牌 ---- */}
+            <Card>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div>
+                  <SectionTitle title="监控名称" required />
+                  <Input
+                    placeholder="请输入监控名称"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <SectionTitle title="监控品牌" required />
+                  <Input
+                    placeholder="点击添加监控品牌"
+                    value={brand}
+                    onChange={(e) => setBrand(e.target.value)}
+                  />
+                </div>
               </div>
-              <div>
-                <SectionTitle title="监控品牌" required />
-                <Input
-                  placeholder="点击添加监控品牌"
-                  value={brand}
-                  onChange={(e) => setBrand(e.target.value)}
-                />
-              </div>
-            </div>
+            </Card>
 
-            {/* RIGHT: 模型选择 */}
-            <div>
+            {/* ---- Card 2: 竞品品牌 ---- */}
+            <Card>
+              <SectionTitle
+                title="竞品品牌"
+                extra={
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<PlusOutlined />}
+                    onClick={addCompetitor}
+                    disabled={projectId === undefined}
+                  >
+                    新增
+                  </Button>
+                }
+              />
+              <Space size={6} wrap style={{ marginBottom: 8 }}>
+                {competitors.length === 0 ? (
+                  <Chip text="暂未添加" placeholder />
+                ) : (
+                  competitors.map((c) => (
+                    <Chip
+                      key={c.id}
+                      text={c.name}
+                      onClick={() => setEditingCompetitor(c)}
+                      onRemove={() => removeCompetitor(c.id)}
+                    />
+                  ))
+                )}
+              </Space>
+              <Input
+                placeholder="输入竞品名称后回车新增"
+                value={competitorDraft}
+                onChange={(e) => setCompetitorDraft(e.target.value)}
+                onPressEnter={addCompetitor}
+                disabled={projectId === undefined}
+                style={{ maxWidth: 280 }}
+                size="small"
+              />
+            </Card>
+
+            {/* ---- Card 3: 核心词 + 监控问题 (split horizontally) ---- */}
+            <Card style={{ marginBottom: 0 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 18 }}>
+                <div>
+                  <SectionTitle
+                    title="核心词"
+                    extra={
+                      <Button
+                        size="small"
+                        type="link"
+                        icon={<PlusOutlined />}
+                        onClick={addKeyword}
+                      >
+                        新增
+                      </Button>
+                    }
+                  />
+                  <Space size={6} wrap style={{ marginBottom: 8 }}>
+                    {keywords.length === 0 ? (
+                      <Chip text="请输入核心词" placeholder />
+                    ) : (
+                      keywords.map((k) => (
+                        <Chip
+                          key={k}
+                          text={k}
+                          onRemove={() => setKeywords(keywords.filter((x) => x !== k))}
+                        />
+                      ))
+                    )}
+                  </Space>
+                  <Input
+                    placeholder="输入关键词后回车新增"
+                    value={keywordDraft}
+                    onChange={(e) => setKeywordDraft(e.target.value)}
+                    onPressEnter={addKeyword}
+                    size="small"
+                  />
+                </div>
+
+                <div>
+                  <SectionTitle title="监控问题" required />
+                  <Input.TextArea
+                    placeholder={
+                      "输入要监控的问题，每行一个问题\n例如：\n哪个智能客服系统最好用？\nAI智能和人工客服哪个效果更好？\n如何提升客服效率？"
+                    }
+                    value={questions}
+                    onChange={(e) => setQuestions(e.target.value)}
+                    rows={8}
+                    style={{ fontSize: 13, lineHeight: 1.7 }}
+                  />
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--text-tertiary)",
+                      marginTop: 6,
+                      textAlign: "right",
+                    }}
+                  >
+                    已输入 {questionCount} 个问题
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </div>
+
+          {/* ============= RIGHT COLUMN ============= */}
+          <div>
+            {/* ---- 模型选择 ---- */}
+            <Card>
               <SectionTitle
                 title="模型选择"
                 required
@@ -632,20 +757,20 @@ export default function BatchQuestionModal({
                       style={{
                         border: `1px solid ${cfg ? "var(--brand-blue)" : "var(--border-default)"}`,
                         borderRadius: 8,
-                        padding: "10px 8px",
+                        padding: "8px 6px",
                         cursor: "pointer",
                         background: cfg ? "#eff6ff" : "#fff",
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        gap: 4,
+                        gap: 3,
                         transition: "all 0.15s",
                       }}
                     >
                       <div
                         style={{
-                          width: 28,
-                          height: 28,
+                          width: 26,
+                          height: 26,
                           borderRadius: "50%",
                           background: m.bg,
                           color: m.fg,
@@ -653,14 +778,14 @@ export default function BatchQuestionModal({
                           alignItems: "center",
                           justifyContent: "center",
                           fontWeight: 600,
-                          fontSize: 13,
+                          fontSize: 12,
                         }}
                       >
                         {m.logo}
                       </div>
                       <div
                         style={{
-                          fontSize: 12,
+                          fontSize: 11,
                           fontWeight: 500,
                           color: cfg ? "var(--brand-blue)" : "var(--text-primary)",
                         }}
@@ -676,15 +801,16 @@ export default function BatchQuestionModal({
                           );
                         }}
                         style={{
-                          fontSize: 11,
+                          fontSize: 10,
                           color:
                             cfg?.delivery_mode === "mobile"
                               ? "var(--brand-orange)"
                               : "var(--text-tertiary)",
-                          padding: "1px 6px",
+                          padding: "0 5px",
                           border: `1px solid ${cfg?.delivery_mode === "mobile" ? "var(--brand-orange)" : "var(--border-default)"}`,
                           borderRadius: 3,
                           cursor: "pointer",
+                          lineHeight: 1.5,
                         }}
                       >
                         {cfg?.delivery_mode === "mobile" ? "移动版" : "网页版"}
@@ -693,134 +819,10 @@ export default function BatchQuestionModal({
                   );
                 })}
               </div>
-            </div>
-          </div>
-        </div>
+            </Card>
 
-        {/* ========== Middle card: chips/textarea | settings ========== */}
-        <div
-          style={{
-            background: "#fff",
-            borderRadius: 8,
-            padding: 20,
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) 280px",
-            gap: 20,
-          }}
-        >
-          {/* LEFT: 竞品品牌 / 核心词 / 监控问题 */}
-          <div>
-            <div style={{ marginBottom: 14 }}>
-              <SectionTitle
-                title="竞品品牌"
-                extra={
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<PlusOutlined />}
-                    onClick={addCompetitor}
-                    disabled={projectId === undefined}
-                  >
-                    新增
-                  </Button>
-                }
-              />
-              <Space size={6} wrap style={{ marginBottom: 8 }}>
-                {competitors.length === 0 ? (
-                  <Chip text="暂未添加" placeholder />
-                ) : (
-                  competitors.map((c) => (
-                    <Chip
-                      key={c.id}
-                      text={c.name}
-                      onClick={() => setEditingCompetitor(c)}
-                      onRemove={() => removeCompetitor(c.id)}
-                    />
-                  ))
-                )}
-              </Space>
-              <Input
-                placeholder="输入竞品名称后回车新增"
-                value={competitorDraft}
-                onChange={(e) => setCompetitorDraft(e.target.value)}
-                onPressEnter={addCompetitor}
-                disabled={projectId === undefined}
-                style={{ maxWidth: 280 }}
-                size="small"
-              />
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <SectionTitle
-                title="核心词"
-                extra={
-                  <Button
-                    size="small"
-                    type="link"
-                    icon={<PlusOutlined />}
-                    onClick={addKeyword}
-                  >
-                    新增
-                  </Button>
-                }
-              />
-              <Space size={6} wrap style={{ marginBottom: 8 }}>
-                {keywords.length === 0 ? (
-                  <Chip text="请输入核心词" placeholder />
-                ) : (
-                  keywords.map((k) => (
-                    <Chip
-                      key={k}
-                      text={k}
-                      onRemove={() => setKeywords(keywords.filter((x) => x !== k))}
-                    />
-                  ))
-                )}
-              </Space>
-              <Input
-                placeholder="输入关键词后回车新增"
-                value={keywordDraft}
-                onChange={(e) => setKeywordDraft(e.target.value)}
-                onPressEnter={addKeyword}
-                style={{ maxWidth: 280 }}
-                size="small"
-              />
-            </div>
-
-            <div>
-              <SectionTitle title="监控问题" required />
-              <Input.TextArea
-                placeholder={
-                  "输入要监控的问题，每行一个问题\n例如：\n哪个智能客服系统最好用？\nAI智能和人工客服哪个效果更好？\n如何提升客服效率？"
-                }
-                value={questions}
-                onChange={(e) => setQuestions(e.target.value)}
-                rows={8}
-                style={{ fontSize: 13, lineHeight: 1.7 }}
-              />
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "var(--text-tertiary)",
-                  marginTop: 6,
-                  textAlign: "right",
-                }}
-              >
-                已输入 {questionCount} 个问题
-              </div>
-            </div>
-          </div>
-
-          {/* RIGHT: settings panel */}
-          <div>
-            <div
-              style={{
-                background: "#fafafa",
-                borderRadius: 8,
-                padding: 16,
-                border: "1px solid var(--border-light)",
-              }}
-            >
+            {/* ---- settings panel ---- */}
+            <Card style={{ marginBottom: 0 }}>
               <Button
                 type="primary"
                 block
@@ -836,7 +838,6 @@ export default function BatchQuestionModal({
                 保存
               </Button>
 
-              {/* 监控频次 */}
               <Field label="监控频次">
                 <Segmented
                   block
@@ -946,7 +947,7 @@ export default function BatchQuestionModal({
                   {migrate ? "已开启同步" : "未开启同步"}
                 </div>
               </Field>
-            </div>
+            </Card>
           </div>
         </div>
       </div>
