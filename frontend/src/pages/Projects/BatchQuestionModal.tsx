@@ -16,6 +16,7 @@ import {
   PlusOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
+import { CirclePlus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   createCompetitor,
@@ -65,56 +66,6 @@ const PLATFORM_CATALOG: ModelCardMeta[] = [
   { name: "秘塔AI", logo: "M", bg: "#1f2937", fg: "#ffffff" },
   { name: "ChatGPT", logo: "G", bg: "#10b981", fg: "#ffffff" },
 ];
-
-function Chip(props: {
-  text: string;
-  onRemove?: () => void;
-  placeholder?: boolean;
-  onClick?: () => void;
-}) {
-  const { text, onRemove, placeholder, onClick } = props;
-  const baseStyle: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
-    padding: "3px 10px",
-    borderRadius: 4,
-    fontSize: 13,
-    lineHeight: 1.4,
-    cursor: onClick ? "pointer" : "default",
-  };
-  return (
-    <span
-      onClick={onClick}
-      style={
-        placeholder
-          ? {
-              ...baseStyle,
-              background: "#fafafa",
-              border: "1px dashed var(--border-strong)",
-              color: "var(--text-quaternary)",
-            }
-          : {
-              ...baseStyle,
-              background: "#eff6ff",
-              border: "1px solid #bfdbfe",
-              color: "var(--brand-blue)",
-            }
-      }
-    >
-      {text}
-      {onRemove && !placeholder && (
-        <CloseOutlined
-          style={{ fontSize: 10, opacity: 0.55, marginLeft: 2 }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-        />
-      )}
-    </span>
-  );
-}
 
 function SectionTitle(props: {
   title: string;
@@ -600,15 +551,32 @@ export default function BatchQuestionModal({
               </div>
             </Card>
 
-            {/* ---- Card 2: 竞品品牌 (read-only input + chip list) ---- */}
+            {/* ---- Card 2: 竞品品牌 (gray container + cards inside) ---- */}
             <Card>
               <SectionTitle title="竞品品牌" />
-              <div style={{ position: "relative", marginBottom: 10 }}>
-                <Input
-                  readOnly
-                  value={competitorDisplay}
-                  placeholder="点击右侧 + 图标添加竞品品牌"
-                  style={{ paddingRight: 38 }}
+              <div
+                style={{
+                  background: "#f3f4f6",
+                  border: "1px solid var(--border-light)",
+                  borderRadius: 6,
+                  padding: "10px 12px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  minHeight: 56,
+                }}
+              >
+                <CirclePlus
+                  size={20}
+                  strokeWidth={1.8}
+                  color={
+                    projectId === undefined ? "#9ca3af" : "var(--brand-blue)"
+                  }
+                  style={{
+                    cursor: projectId === undefined ? "not-allowed" : "pointer",
+                    flexShrink: 0,
+                  }}
                   onClick={() => {
                     if (projectId === undefined) {
                       message.info("请先保存项目后再添加竞品");
@@ -617,54 +585,73 @@ export default function BatchQuestionModal({
                     setCompetitorModal({ mode: "add" });
                   }}
                 />
-                <span
-                  onClick={() => {
-                    if (projectId === undefined) {
-                      message.info("请先保存项目后再添加竞品");
-                      return;
-                    }
-                    setCompetitorModal({ mode: "add" });
-                  }}
-                  style={{
-                    position: "absolute",
-                    right: 10,
-                    top: "50%",
-                    transform: "translateY(-50%)",
-                    width: 22,
-                    height: 22,
-                    borderRadius: 4,
-                    background: "var(--brand-blue)",
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    cursor: projectId === undefined ? "not-allowed" : "pointer",
-                    opacity: projectId === undefined ? 0.5 : 1,
-                  }}
-                >
-                  <PlusOutlined style={{ fontSize: 12 }} />
-                </span>
-              </div>
-              <Space size={6} wrap>
                 {competitors.length === 0 ? (
-                  <Chip text="暂未添加" placeholder />
+                  <span
+                    style={{
+                      color: "var(--text-quaternary)",
+                      fontSize: 13,
+                      userSelect: "none",
+                    }}
+                  >
+                    暂未添加,点击 � 添加
+                  </span>
                 ) : (
                   competitors.map((c) => (
-                    <Chip
+                    <div
                       key={c.id}
-                      text={c.name}
                       onClick={() => setCompetitorModal({ mode: "edit", target: c })}
-                      onRemove={() => removeCompetitor(c.id)}
-                    />
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        background: "#fff",
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 4,
+                        padding: "4px 8px 4px 10px",
+                        fontSize: 13,
+                        color: "var(--text-primary)",
+                        cursor: "pointer",
+                        boxShadow: "0 1px 2px rgba(15, 23, 42, 0.05)",
+                        transition: "all 0.15s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.boxShadow =
+                          "0 2px 6px rgba(15, 23, 42, 0.1)";
+                        e.currentTarget.style.borderColor = "var(--brand-blue)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.boxShadow =
+                          "0 1px 2px rgba(15, 23, 42, 0.05)";
+                        e.currentTarget.style.borderColor = "#e5e7eb";
+                      }}
+                    >
+                      <span>{c.name}</span>
+                      <X
+                        size={12}
+                        strokeWidth={2}
+                        color="#9ca3af"
+                        style={{ cursor: "pointer", flexShrink: 0 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeCompetitor(c.id);
+                        }}
+                      />
+                    </div>
                   ))
                 )}
-              </Space>
+              </div>
             </Card>
 
-            {/* ---- Card 3: 核心词 (list) + 监控问题 ---- */}
+            {/* ---- Card 3: 核心词 (card list) + 监控问题 ---- */}
             <Card style={{ marginBottom: 0 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 18 }}>
-                {/* 核心词 list */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)",
+                  gap: 18,
+                }}
+              >
+                {/* 核心词 list (cards inside gray container) */}
                 <div>
                   <SectionTitle
                     title="核心词"
@@ -681,60 +668,69 @@ export default function BatchQuestionModal({
                   />
                   <div
                     style={{
+                      background: "#f3f4f6",
                       border: "1px solid var(--border-light)",
                       borderRadius: 6,
-                      overflow: "hidden",
+                      padding: "10px 12px",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      minHeight: 56,
                     }}
                   >
                     {keywords.length === 0 ? (
-                      <div
+                      <span
                         style={{
-                          padding: "20px 12px",
-                          textAlign: "center",
                           color: "var(--text-quaternary)",
                           fontSize: 13,
+                          userSelect: "none",
+                          alignSelf: "center",
                         }}
                       >
                         暂无核心词,点击右上角新增
-                      </div>
+                      </span>
                     ) : (
                       keywords.map((k, i) => (
                         <div
                           key={`${k}-${i}`}
+                          onClick={() =>
+                            setKeywordModal({ mode: "edit", index: i, original: k })
+                          }
                           style={{
-                            display: "flex",
+                            display: "inline-flex",
                             alignItems: "center",
-                            justifyContent: "space-between",
-                            padding: "8px 12px",
-                            borderBottom:
-                              i === keywords.length - 1 ? "none" : "1px solid var(--border-light)",
-                            background: i % 2 === 0 ? "#fff" : "#fafbfc",
+                            gap: 6,
+                            background: "#fff",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 4,
+                            padding: "4px 8px 4px 10px",
+                            fontSize: 13,
+                            color: "var(--text-primary)",
+                            cursor: "pointer",
+                            boxShadow: "0 1px 2px rgba(15, 23, 42, 0.05)",
+                            transition: "all 0.15s ease",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.boxShadow =
+                              "0 2px 6px rgba(15, 23, 42, 0.1)";
+                            e.currentTarget.style.borderColor = "var(--brand-blue)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.boxShadow =
+                              "0 1px 2px rgba(15, 23, 42, 0.05)";
+                            e.currentTarget.style.borderColor = "#e5e7eb";
                           }}
                         >
-                          <span
-                            onClick={() =>
-                              setKeywordModal({ mode: "edit", index: i, original: k })
-                            }
-                            style={{
-                              flex: 1,
-                              fontSize: 13,
-                              color: "var(--text-primary)",
-                              cursor: "pointer",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                            title={k}
-                          >
-                            {k}
-                          </span>
-                          <CloseOutlined
-                            onClick={() => removeKeyword(i)}
-                            style={{
-                              color: "var(--text-tertiary)",
-                              fontSize: 12,
-                              cursor: "pointer",
-                              padding: 4,
+                          <span>{k}</span>
+                          <X
+                            size={12}
+                            strokeWidth={2}
+                            color="#9ca3af"
+                            style={{ cursor: "pointer", flexShrink: 0 }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeKeyword(i);
                             }}
                           />
                         </div>
