@@ -1,0 +1,246 @@
+/* ============================================================
+   Design tokens — match docs/superpowers/mockups/index.html
+   ============================================================ */
+:root {
+  --brand-blue: #1a55e8;
+  --brand-blue-light: #4d80f0;
+  --brand-blue-dark: #1240b8;
+  --brand-blue-50: #e8f0fe;
+  --brand-orange: #ff6b1a;
+  --brand-orange-light: #ff8c42;
+  --brand-orange-dark: #d8540f;
+  --brand-orange-50: #fff1e6;
+
+  --text-primary: #181818;
+  --text-secondary: #4f4f4f;
+  --text-tertiary: #8c8c8c;
+  --text-quaternary: #bfbfbf;
+
+  --bg-page: #f5f6f8;
+  --bg-card: #ffffff;
+  --bg-hover: #fafafa;
+
+  --border-default: #e7e7e7;
+  --border-light: #f0f0f0;
+  --border-strong: #d9d9d9;
+
+  --sidebar-width: 220px;
+  --header-height: 64px;
+
+  --font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", "Helvetica Neue", sans-serif;
+}
+
+.app-layout {
+  min-height: 100vh;
+  font-family: var(--font-family);
+}
+
+/* ---- Sidebar ---- */
+.app-sider {
+  background: linear-gradient(180deg, #0a2a78 0%, #001a4d 100%) !important;
+  border-right: 0 !important;
+}
+
+.app-sider .logo {
+  height: var(--header-height);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.app-sider .logo-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+}
+
+.app-sider .logo-text strong {
+  display: block;
+  color: #fff;
+  font-size: 18px;
+  letter-spacing: 1px;
+  line-height: 1.2;
+}
+
+.app-sider .logo-text span {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.2;
+}
+
+.app-sider .app-menu {
+  background: transparent !important;
+  border-inline-end: 0 !important;
+  padding: 8px 0;
+  flex: 1;
+}
+
+.app-sider .app-menu .ant-menu-item {
+  color: rgba(255, 255, 255, 0.7) !important;
+  margin: 0 !important;
+  width: 100% !important;
+  height: 42px !important;
+  line-height: 42px !important;
+  padding-left: 20px !important;
+  border-left: 3px solid transparent;
+  font-size: 14px;
+}
+
+.app-sider .app-menu .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: #fff !important;
+}
+
+.app-sider .app-menu .ant-menu-item-selected {
+  background: rgba(26, 85, 232, 0.25) !important;
+  color: #fff !important;
+  border-left-color: var(--brand-blue-light);
+}
+
+.app-sider .app-menu .ant-menu-item .ant-menu-title-content {
+  margin-left: 6px;
+}
+
+/* ---- Header ---- */
+.app-header {
+  height: var(--header-height) !important;
+  padding: 0 24px !important;
+  background: #fff !important;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  line-height: normal !important;
+}
+
+.app-header .breadcrumb {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  flex: 1;
+}
+
+.app-header .breadcrumb strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.app-header .breadcrumb .sep {
+  margin: 0 12px;
+  color: var(--text-quaternary);
+}
+
+.app-header .header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-header .user-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.app-header .user-chip:hover {
+  background: var(--bg-hover);
+  color: var(--brand-blue);
+}
+
+.app-header .user-chip .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.app-header .user-chip .meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.app-header .user-chip .meta strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.app-header .user-chip .meta span {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ---- Content ---- */
+.app-content {
+  padding: 24px 32px;
+  background: var(--bg-page);
+  min-height: calc(100vh - var(--header-height));
+}
+
+/* ---- Login page ---- */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #0a2a78 0%, #001a4d 100%);
+  font-family: var(--font-family);
+}
+
+.login-card {
+  width: 380px;
+  background: #fff;
+  border-radius: 12px;
+  padding: 32px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+.login-card .login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.login-card .login-brand .mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+}
+
+.login-card .login-brand .text strong {
+  display: block;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+
+.login-card .login-brand .text span {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
