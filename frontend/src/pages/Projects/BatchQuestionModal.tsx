@@ -64,7 +64,6 @@ const PLATFORM_CATALOG: ModelCardMeta[] = [
   { name: "夸克", logo: "夸", bg: "#7c3aed", fg: "#ffffff" },
   { name: "智谱清言", logo: "智", bg: "#ea580c", fg: "#ffffff" },
   { name: "秘塔AI", logo: "M", bg: "#1f2937", fg: "#ffffff" },
-  { name: "ChatGPT", logo: "G", bg: "#10b981", fg: "#ffffff" },
 ];
 
 function SectionTitle(props: {
@@ -523,7 +522,7 @@ export default function BatchQuestionModal({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) 380px",
+            gridTemplateColumns: "1fr 1fr",
             gap: 14,
           }}
         >
@@ -647,7 +646,7 @@ export default function BatchQuestionModal({
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)",
+                  gridTemplateColumns: "1fr 3fr",
                   gap: 18,
                 }}
               >
@@ -748,7 +747,7 @@ export default function BatchQuestionModal({
                     }
                     value={questions}
                     onChange={(e) => setQuestions(e.target.value)}
-                    rows={10}
+                    rows={8}
                     style={{ fontSize: 13, lineHeight: 1.7 }}
                   />
                   <div
@@ -866,7 +865,7 @@ export default function BatchQuestionModal({
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(3, 1fr)",
+                  gridTemplateColumns: "repeat(6, 1fr)",
                   gap: 8,
                 }}
               >
@@ -878,21 +877,21 @@ export default function BatchQuestionModal({
                       onClick={() => togglePlatform(m.name)}
                       style={{
                         border: `1px solid ${cfg ? "var(--brand-blue)" : "var(--border-default)"}`,
-                        borderRadius: 8,
-                        padding: "6px 4px",
+                        borderRadius: 6,
+                        padding: "8px 4px 6px",
                         cursor: "pointer",
                         background: cfg ? "#eff6ff" : "#fff",
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        gap: 2,
+                        gap: 4,
                         transition: "all 0.15s",
                       }}
                     >
                       <div
                         style={{
-                          width: 26,
-                          height: 26,
+                          width: 24,
+                          height: 24,
                           borderRadius: "50%",
                           background: m.bg,
                           color: m.fg,
@@ -900,7 +899,7 @@ export default function BatchQuestionModal({
                           alignItems: "center",
                           justifyContent: "center",
                           fontWeight: 600,
-                          fontSize: 12,
+                          fontSize: 11,
                         }}
                       >
                         {m.logo}
@@ -910,6 +909,7 @@ export default function BatchQuestionModal({
                           fontSize: 11,
                           fontWeight: 500,
                           color: cfg ? "var(--brand-blue)" : "var(--text-primary)",
+                          whiteSpace: "nowrap",
                         }}
                       >
                         {m.name}
