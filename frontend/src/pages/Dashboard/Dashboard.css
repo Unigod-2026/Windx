@@ -1,0 +1,311 @@
+/* Dashboard page — matches docs/superpowers/mockups/index.html §工作台 */
+
+.dashboard-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- Page title row ---- */
+.dashboard-page .page-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.dashboard-page .page-title h1 {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.dashboard-page .page-title .desc {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+/* ---- KPI cards ---- */
+.dashboard-page .kpi {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px 24px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
+  position: relative;
+  overflow: hidden;
+}
+.dashboard-page .kpi::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--brand-blue);
+}
+.dashboard-page .kpi.kpi-blue::before {
+  background: var(--brand-blue);
+}
+.dashboard-page .kpi.kpi-green::before {
+  background: #52c41a;
+}
+.dashboard-page .kpi.kpi-red::before {
+  background: #ff4d4f;
+}
+.dashboard-page .kpi.kpi-orange::before {
+  background: var(--brand-orange);
+}
+.dashboard-page .kpi .label {
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+.dashboard-page .kpi .num {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 8px 0 4px;
+  line-height: 1.1;
+}
+.dashboard-page .kpi .meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dashboard-page .kpi .meta .up {
+  color: #52c41a;
+}
+.dashboard-page .kpi .meta .down {
+  color: #ff4d4f;
+}
+
+/* ---- Card ---- */
+.dashboard-page .card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+.dashboard-page .card-header {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.dashboard-page .card-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.dashboard-page .card-header .sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+/* ---- Timeline ---- */
+.dashboard-page .timeline {
+  padding: 0 24px 24px;
+}
+.dashboard-page .timeline-item {
+  display: flex;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--border-light);
+}
+.dashboard-page .timeline-item:last-child {
+  border-bottom: none;
+}
+.dashboard-page .timeline-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #52c41a;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+.dashboard-page .timeline-dot.failed {
+  background: #ff4d4f;
+}
+.dashboard-page .timeline-dot.partial {
+  background: #faad14;
+}
+.dashboard-page .timeline-dot.skipped {
+  background: var(--text-quaternary);
+}
+.dashboard-page .timeline-dot.running {
+  background: var(--brand-orange);
+}
+.dashboard-page .timeline-dot.queued {
+  background: var(--brand-blue-light);
+}
+.dashboard-page .timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+.dashboard-page .timeline-content .top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.dashboard-page .timeline-content .top .name {
+  font-weight: 500;
+  color: var(--brand-blue);
+  cursor: pointer;
+}
+.dashboard-page .timeline-content .top .name:hover {
+  text-decoration: underline;
+}
+.dashboard-page .timeline-content .top .time {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.dashboard-page .timeline-content .bot {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+/* ---- Status stamp ---- */
+.dashboard-page .stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.dashboard-page .stamp-success {
+  background: #f6ffed;
+  color: #52c41a;
+}
+.dashboard-page .stamp-danger {
+  background: #fff2f0;
+  color: #ff4d4f;
+}
+.dashboard-page .stamp-warning {
+  background: #fffbe6;
+  color: #faad14;
+}
+.dashboard-page .stamp-info {
+  background: var(--brand-blue-50);
+  color: var(--brand-blue);
+}
+.dashboard-page .stamp-mute {
+  background: #f0f0f0;
+  color: var(--text-tertiary);
+}
+.dashboard-page .stamp-orange {
+  background: var(--brand-orange-50);
+  color: var(--brand-orange);
+}
+
+/* ---- Status distribution ---- */
+.dashboard-page .dist-list {
+  padding: 0 24px 24px;
+}
+.dashboard-page .dist-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 50px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 13px;
+}
+.dashboard-page .dist-bar {
+  height: 8px;
+  background: var(--bg-page);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.dashboard-page .dist-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--brand-blue);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.dashboard-page .dist-row.success .dist-bar > span {
+  background: #52c41a;
+}
+.dashboard-page .dist-row.failed .dist-bar > span {
+  background: #ff4d4f;
+}
+.dashboard-page .dist-row.partial .dist-bar > span {
+  background: #faad14;
+}
+.dashboard-page .dist-row.skipped .dist-bar > span {
+  background: var(--text-quaternary);
+}
+.dashboard-page .dist-row.running .dist-bar > span {
+  background: var(--brand-orange);
+}
+.dashboard-page .dist-row .pct {
+  text-align: right;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ---- Upcoming ---- */
+.dashboard-page .upcoming-list {
+  padding: 0 24px 24px;
+}
+.dashboard-page .upcoming-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--border-light);
+  font-size: 13px;
+}
+.dashboard-page .upcoming-item:last-child {
+  border-bottom: none;
+}
+.dashboard-page .upcoming-item .when {
+  color: var(--brand-blue);
+  font-weight: 600;
+  min-width: 110px;
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+.dashboard-page .upcoming-item .name {
+  flex: 1;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.dashboard-page .upcoming-item .customer {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  min-width: 100px;
+}
+
+/* ---- Tags ---- */
+.dashboard-page .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--brand-blue-50);
+  color: var(--brand-blue);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ---- Empty state ---- */
+.dashboard-page .empty-block {
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+/* ---- Responsive ---- */
+/* Antd Row/Col handles 1/2/4-up scaling via xs/sm/md. */
