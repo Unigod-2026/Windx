@@ -1,0 +1,59 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: windx-mysql
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-geo}
+      MYSQL_USER: ${MYSQL_USER:-admin}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-admin123}
+    command: --default-time-zone=+08:00 --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: windx-backend
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      APP_PORT: "18083"
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-admin}:${MYSQL_PASSWORD:-admin123}@mysql:3306/${MYSQL_DATABASE:-geo}?charset=utf8mb4
+      MOLIZHISHU_TOKEN: ${MOLIZHISHU_TOKEN:-}
+      MOLIZHISHU_BASE_URL: ${MOLIZHISHU_BASE_URL:-https://business-api.molizhishu.com/api/business/monitor}
+      MOLIZHISHU_CITY_URL: ${MOLIZHISHU_CITY_URL:-https://business-api.molizhishu.com/api/business/eip-edge/ports/city-info}
+      MOLIZHISHU_CALLBACK_URL: ${MOLIZHISHU_CALLBACK_URL:-}
+      MOLIZHISHU_TIMEOUT_SECONDS: ${MOLIZHISHU_TIMEOUT_SECONDS:-30}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      LOGO_STORAGE_DIR: /data/logos
+    volumes:
+      - logo_data:/data/logos
+    ports:
+      - "18083:18083"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: windx-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  logo_data:
