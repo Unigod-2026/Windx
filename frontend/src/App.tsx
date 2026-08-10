@@ -25,6 +25,9 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: "customers", element: <RequireSuperAdmin><Customers /></RequireSuperAdmin> },
       { path: "projects", element: <ProjectsList /> },
+      // Detail is now an in-place modal opened from the list page; the
+      // dedicated route is preserved as a redirect so any old / shared
+      // links still land on the editor.
       { path: "projects/:id", element: <ProjectDetail /> },
     ],
   },

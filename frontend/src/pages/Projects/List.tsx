@@ -21,7 +21,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import dayjs from "dayjs";
 import {
   createProject,
@@ -35,6 +35,7 @@ import {
   type RunSummary,
 } from "../../api/projects";
 import { listCustomers, type Customer } from "../../api/customers";
+import BatchQuestionModal from "./BatchQuestionModal";
 
 interface CreateFormValues {
   customer_id: number;
@@ -118,7 +119,7 @@ function relative(v: string | null): string {
 }
 
 export default function ProjectsList() {
-  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<ProjectOut[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -131,6 +132,22 @@ export default function ProjectsList() {
   const [details, setDetails] = useState<Record<number, RowDetail>>({});
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm] = Form.useForm<CreateFormValues>();
+  // modal state — when set, opens BatchQuestionModal over the list page
+  const [modalProjectId, setModalProjectId] = useState<number | undefined>(undefined);
+
+  // Auto-open modal from URL ?open=<id> (used by the /projects/:id route's
+  // redirect so legacy links still work). After consumption we strip the
+  // param so a refresh doesn't re-trigger.
+  useEffect(() => {
+    const open = searchParams.get("open");
+    if (open && /^\d+$/.test(open)) {
+      setModalProjectId(Number(open));
+      const next = new URLSearchParams(searchParams);
+      next.delete("open");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const customerMap = useMemo(() => {
     const m: Record<number, Customer> = {};
@@ -227,7 +244,7 @@ export default function ProjectsList() {
   const onCreate = async () => {
     try {
       const v = await createForm.validateFields();
-      await createProject(v.customer_id, {
+      const created = await createProject(v.customer_id, {
         name: v.name,
         code: v.code,
         description: v.description || null,
@@ -236,6 +253,8 @@ export default function ProjectsList() {
       setCreateOpen(false);
       load(1);
       setPage(1);
+      // jump straight into the batch-edit modal for the freshly-created project
+      setModalProjectId(created.id);
     } catch (err) {
       if ((err as { errorFields?: unknown }).errorFields) return;
       message.error((err as Error).message || "创建失败");
@@ -298,7 +317,7 @@ export default function ProjectsList() {
             <div style={{ minWidth: 0 }}>
               <button
                 type="button"
-                onClick={() => navigate(`/admin/projects/${record.id}`)}
+                onClick={() => setModalProjectId(record.id)}
                 style={{
                   background: "none",
                   border: 0,
@@ -448,7 +467,7 @@ export default function ProjectsList() {
                 {
                   key: "open",
                   label: "打开",
-                  onClick: () => navigate(`/admin/projects/${record.id}`),
+                  onClick: () => setModalProjectId(record.id),
                 },
                 { type: "divider" },
                 {
@@ -594,6 +613,15 @@ export default function ProjectsList() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <BatchQuestionModal
+        open={modalProjectId !== undefined}
+        projectId={modalProjectId}
+        onClose={() => setModalProjectId(undefined)}
+        onSaved={() => {
+          load(page);
+        }}
+      />
     </div>
   );
 }
