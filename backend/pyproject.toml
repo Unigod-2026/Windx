@@ -13,6 +13,8 @@ dependencies = [
   "httpx>=0.27",
   "python-multipart>=0.0.9",
   "apscheduler>=3.10",
+  "python-jose[cryptography]>=3.3",
+  "passlib[bcrypt]>=1.7",
 ]
 
 [project.optional-dependencies]
