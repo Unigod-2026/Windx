@@ -176,6 +176,7 @@ uv run ruff check .
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/api/auth/login` | `{username, password}` → `{token, user}`,未知用户名与错密码同返 401,停用账号返 403 |
 | GET | `/api/auth/me` | 返回当前用户 `{id, username, role, customer_id, status}` |
 
 ### 客户(超管)
@@ -285,7 +286,8 @@ uv run ruff check .
 
 | 项 | 状态 | 备注 |
 |---|---|---|
-| `POST /api/auth/login` | ❌ 未实现 | 管理员目前通过种子脚本 + JWT 签发访问 |
+| `POST /api/auth/login` | ✅ 已实现 | bcrypt 校验 + JWT 签发,前端 Login 页可直接走真实流程 |
+| `last_login_ip` 记录 | ❌ 未实现 | v2 模型未含此列,加列需新 alembic migration |
 | 客户详情页(旗下项目列表) | ❌ 未实现 | 仅有客户列表 + 编辑 |
 | 竞品信息抽取(项目详情 Tab5) | ❌ 占位 | 需 NLP / 规则抽取 |
 | 后台轮询(同步最终一致性) | ❌ 未实现 | 当前只走 Callback |
