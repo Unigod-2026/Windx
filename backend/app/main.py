@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, customers, projects
+from app.api import auth, customers, projects, tasks
 from app.config import get_settings
 from app.services.scheduler_runtime import TIMEZONE, reload_jobs
 
@@ -40,6 +40,7 @@ app = FastAPI(title="windx-backend", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(customers.router)
 app.include_router(projects.router)
+app.include_router(tasks.router)
 
 
 @app.get("/health")
