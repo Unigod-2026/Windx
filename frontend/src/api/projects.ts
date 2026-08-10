@@ -30,14 +30,20 @@ export interface ProjectOut {
 export interface ProjectPlatform {
   platform: string;
   mode: string;
+  delivery_mode: "web" | "mobile";
+  thinking_mode: boolean;
   screenshot: number;
   sort?: number;
+  id?: number;
 }
 
 export interface ProjectDetailOut extends ProjectOut {
   prompts: string[];
   keywords: string[];
   platforms: ProjectPlatform[];
+  sentiment_enabled: boolean;
+  region_strategy: "fixed" | "national_random";
+  region_codes: string[] | null;
 }
 
 export interface ProjectList {
@@ -103,12 +109,18 @@ export interface ProjectCreatePayload {
   name: string;
   code: string;
   description?: string | null;
+  sentiment_enabled?: boolean;
+  region_strategy?: "fixed" | "national_random";
+  region_codes?: string[] | null;
 }
 
 export interface ProjectUpdatePayload {
   name?: string;
   description?: string | null;
   status?: "active" | "disabled";
+  sentiment_enabled?: boolean;
+  region_strategy?: "fixed" | "national_random";
+  region_codes?: string[] | null;
 }
 
 export interface SlotIn {
@@ -127,6 +139,26 @@ export interface ScheduleStatusUpdatePayload {
 
 export interface PlatformsUpdatePayload {
   platforms: ProjectPlatform[];
+}
+
+export interface CompetitorOut {
+  id: number;
+  project_id: number;
+  name: string;
+  note: string | null;
+  sort: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CompetitorList {
+  items: CompetitorOut[];
+  total: number;
+}
+
+export interface CompetitorPayload {
+  name: string;
+  note?: string | null;
 }
 
 export interface PromptsUpdatePayload {
@@ -212,4 +244,31 @@ export const putPlatforms = (id: number, platforms: ProjectPlatform[]) =>
     .put<{ ok: boolean; count: number }>(`/projects/${id}/platforms`, {
       platforms,
     })
+    .then((r) => r.data);
+
+export const listCompetitors = (projectId: number) =>
+  client
+    .get<CompetitorList>(`/projects/${projectId}/competitors`)
+    .then((r) => r.data);
+
+export const createCompetitor = (projectId: number, payload: CompetitorPayload) =>
+  client
+    .post<CompetitorOut>(`/projects/${projectId}/competitors`, payload)
+    .then((r) => r.data);
+
+export const updateCompetitor = (
+  projectId: number,
+  competitorId: number,
+  payload: CompetitorPayload,
+) =>
+  client
+    .put<CompetitorOut>(
+      `/projects/${projectId}/competitors/${competitorId}`,
+      payload,
+    )
+    .then((r) => r.data);
+
+export const deleteCompetitor = (projectId: number, competitorId: number) =>
+  client
+    .delete(`/projects/${projectId}/competitors/${competitorId}`)
     .then((r) => r.data);

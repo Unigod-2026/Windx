@@ -27,7 +27,7 @@ export default function AppLayout() {
   const items: MenuItem[] = useMemo(() => {
     const base: MenuItem[] = [
       { key: "/admin", label: "工作台", icon: <DashboardOutlined /> },
-      { key: "/admin/projects", label: "项目管理", icon: <ProjectOutlined /> },
+      { key: "/admin/projects", label: "监控项目", icon: <ProjectOutlined /> },
     ];
     if (user?.role === "super_admin") {
       base.push({
@@ -73,7 +73,7 @@ export default function AppLayout() {
           <>
             <Link to="/admin">工作台</Link>
             <span className="sep">/</span>
-            <Link to="/admin/projects">项目管理</Link>
+            <Link to="/admin/projects">监控项目</Link>
             <span className="sep">/</span>
             <strong>项目详情</strong>
           </>
@@ -83,7 +83,7 @@ export default function AppLayout() {
         <>
           <Link to="/admin">工作台</Link>
           <span className="sep">/</span>
-          <strong>项目管理</strong>
+          <strong>监控项目</strong>
         </>
       );
     }

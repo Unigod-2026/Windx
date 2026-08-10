@@ -324,9 +324,9 @@ export default function ProjectsList() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 600, margin: 0 }}>项目管理</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 600, margin: 0 }}>监控项目</h1>
           <div style={{ fontSize: 13, color: "var(--text-tertiary)", marginTop: 4 }}>
-            配置监控问题、模型与每日调度时间
+            配置监控问题、AI 模型、品牌关键字、竞品与每日调度时间
           </div>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
