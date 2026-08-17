@@ -1,0 +1,32 @@
+# Environment (NEVER commit secrets)
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Logs / runtime data
+backend/logs/
+backend/data/
+
+# Local DB files (sqlite dev db)
+*.db
+*.sqlite

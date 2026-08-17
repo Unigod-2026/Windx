@@ -3,6 +3,7 @@ import { Form, Input, Button, Card, message, Alert, Space, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
 import client from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
+import { getDashboard } from "../api/dashboard";
 import "../layouts/AppLayout.css";
 
 interface LoginValues {
@@ -27,7 +28,7 @@ export default function Login() {
       localStorage.setItem("token", r.data.token);
       const me = await client.get("/auth/me");
       setUser(me.data);
-      nav("/admin");
+      nav(await resolveDefaultProject());
     } catch {
       setHint(
         "登录失败:后端 /api/auth/login 尚未实现(预期行为)。请使用「Mock 登录」继续开发,或稍后重试。"
@@ -37,9 +38,24 @@ export default function Login() {
     }
   };
 
+  // Resolve the URL to land on after login. super_admin and customer_admin
+  // both default to the most recently triggered project (the backend scopes
+  // recent_runs by tenant); if there are no runs yet we fall back to the
+  // admin dashboard.
+  const resolveDefaultProject = async (): Promise<string> => {
+    try {
+      const dash = await getDashboard();
+      const latest = dash.recent_runs[0];
+      if (latest) return `/admin/projects/${latest.project_id}?tab=overview`;
+    } catch {
+      // fall through
+    }
+    return "/admin";
+  };
+
   // Dev-only "mock login": sets a fake token and creates a super_admin user
   // so the dev experience works before /api/auth/login is implemented.
-  const mockLogin = (role: "super_admin" | "customer_admin") => {
+  const mockLogin = async (role: "super_admin" | "customer_admin") => {
     setDevLoading(true);
     localStorage.setItem("token", `mock-token-${role}-${Date.now()}`);
     setUser({
@@ -48,7 +64,7 @@ export default function Login() {
       role,
       customer_id: role === "super_admin" ? null : 1,
     });
-    nav("/admin");
+    nav(await resolveDefaultProject());
   };
 
   return (

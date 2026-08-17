@@ -1,7 +1,6 @@
 import {
   Button,
   Card,
-  Dropdown,
   Form,
   Input,
   Modal,
@@ -14,17 +13,19 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  MoreOutlined,
-  PauseOutlined,
-  PlayCircleOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  FileTextOutlined,
   PlusOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useSetCurrentProject } from "../../auth/ProjectContext";
 import dayjs from "dayjs";
 import {
   createProject,
+  deleteProject,
   getProject,
   listProjects,
   listRuns,
@@ -32,10 +33,11 @@ import {
   triggerRun,
   type ProjectDetailOut,
   type ProjectOut,
-  type RunSummary,
+  type ScheduleRunOut,
 } from "../../api/projects";
 import { listCustomers, type Customer } from "../../api/customers";
 import BatchQuestionModal from "./BatchQuestionModal";
+import TaskDetailModal from "./TaskDetailModal";
 
 interface CreateFormValues {
   customer_id: number;
@@ -47,7 +49,7 @@ interface CreateFormValues {
 interface RowDetail {
   prompts: number;
   platforms: string[];
-  lastRun: RunSummary | null;
+  lastRun: ScheduleRunOut | null;
 }
 
 const STATUS_TAG: Record<string, { color: string; bg: string; text: string }> = {
@@ -118,7 +120,17 @@ function relative(v: string | null): string {
   return future ? `${body}后` : `${body}前`;
 }
 
+function renderRunSummary(r: ScheduleRunOut): string {
+  // Only meaningful once the run has actually produced subtasks.
+  if (r.total_count === 0) return "";
+  const parts: string[] = [`${r.success_count}/${r.total_count} 完成`];
+  if (r.failed_count > 0) parts.push(`${r.failed_count} 失败`);
+  if (r.partial_count > 0) parts.push(`${r.partial_count} 部分`);
+  return parts.join(" · ");
+}
+
 export default function ProjectsList() {
+  const setCurrentProjectId = useSetCurrentProject();
   const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<ProjectOut[]>([]);
   const [total, setTotal] = useState(0);
@@ -134,6 +146,7 @@ export default function ProjectsList() {
   const [createForm] = Form.useForm<CreateFormValues>();
   // modal state — when set, opens BatchQuestionModal over the list page
   const [modalProjectId, setModalProjectId] = useState<number | undefined>(undefined);
+  const [taskDetailId, setTaskDetailId] = useState<number | undefined>(undefined);
 
   // Auto-open modal from URL ?open=<id> (used by the /projects/:id route's
   // redirect so legacy links still work). After consumption we strip the
@@ -148,6 +161,14 @@ export default function ProjectsList() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Publish the active project to ProjectContext whenever the in-place
+  // modal is opened (via row click or auto-open from ?open=<id>) so the
+  // sidebar's 数据洞察 / 数据中心 / 系统 groups stay visible after the
+  // user closes the modal or navigates to 管理组 items.
+  useEffect(() => {
+    if (modalProjectId !== undefined) setCurrentProjectId(modalProjectId);
+  }, [modalProjectId, setCurrentProjectId]);
 
   const customerMap = useMemo(() => {
     const m: Record<number, Customer> = {};
@@ -175,14 +196,7 @@ export default function ProjectsList() {
       return {
         prompts: detail?.prompts?.length ?? 0,
         platforms: detail?.platforms?.map((p) => p.platform) ?? [],
-        lastRun: runs?.items?.[0]
-          ? {
-              id: runs.items[0].id,
-              status: runs.items[0].status,
-              triggered_at: runs.items[0].triggered_at,
-              finished_at: runs.items[0].finished_at,
-            }
-          : null,
+        lastRun: runs?.items?.[0] ?? null,
       };
     } catch {
       return null;
@@ -267,7 +281,8 @@ export default function ProjectsList() {
       message.success(enabled ? "已启用调度" : "已停用调度");
       load(page);
     } catch (err) {
-      message.error((err as Error).message || "操作失败");
+      const e = err as { response?: { status?: number; data?: { detail?: string } } };
+      message.error(e?.response?.data?.detail || (err as Error).message || "操作失败");
     }
   };
 
@@ -284,6 +299,25 @@ export default function ProjectsList() {
         message.error(e?.response?.data?.detail || (err as Error).message || "触发失败");
       }
     }
+  };
+
+  const onDelete = (record: ProjectOut) => {
+    Modal.confirm({
+      title: "确认删除项目",
+      content: `项目「${record.name}」删除后将不可恢复,确定继续吗?`,
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await deleteProject(record.id);
+          message.success("已删除");
+          load(page);
+        } catch (err) {
+          message.error((err as Error).message || "删除失败");
+        }
+      },
+    });
   };
 
   const columns: ColumnsType<ProjectOut> = [
@@ -387,11 +421,18 @@ export default function ProjectsList() {
       key: "scheduleEnabled",
       width: 80,
       render: (_, record) => (
-        <Switch
-          checked={record.schedule_enabled}
-          onChange={(v) => onToggle(record, v)}
-          size="small"
-        />
+        <Tooltip
+          title={
+            record.status === "disabled" ? "项目已停用,无法开启调度" : ""
+          }
+        >
+          <Switch
+            checked={record.schedule_enabled}
+            disabled={record.status === "disabled"}
+            onChange={(v) => onToggle(record, v)}
+            size="small"
+          />
+        </Tooltip>
       ),
     },
     {
@@ -423,12 +464,25 @@ export default function ProjectsList() {
         if (!r) {
           return <span style={{ color: "var(--text-quaternary)" }}>—</span>;
         }
+        const summary = renderRunSummary(r);
         return (
           <div>
             <StatusBadge status={r.status} />
             <div style={{ color: "var(--text-tertiary)", fontSize: 12, marginTop: 2 }}>
               {relative(r.triggered_at)}
             </div>
+            {summary && (
+              <div
+                style={{
+                  color: "var(--text-tertiary)",
+                  fontSize: 12,
+                  marginTop: 2,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {summary}
+              </div>
+            )}
           </div>
         );
       },
@@ -436,23 +490,9 @@ export default function ProjectsList() {
     {
       title: "操作",
       key: "actions",
-      width: 110,
+      width: 180,
       render: (_, record) => (
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <Tooltip title={record.schedule_enabled ? "暂停本次调度" : "立即执行"}>
-            <Button
-              type="text"
-              size="small"
-              icon={
-                record.schedule_enabled ? (
-                  <PauseOutlined style={{ color: "var(--text-tertiary)" }} />
-                ) : (
-                  <PlayCircleOutlined style={{ color: "var(--brand-blue)" }} />
-                )
-              }
-              onClick={() => onToggle(record, !record.schedule_enabled)}
-            />
-          </Tooltip>
           <Tooltip title="立即执行">
             <Button
               type="text"
@@ -461,26 +501,31 @@ export default function ProjectsList() {
               onClick={() => onTrigger(record)}
             />
           </Tooltip>
-          <Dropdown
-            menu={{
-              items: [
-                {
-                  key: "open",
-                  label: "打开",
-                  onClick: () => setModalProjectId(record.id),
-                },
-                { type: "divider" },
-                {
-                  key: "trigger",
-                  label: "立即执行",
-                  onClick: () => onTrigger(record),
-                },
-              ],
-            }}
-            trigger={["click"]}
-          >
-            <Button type="text" size="small" icon={<MoreOutlined />} />
-          </Dropdown>
+          <Tooltip title="编辑监控项目">
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined style={{ color: "var(--text-secondary)" }} />}
+              onClick={() => setModalProjectId(record.id)}
+            />
+          </Tooltip>
+          <Tooltip title="任务详情">
+            <Button
+              type="text"
+              size="small"
+              icon={<FileTextOutlined style={{ color: "var(--text-secondary)" }} />}
+              onClick={() => setTaskDetailId(record.id)}
+            />
+          </Tooltip>
+          <Tooltip title="删除项目">
+            <Button
+              type="text"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => onDelete(record)}
+            />
+          </Tooltip>
         </div>
       ),
     },
@@ -621,6 +666,17 @@ export default function ProjectsList() {
         onSaved={() => {
           load(page);
         }}
+      />
+
+      <TaskDetailModal
+        open={taskDetailId !== undefined}
+        projectId={taskDetailId}
+        projectName={
+          taskDetailId !== undefined
+            ? items.find((p) => p.id === taskDetailId)?.name ?? ""
+            : ""
+        }
+        onClose={() => setTaskDetailId(undefined)}
       />
     </div>
   );

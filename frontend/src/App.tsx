@@ -4,6 +4,7 @@ import {
   Navigate,
 } from "react-router-dom";
 import { AuthProvider, RequireAuth, RequireSuperAdmin } from "./auth/AuthProvider";
+import { ProjectProvider } from "./auth/ProjectContext";
 import AppLayout from "./layouts/AppLayout";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
@@ -37,7 +38,9 @@ const router = createBrowserRouter([
 export default function App() {
   return (
     <AuthProvider>
-      <RouterProvider router={router} />
+      <ProjectProvider>
+        <RouterProvider router={router} />
+      </ProjectProvider>
     </AuthProvider>
   );
 }
