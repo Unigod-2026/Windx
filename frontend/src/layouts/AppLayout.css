@@ -31,8 +31,22 @@
     "Microsoft YaHei", "Helvetica Neue", sans-serif;
 }
 
+/* User-agent stylesheet sets ``body { margin: 8px }``. Our ``.app-layout``
+   is locked to 100vh with ``overflow: hidden``, so the body box itself
+   is 900px on a 900px viewport — but the 8px top + 8px bottom margin
+   push the body's effective height to 916px, and the ``<html>`` element
+   scrolls to fit. Reset to 0 so the body box == the layout box ==
+   the viewport. (Without this, the page picks up a stray vertical
+   scrollbar no matter how tightly we lock the .app-layout.) */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
 .app-layout {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   font-family: var(--font-family);
 }
 
@@ -40,6 +54,23 @@
 .app-sider {
   background: linear-gradient(180deg, #0a2a78 0%, #001a4d 100%) !important;
   border-right: 0 !important;
+  height: 100vh !important;
+  /* The scroll container below uses ``flex: 1; overflow-y: auto`` — that
+     only constrains the menu to the remaining viewport space when the
+     parent is a flex column. Without this, .app-sider-scroll expands to
+     its natural content height, the menu overflows 100vh, and the
+     entire body gets a vertical scrollbar. ``overflow: hidden`` plus
+     ``flex: 1`` on the child keeps the menu internally scrollable. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Right-side Layout (under the Sider) must also be locked to viewport so
+   the header + content split vertically instead of growing with the page. */
+.app-layout > .ant-layout {
+  height: 100vh;
+  overflow: hidden;
 }
 
 .app-sider .logo {
@@ -110,6 +141,88 @@
 
 .app-sider .app-menu .ant-menu-item .ant-menu-title-content {
   margin-left: 6px;
+}
+
+/* ---- Sidebar nav-group blocks (replaces antd Menu so multiple groups can
+       coexist in a single dark sider; 管理组 always on top, project groups
+       appear below when on /admin/projects/:id). ---- */
+.app-sider .app-sider-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0 16px;
+}
+
+.app-sider .nav-group-block {
+  padding: 4px 0 8px;
+}
+
+.app-sider .nav-group-title {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  padding: 8px 20px 6px;
+  font-weight: 500;
+}
+
+.app-sider .nav-leaf {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 20px;
+  height: 38px;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid transparent;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.app-sider .nav-leaf:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
+
+.app-sider .nav-leaf.active {
+  background: rgba(26, 85, 232, 0.22);
+  color: #fff;
+  border-left-color: var(--brand-orange);
+}
+
+.app-sider .nav-leaf-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  width: 18px;
+  flex-shrink: 0;
+}
+
+.app-sider .nav-leaf-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sider .nav-leaf-badge {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.app-sider .nav-leaf.active .nav-leaf-badge {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 /* ---- Header ---- */
@@ -190,11 +303,58 @@
   color: var(--text-tertiary);
 }
 
+/* ---- Project switcher trigger (header variant) ---- */
+.project-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  background: #fff;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.project-switcher-trigger:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+.project-switcher-trigger.variant-header {
+  margin-right: 8px;
+}
+
+.project-switcher-trigger .psw-label {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.project-switcher-trigger .psw-name {
+  font-weight: 500;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-switcher-trigger .psw-arrow {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
 /* ---- Content ---- */
 .app-content {
   padding: 24px 32px;
   background: var(--bg-page);
-  min-height: calc(100vh - var(--header-height));
+  /* Independent scroll: the outer .app-layout is locked to 100vh, so the
+     content area gets the remaining viewport height and scrolls by itself. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ---- Login page ---- */
