@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     DateTime,
     Enum,
-    ForeignKey,
     Integer,
     String,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import foreign
 
 from app.db import Base
 from app.models.common import created_at_column, updated_at_column
@@ -49,10 +49,14 @@ class Customer(Base):
     updated_at: Mapped["DateTime"] = updated_at_column()
 
     projects: Mapped[list["Project"]] = relationship(
-        "Project", back_populates="customer", cascade="all, delete-orphan"
+        "Project",
+        primaryjoin="foreign(Project.customer_id) == Customer.id",
+        viewonly=True,
     )
     admin_users: Mapped[list["AdminUser"]] = relationship(
-        "AdminUser", back_populates="customer"
+        "AdminUser",
+        primaryjoin="foreign(AdminUser.customer_id) == Customer.id",
+        viewonly=True,
     )
 
     def __repr__(self) -> str:
@@ -87,16 +91,18 @@ class AdminUser(Base):
         nullable=False,
         default=AdminStatus.ACTIVE,
     )
-    customer_id: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("geo_customers.id", name="fk_admin_users_customer"),
-        nullable=True,
-    )
+    # Plain column (no FK) — see CLAUDE.md "外键约定". Deleting a Customer
+    # row leaves AdminUser rows intact; the API layer enforces tenancy.
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_login_at: Mapped["DateTime | None"] = mapped_column(DateTime, nullable=True)
     created_at: Mapped["DateTime"] = created_at_column()
     updated_at: Mapped["DateTime"] = updated_at_column()
 
-    customer: Mapped["Customer | None"] = relationship("Customer", back_populates="admin_users")
+    customer: Mapped["Customer | None"] = relationship(
+        "Customer",
+        primaryjoin="foreign(AdminUser.customer_id) == Customer.id",
+        passive_deletes=True,
+    )
 
     def __repr__(self) -> str:
         return f"<AdminUser id={self.id} username={self.username!r} role={self.role!r}>"

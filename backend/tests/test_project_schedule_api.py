@@ -80,7 +80,11 @@ async def project(client, h):
             f"/api/customers/{cid}/projects", json={"name": "P", "code": "P1"}, headers=h
         )
     ).json()["id"]
-    await client.put(f"/api/projects/{pid}/prompts", json={"prompts": ["q1"]}, headers=h)
+    await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={"prompts": [{"prompt": "q1"}]},
+        headers=h,
+    )
     await client.put(
         f"/api/projects/{pid}/platforms",
         json={"platforms": [{"platform": "deepseek", "mode": "search", "screenshot": 0}]},
@@ -225,6 +229,7 @@ async def test_schedule_status_rejects_enable_without_slots(client, h, project):
         f"/api/projects/{project}/schedule/status", json={"status": "enabled"}, headers=h
     )
     assert r.status_code == 400
+    assert "调度时间槽" in r.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -241,7 +246,19 @@ async def test_schedule_status_rejects_bad_value(client, h, project):
 
 
 @pytest.mark.asyncio
-async def test_trigger_creates_queued_run(client, h, project):
+async def test_trigger_creates_queued_run(client, h, project, monkeypatch):
+    # The endpoint queues a ScheduleRun and fires ``run_project_async`` as a
+    # background task. The runner talks to the remote API (and to the prod
+    # ``get_session_factory``, which here points at MySQL while the test
+    # override routes through SQLite); stub it out so the test stays
+    # local and doesn't try to read a row from a different engine.
+    async def fake_run_project_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.api.projects.run_project_async", fake_run_project_async
+    )
+
     r = await client.post(f"/api/projects/{project}/schedule/trigger", headers=h)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -257,8 +274,15 @@ async def test_trigger_creates_queued_run(client, h, project):
 
 
 @pytest.mark.asyncio
-async def test_trigger_is_cooldown_deduped(client, h, project):
+async def test_trigger_is_cooldown_deduped(client, h, project, monkeypatch):
     """Second trigger inside the same 5-minute bucket is skipped, not duplicated."""
+    async def fake_run_project_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.api.projects.run_project_async", fake_run_project_async
+    )
+
     first = (await client.post(f"/api/projects/{project}/schedule/trigger", headers=h)).json()
     second = (await client.post(f"/api/projects/{project}/schedule/trigger", headers=h)).json()
 

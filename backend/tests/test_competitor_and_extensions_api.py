@@ -295,16 +295,24 @@ def _seed_full_project(strategy: str, region_codes: list[str] | None = None) -> 
             region_strategy=strategy,
             region_codes=region_codes,
         )
-        project.prompts = [ProjectPrompt(prompt="q1", sort=1)]
-        project.keywords = [ProjectKeyword(keyword="k", sort=1)]
-        project.platforms = [
-            ProjectPlatform(
-                platform="deepseek", mode="search", screenshot=1, sort=1
-            )
-        ]
         db.add(project)
+        db.flush()
+        # Parent collections are viewonly=True (no-FK convention), so we add
+        # children explicitly with the FK column set — see CLAUDE.md "外键约定".
+        db.add_all(
+            [
+                ProjectPrompt(project_id=project.id, prompt="q1", sort=1),
+                ProjectKeyword(project_id=project.id, keyword="k", sort=1),
+                ProjectPlatform(
+                    project_id=project.id,
+                    platform="deepseek",
+                    mode="search",
+                    screenshot=1,
+                    sort=1,
+                ),
+            ]
+        )
         db.commit()
-        db.refresh(project)
         return project.id
 
 
@@ -312,7 +320,7 @@ def test_run_project_uses_fixed_region_when_strategy_fixed():
     pid = _seed_full_project("fixed", ["410000"])
     captured: dict = {}
 
-    async def fake_submit(self, payload):
+    async def fake_submit(self, payload, **_kwargs):
         captured["payload"] = payload
         return {
             "taskId": "remote-1",
@@ -321,19 +329,27 @@ def test_run_project_uses_fixed_region_when_strategy_fixed():
             "subTaskList": [],
         }
 
-    original = scheduler.MolizhishuClient.submit_task
+    # Patch both clients so the test is robust against either branch of
+    # ``_build_submit_client`` (settings.llm_mode).
+    orig_m = scheduler.MolizhishuClient.submit_task
+    orig_l = scheduler.LLMClient.submit_task
     scheduler.MolizhishuClient.submit_task = fake_submit  # type: ignore
+    scheduler.LLMClient.submit_task = fake_submit  # type: ignore
     try:
         with freeze_time("2026-08-10 09:00:00", tz_offset=-8):
             run_id = scheduler.run_project(pid, 1, RunTrigger.CRON)
         assert run_id is not None
     finally:
-        scheduler.MolizhishuClient.submit_task = original  # type: ignore
+        scheduler.MolizhishuClient.submit_task = orig_m  # type: ignore
+        scheduler.LLMClient.submit_task = orig_l  # type: ignore
 
     assert captured["payload"]["regionCode"] == ["410000"]
     with TestSessionLocal() as db:
         run = db.get(ScheduleRun, run_id)
-        assert run.status == RunStatus.SUCCESS
+        # Submit response is "pending" → local run row stays RUNNING.
+        # The status only advances once the polling sync observes a
+        # terminal remote status (see test_sync.py).
+        assert run.status == RunStatus.RUNNING
         # regionCode also persisted on the Task row
         from app.models.task import Task
 
@@ -345,7 +361,7 @@ def test_run_project_samples_national_random_when_strategy_random():
     pid = _seed_full_project("national_random")
     captured: dict = {}
 
-    async def fake_submit(self, payload):
+    async def fake_submit(self, payload, **_kwargs):
         captured["payload"] = payload
         return {
             "taskId": "remote-2",
@@ -354,8 +370,10 @@ def test_run_project_samples_national_random_when_strategy_random():
             "subTaskList": [],
         }
 
-    original = scheduler.MolizhishuClient.submit_task
+    orig_m = scheduler.MolizhishuClient.submit_task
+    orig_l = scheduler.LLMClient.submit_task
     scheduler.MolizhishuClient.submit_task = fake_submit  # type: ignore
+    scheduler.LLMClient.submit_task = fake_submit  # type: ignore
     try:
         # Custom sampler: ignore the pool, always return a fixed value.
         # This proves the scheduler is reading through ``rand`` rather
@@ -370,7 +388,8 @@ def test_run_project_samples_national_random_when_strategy_random():
             )
         assert run_id is not None
     finally:
-        scheduler.MolizhishuClient.submit_task = original  # type: ignore
+        scheduler.MolizhishuClient.submit_task = orig_m  # type: ignore
+        scheduler.LLMClient.submit_task = orig_l  # type: ignore
 
     assert captured["payload"]["regionCode"] == ["999999"]
 
@@ -379,7 +398,7 @@ def test_run_project_omits_region_when_fixed_strategy_has_no_codes():
     pid = _seed_full_project("fixed", region_codes=None)
     captured: dict = {}
 
-    async def fake_submit(self, payload):
+    async def fake_submit(self, payload, **_kwargs):
         captured["payload"] = payload
         return {
             "taskId": "remote-3",
@@ -388,12 +407,15 @@ def test_run_project_omits_region_when_fixed_strategy_has_no_codes():
             "subTaskList": [],
         }
 
-    original = scheduler.MolizhishuClient.submit_task
+    orig_m = scheduler.MolizhishuClient.submit_task
+    orig_l = scheduler.LLMClient.submit_task
     scheduler.MolizhishuClient.submit_task = fake_submit  # type: ignore
+    scheduler.LLMClient.submit_task = fake_submit  # type: ignore
     try:
         with freeze_time("2026-08-10 09:10:00", tz_offset=-8):
             scheduler.run_project(pid, 1, RunTrigger.CRON)
     finally:
-        scheduler.MolizhishuClient.submit_task = original  # type: ignore
+        scheduler.MolizhishuClient.submit_task = orig_m  # type: ignore
+        scheduler.LLMClient.submit_task = orig_l  # type: ignore
 
     assert "regionCode" not in captured["payload"]

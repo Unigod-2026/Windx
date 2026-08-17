@@ -51,20 +51,25 @@ def _create_project() -> int:
     with TestSessionLocal() as db:
         customer = Customer(name="Acme", code="ACME")
         project = Project(customer=customer, name="Monitor", code="MON")
-        project.prompts = [
-            ProjectPrompt(prompt="first question", sort=1),
-        ]
-        project.keywords = [
-            ProjectKeyword(keyword="alpha", sort=1),
-        ]
-        project.platforms = [
-            ProjectPlatform(
-                platform="deepseek", mode="search", screenshot=1, sort=1
-            )
-        ]
         db.add(project)
+        db.flush()
+        # Parent collections are viewonly=True (no-FK convention) — see
+        # CLAUDE.md "外键约定" — so we add children explicitly with the
+        # project_id column populated.
+        db.add_all(
+            [
+                ProjectPrompt(project_id=project.id, prompt="first question", sort=1),
+                ProjectKeyword(project_id=project.id, keyword="alpha", sort=1),
+                ProjectPlatform(
+                    project_id=project.id,
+                    platform="deepseek",
+                    mode="search",
+                    screenshot=1,
+                    sort=1,
+                ),
+            ]
+        )
         db.commit()
-        db.refresh(project)
         return project.id
 
 
@@ -139,7 +144,7 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
 
     counter = {"i": 0}
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         counter["i"] += 1
         i = counter["i"]
         return {
@@ -157,7 +162,8 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
 
     # First cron call at 09:00 lands in bucket 0 → real run.
     with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
@@ -165,7 +171,10 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
     assert first_run_id is not None
     with TestSessionLocal() as db:
         first = db.get(ScheduleRun, first_run_id)
-        assert first.status == RunStatus.SUCCESS
+        # The remote submit returns ``status=pending`` — the run is still
+        # in flight and the local row must reflect that. See
+        # ``test_run_project_maps_remote_status_onto_local_run_status``.
+        assert first.status == RunStatus.RUNNING
         assert first.cooldown_key == "project-1-slot-1-20260807090"
 
     # 09:04 is still bucket 0 → manual trigger collides on the unique index.
@@ -184,7 +193,9 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
     assert third_run_id != first_run_id
     with TestSessionLocal() as db:
         third = db.get(ScheduleRun, third_run_id)
-        assert third.status == RunStatus.SUCCESS
+        # Same as the first cron call: the submit returns ``status=pending``,
+        # so the run row stays RUNNING until polling/callback advances it.
+        assert third.status == RunStatus.RUNNING
         assert third.cooldown_key == "project-1-slot-1-20260807091"
 
     # The two successful runs coexist; the skipped row is preserved too.
@@ -195,7 +206,10 @@ def test_freezegun_cooldown_window_5min(monkeypatch):
             .order_by(ScheduleRun.id)
         ).all()
     statuses = sorted(r.status.value for r in rows)
-    assert statuses == ["skipped", "success", "success"]
+    # The two real submits returned ``status=pending`` from the mocked
+    # remote, so their rows stay RUNNING; the manual collision is recorded
+    # as SKIPPED via ``_record_skipped_run``.
+    assert statuses == ["running", "running", "skipped"]
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +224,7 @@ def test_freezegun_cooldown_does_not_cross_slots(monkeypatch):
 
     counter = {"i": 0}
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         counter["i"] += 1
         i = counter["i"]
         return {
@@ -220,7 +234,8 @@ def test_freezegun_cooldown_does_not_cross_slots(monkeypatch):
             "subTaskList": [],
         }
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
 
     with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
         run_one = scheduler.run_project(project_id, 1, RunTrigger.CRON)
@@ -238,7 +253,10 @@ def test_freezegun_cooldown_does_not_cross_slots(monkeypatch):
         ).all()
     assert len(rows) == 2
     assert {r.slot_index for r in rows} == {1, 2}
-    assert all(r.status == RunStatus.SUCCESS for r in rows)
+    # Both submits returned ``status=pending``; both rows must stay RUNNING
+    # until polling/callback actually advances them. See
+    # ``test_run_project_maps_remote_status_onto_local_run_status``.
+    assert all(r.status == RunStatus.RUNNING for r in rows)
     assert rows[0].cooldown_key == "project-1-slot-1-20260807090"
     assert rows[1].cooldown_key == "project-1-slot-2-20260807090"
 
@@ -255,7 +273,7 @@ def test_freezegun_run_records_timestamps_in_shanghai(monkeypatch):
 
     counter = {"i": 0}
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         counter["i"] += 1
         i = counter["i"]
         return {
@@ -265,7 +283,8 @@ def test_freezegun_run_records_timestamps_in_shanghai(monkeypatch):
             "subTaskList": [],
         }
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
 
     with freeze_time("2026-08-07 09:00:00", tz_offset=-8):
         run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)

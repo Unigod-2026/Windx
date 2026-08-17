@@ -1,6 +1,5 @@
 """``GET /api/auth/me`` tests.
 
-Same in-process ASGI + in-memory SQLite setup as ``test_customer_api``.
 The token ``sub`` is the AdminUser id we insert; ``app.deps.get_current_user``
 does the decode + lookup. We assert role/customer_id/status come back as
 plain strings so the React frontend can use them without parsing enums.
@@ -18,15 +17,10 @@ from sqlalchemy.pool import StaticPool
 from app.config import get_settings
 from app.db import Base, get_db
 from app.main import app
-# Importing the models package ensures every mapper is registered on
-# ``Base.metadata`` before ``create_all`` runs.
 from app.models import AdminUser, Customer  # noqa: F401
 
 settings = get_settings()
 
-# StaticPool + a single shared connection is required so every new Session
-# sees the same in-memory database (the default behaviour is a fresh DB
-# per connection).
 test_engine = create_engine(
     "sqlite+pysqlite:///:memory:",
     connect_args={"check_same_thread": False},
@@ -48,19 +42,11 @@ def override_db():
 
 @pytest.fixture(autouse=True)
 def _setup_db():
-    # Save whatever override was already installed (e.g. test_customer_api
-    # sets one at module-import time) so we can restore it on teardown.
-    # Without this, our override stays in place after the module finishes
-    # and the next module's tests would hit our empty engine.
-    prev = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = override_db
     Base.metadata.create_all(test_engine)
     yield
     Base.metadata.drop_all(test_engine)
-    if prev is None:
-        app.dependency_overrides.pop(get_db, None)
-    else:
-        app.dependency_overrides[get_db] = prev
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture()

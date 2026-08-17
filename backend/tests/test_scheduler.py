@@ -39,23 +39,30 @@ def _create_project(*, with_prompts: bool = True) -> int:
     with TestSessionLocal() as db:
         customer = Customer(name="Acme", code="ACME")
         project = Project(customer=customer, name="Monitor", code="MON")
-        if with_prompts:
-            project.prompts = [
-                ProjectPrompt(prompt="second question", sort=2),
-                ProjectPrompt(prompt="first question", sort=1),
-            ]
-        project.keywords = [
-            ProjectKeyword(keyword="beta", sort=2),
-            ProjectKeyword(keyword="alpha", sort=1),
-        ]
-        project.platforms = [
-            ProjectPlatform(
-                platform="deepseek", mode="search", screenshot=1, sort=1
-            )
-        ]
         db.add(project)
+        db.flush()
+        # Parent collections are viewonly=True (no-FK convention) — see
+        # CLAUDE.md "外键约定" — so we add children explicitly with the
+        # project_id column populated.
+        children: list = []
+        if with_prompts:
+            children += [
+                ProjectPrompt(project_id=project.id, prompt="second question", sort=2),
+                ProjectPrompt(project_id=project.id, prompt="first question", sort=1),
+            ]
+        children += [
+            ProjectKeyword(project_id=project.id, keyword="beta", sort=2),
+            ProjectKeyword(project_id=project.id, keyword="alpha", sort=1),
+            ProjectPlatform(
+                project_id=project.id,
+                platform="deepseek",
+                mode="search",
+                screenshot=1,
+                sort=1,
+            ),
+        ]
+        db.add_all(children)
         db.commit()
-        db.refresh(project)
         return project.id
 
 
@@ -146,7 +153,7 @@ def test_run_project_submits_project_configuration_and_persists_results(monkeypa
     project_id = _create_project()
     captured = {}
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         captured["payload"] = payload
         return {
             "taskId": "remote-1",
@@ -165,32 +172,39 @@ def test_run_project_submits_project_configuration_and_persists_results(monkeypa
             ],
         }
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    # Patch both clients so the test is robust against either branch of
+    # ``_build_submit_client`` (Settings.llm_mode).
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
     monkeypatch.setattr(scheduler, "now_local", lambda: datetime(2026, 8, 10, 9, 4))
-    scheduler.get_settings().molizhishu_callback_url = "https://callback.test/hook"
 
     run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
 
     assert captured["payload"] == {
         "prompts": ["first question", "second question"],
         "platforms": [
-            {"platform": "deepseek", "mode": "web", "screenshot": 1, "thinkingMode": False}
+            {"platform": "deepseek", "mode": "search", "screenshot": 1, "thinkingMode": False}
         ],
         "monitorKeywords": "alpha,beta",
-        "callbackUrl": "https://callback.test/hook",
     }
     with TestSessionLocal() as db:
         run = db.get(ScheduleRun, run_id)
         task = db.scalar(select(Task).where(Task.schedule_run_id == run_id))
-        subtask = db.scalar(select(Subtask).where(Subtask.task_id == task.id))
-        assert run.status == RunStatus.SUCCESS
-        assert run.task_id == task.id
+        subtask = db.scalar(select(Subtask).where(Subtask.task_id == task.task_id))
+        # The remote returns ``status=pending`` from submit_task — the task
+        # has been accepted but its subtasks haven't been processed yet.
+        # The local run row must mirror the remote state and stay RUNNING
+        # until something polls/callbacks us to advance it; otherwise the
+        # project list would show "成功" while 0/N subtasks are unprocessed.
+        assert run.status == RunStatus.RUNNING
+        assert run.finished_at is None
+        assert run.task_id == task.task_id
         assert task.customer_id is not None
         assert task.project_id == project_id
         assert task.task_id == "remote-1"
         assert task.prompts_json == ["first question", "second question"]
         assert task.platforms_json == [
-            {"platform": "deepseek", "mode": "web", "screenshot": 1, "thinkingMode": False}
+            {"platform": "deepseek", "mode": "search", "screenshot": 1, "thinkingMode": False}
         ]
         assert task.total_items == 1
         assert task.raw_request_json == captured["payload"]
@@ -205,12 +219,13 @@ def test_run_project_marks_missing_prompts_failed_without_remote_call(monkeypatc
     project_id = _create_project(with_prompts=False)
     called = False
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         nonlocal called
         called = True
         return {}
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
 
     run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
 
@@ -228,7 +243,7 @@ def test_run_project_returns_none_on_cooldown_collision(monkeypatch):
     fixed_now = datetime(2026, 8, 10, 9, 4)
     monkeypatch.setattr(scheduler, "now_local", lambda: fixed_now)
 
-    async def fake_submit(self, payload):
+    def fake_submit(self, payload, **_kwargs):
         return {
             "taskId": "remote-1",
             "status": "pending",
@@ -236,7 +251,8 @@ def test_run_project_returns_none_on_cooldown_collision(monkeypatch):
             "subTaskList": [],
         }
 
-    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task", fake_submit)
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
 
     first_run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
     second_run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
@@ -254,11 +270,176 @@ async def test_run_project_async_uses_executor(monkeypatch):
 
     captured = {}
 
-    def fake_run_project(project_id, slot_index, trigger_type):
-        captured["args"] = (project_id, slot_index, trigger_type)
+    def fake_run_project(project_id, slot_index, trigger_type, **kwargs):
+        captured["args"] = (project_id, slot_index, trigger_type, kwargs)
         return 42
 
     monkeypatch.setattr(scheduler, "run_project", fake_run_project)
 
     assert await scheduler.run_project_async(3, 0, RunTrigger.MANUAL) == 42
-    assert captured["args"] == (3, 0, RunTrigger.MANUAL)
+    assert captured["args"][:3] == (3, 0, RunTrigger.MANUAL)
+
+
+@pytest.mark.parametrize(
+    "remote_status, expected",
+    [
+        # Submit endpoint contract: ``status=pending`` is what we get back
+        # the moment the remote accepts the batch. The local run must NOT
+        # flip to SUCCESS — its subtasks haven't been processed yet.
+        ("pending", RunStatus.RUNNING),
+        ("processing", RunStatus.RUNNING),
+        ("assigned", RunStatus.RUNNING),
+        # Genuine terminal statuses from the remote. ``partial_completed``
+        # is treated as SUCCESS because the local RunStatus enum has no
+        # ``PARTIAL`` member; some subtasks succeeded, so the run did its
+        # job. ``stopped`` and ``error`` map to FAILED.
+        ("completed", RunStatus.SUCCESS),
+        ("partial_completed", RunStatus.SUCCESS),
+        ("failed", RunStatus.FAILED),
+        ("stopped", RunStatus.FAILED),
+        ("error", RunStatus.FAILED),
+        # Defensive: a missing/unknown status must NOT lie — default to
+        # RUNNING so the UI keeps the badge honest.
+        (None, RunStatus.RUNNING),
+        ("some-future-value", RunStatus.RUNNING),
+    ],
+)
+def test_run_project_maps_remote_status_onto_local_run_status(
+    monkeypatch, remote_status, expected
+):
+    """The submit response's ``status`` field decides the local row.
+
+    Regression for the bug where ``run_project`` hard-coded
+    ``run.status = SUCCESS`` right after submit, so the project list
+    showed "成功" while 0/N subtasks were still unprocessed.
+    """
+    from app.services import scheduler
+
+    project_id = _create_project()
+    fixed_now = datetime(2026, 8, 10, 9, 4)
+    monkeypatch.setattr(scheduler, "now_local", lambda: fixed_now)
+
+    response: dict = {
+        "taskId": "remote-1",
+        "totalTask": 1,
+        "subTaskList": [
+            {"subTaskId": "sub-1", "prompt": "q", "platform": "deepseek", "mode": "search"},
+        ],
+    }
+    if remote_status is not None:
+        response["status"] = remote_status
+
+    def fake_submit(self, payload, **_kwargs):
+        return response
+
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
+
+    run_id = scheduler.run_project(project_id, 1, RunTrigger.CRON)
+    assert run_id is not None
+    with TestSessionLocal() as db:
+        run = db.get(ScheduleRun, run_id)
+        assert run.status == expected
+        if expected in (RunStatus.SUCCESS, RunStatus.FAILED):
+            assert run.finished_at == fixed_now
+        else:
+            assert run.finished_at is None
+
+
+# --------------------------------------------------------------------------
+# Extraction hook gating
+# --------------------------------------------------------------------------
+
+
+def _patch_submit_with_answers(monkeypatch, *, answers: dict[str, str]):
+    """Patch both clients to return full subtask rows with answerContent.
+
+    ``answers`` is keyed by ``subTaskId`` so the test can stage a
+    different payload for each subtask.
+    """
+    def fake_submit(self, payload, **_kwargs):
+        sub_tasks = [
+            {
+                "subTaskId": sid,
+                "prompt": payload["prompts"][i] if i < len(payload["prompts"]) else "q",
+                "platform": "deepseek",
+                "mode": "search",
+                "status": "completed",
+                "answerContent": answers.get(sid, ""),
+            }
+            for i, sid in enumerate(["sub-1", "sub-2"])
+        ]
+        return {
+            "taskId": "remote-1",
+            "status": "completed",
+            "totalTask": len(sub_tasks),
+            "subTaskList": sub_tasks,
+        }
+
+    from app.services import scheduler
+
+    monkeypatch.setattr(scheduler.MolizhishuClient, "submit_task_sync", fake_submit)
+    monkeypatch.setattr(scheduler.LLMClient, "submit_task_sync", fake_submit)
+
+
+def test_run_project_skips_extraction_in_molizhishu_mode(monkeypatch):
+    """``LLM_MODE=molizhishu`` ⇒ ``extract_brand_mentions`` must NOT run.
+
+    In molizhishu mode the submit response carries empty
+    ``answerContent`` (the real answer arrives 5–30 minutes later via
+    polling). Running extraction here would burn an LLM pass on every
+    brand against an empty string and mark the row ``skipped``
+    forever — the polling sync is responsible for re-running
+    extraction once the real ``answerContent`` lands.
+    """
+    from app.config import get_settings
+    from app.services import scheduler
+
+    monkeypatch.setenv("LLM_MODE", "molizhishu")
+    get_settings.cache_clear()
+
+    project_id = _create_project()
+    _patch_submit_with_answers(monkeypatch, answers={"sub-1": "", "sub-2": ""})
+
+    extraction_calls: list[str] = []
+    def fake_extract(sid):
+        extraction_calls.append(sid)
+        from app.services.extraction import ExtractionResult
+        return ExtractionResult(sid, 0, 0, 0)
+    monkeypatch.setattr(scheduler, "extract_brand_mentions", fake_extract)
+
+    scheduler.run_project(project_id, 1, RunTrigger.CRON)
+
+    assert extraction_calls == [], (
+        "extract_brand_mentions must NOT be called in molizhishu mode"
+    )
+
+
+def test_run_project_triggers_extraction_in_llm_mode(monkeypatch):
+    """``LLM_MODE=llm`` ⇒ ``extract_brand_mentions`` IS called per subtask.
+
+    LLMClient returns the full payload synchronously, so the
+    ``answer_content`` is real and the extraction hook fires
+    immediately after the run row is committed.
+    """
+    from app.config import get_settings
+    from app.services import scheduler
+
+    monkeypatch.setenv("LLM_MODE", "llm")
+    get_settings.cache_clear()
+
+    project_id = _create_project()
+    _patch_submit_with_answers(
+        monkeypatch, answers={"sub-1": "answer-1", "sub-2": "answer-2"}
+    )
+
+    extraction_calls: list[str] = []
+    def fake_extract(sid):
+        extraction_calls.append(sid)
+        from app.services.extraction import ExtractionResult
+        return ExtractionResult(sid, 0, 0, 0)
+    monkeypatch.setattr(scheduler, "extract_brand_mentions", fake_extract)
+
+    scheduler.run_project(project_id, 1, RunTrigger.CRON)
+
+    assert sorted(extraction_calls) == ["sub-1", "sub-2"]

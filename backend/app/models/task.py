@@ -22,7 +22,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
-    ForeignKey,
     Index,
     Integer,
     String,
@@ -30,6 +29,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import foreign
 
 from app.db import Base
 from app.models.common import created_at_column, now_local, updated_at_column
@@ -44,15 +44,18 @@ if TYPE_CHECKING:
 class Task(Base):
     __tablename__ = "geo_tasks"
     __table_args__ = (
-        UniqueConstraint("task_id", name="uq_tasks_task_id"),
         Index("ix_tasks_status", "status"),
         Index("ix_tasks_customer_created", "customer_id", "created_local_at"),
         Index("ix_tasks_project_created", "project_id", "created_local_at"),
+        # Lets ``WHERE project_id=? ORDER BY task_id DESC`` use the index for
+        # ordering instead of filesorting; ``task_id`` is a 32-char hex PK
+        # whose lexical order matches insertion order, so "newest first" =
+        # "task_id DESC".
+        Index("ix_tasks_project_task", "project_id", "task_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    # Remote taskId (32-char hex), see docs/api/submit-task.md.
-    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Remote taskId (32-char hex) doubles as the PK — see docs/api/submit-task.md.
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     prompts_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     platforms_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -81,55 +84,57 @@ class Task(Base):
     updated_at: Mapped[datetime] = updated_at_column()
 
     # Multi-tenant / schedule linkage (all nullable: ad-hoc tasks have none).
-    customer_id: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("geo_customers.id", name="fk_tasks_customer"),
-        nullable=True,
-    )
-    project_id: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("geo_projects.id", name="fk_tasks_project"),
-        nullable=True,
-    )
-    schedule_run_id: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("geo_schedule_runs.id", name="fk_tasks_schedule_run"),
-        nullable=True,
-    )
+    # Plain columns (no FK) — see CLAUDE.md "外键约定".
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schedule_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # No cascade, no ``back_populates``: deleting a Task row must not
+    # cascade-delete its Subtask / Competitor rows and must not null the
+    # remote-id columns on dependent rows. The DB FKs were dropped for
+    # exactly this reason; the relationships here are unidirectional
+    # collections (navigable ``task.subtasks`` / ``task.competitors``)
+    # only.
     subtasks: Mapped[list["Subtask"]] = relationship(
         "Subtask",
-        back_populates="task",
-        cascade="all, delete-orphan",
-        order_by="Subtask.id",
+        primaryjoin="foreign(Subtask.task_id) == Task.task_id",
+        viewonly=True,
+        order_by="Subtask.subtask_id",
     )
     competitors: Mapped[list["Competitor"]] = relationship(
-        "Competitor", back_populates="task", cascade="all, delete-orphan"
+        "Competitor",
+        primaryjoin="foreign(Competitor.task_id) == Task.task_id",
+        viewonly=True,
     )
-    customer: Mapped["Customer | None"] = relationship("Customer")
-    project: Mapped["Project | None"] = relationship("Project", back_populates="tasks")
+    customer: Mapped["Customer | None"] = relationship(
+        "Customer",
+        primaryjoin="foreign(Task.customer_id) == Customer.id",
+        passive_deletes=True,
+    )
+    project: Mapped["Project | None"] = relationship(
+        "Project",
+        primaryjoin="foreign(Task.project_id) == Project.id",
+        passive_deletes=True,
+    )
     schedule_run: Mapped["ScheduleRun | None"] = relationship(
-        "ScheduleRun", back_populates="tasks"
+        "ScheduleRun",
+        primaryjoin="foreign(Task.schedule_run_id) == ScheduleRun.id",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
-        return f"<Task id={self.id} task_id={self.task_id!r} status={self.status!r}>"
+        return f"<Task task_id={self.task_id!r} status={self.status!r}>"
 
 
 class Subtask(Base):
     __tablename__ = "geo_subtasks"
-    __table_args__ = (
-        UniqueConstraint("subtask_id", name="uq_subtasks_subtask_id"),
-        Index("ix_subtasks_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_subtasks_task_id", "task_id"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    subtask_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    task_id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("geo_tasks.id", name="fk_subtasks_task", ondelete="CASCADE"),
-        nullable=False,
-    )
+    # Remote subTaskId (32-char hex) is the PK — see docs/api/submit-task.md.
+    subtask_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Plain column, no FK: deletes of the parent Task row do not cascade and
+    # the value is the remote taskId rather than a local surrogate.
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
     platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -148,15 +153,22 @@ class Subtask(Base):
     raw_result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = updated_at_column()
 
-    task: Mapped["Task"] = relationship("Task", back_populates="subtasks")
+    # Unidirectional navigation back to the parent Task.
+    task: Mapped["Task | None"] = relationship(
+        "Task",
+        primaryjoin="foreign(Subtask.task_id) == Task.task_id",
+        passive_deletes=True,
+    )
     competitors: Mapped[list["Competitor"]] = relationship(
-        "Competitor", back_populates="subtask"
+        "Competitor",
+        primaryjoin="foreign(Competitor.subtask_id) == Subtask.subtask_id",
+        viewonly=True,
     )
 
     def __repr__(self) -> str:
         return (
-            f"<Subtask id={self.id} subtask_id={self.subtask_id!r} "
-            f"task_id={self.task_id} status={self.status!r}>"
+            f"<Subtask subtask_id={self.subtask_id!r} "
+            f"task_id={self.task_id!r} status={self.status!r}>"
         )
 
 

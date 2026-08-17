@@ -70,3 +70,62 @@ class DeliveryMode(str, Enum):
 
     WEB = "web"
     MOBILE = "mobile"
+
+
+class PromptStatus(str, Enum):
+    """Per-prompt monitoring state.
+
+    - ``monitoring`` — actively submitted on each scheduled run
+    - ``paused`` — kept in the prompt list but excluded from runs
+    - ``archived`` — soft-deleted; kept for historical run breakdowns
+    """
+
+    MONITORING = "monitoring"
+    PAUSED = "paused"
+    ARCHIVED = "archived"
+
+
+class CompetitorOrigin(str, Enum):
+    """How a ``ProjectCompetitor`` row was added to the project.
+
+    Distinct from :class:`CompetitorSource` (which tags *where in the AI
+    response* an automatically extracted mention came from — see the
+    ``geo_competitors`` table).
+
+    ``MANUAL`` — entered by the user in the project editor.
+    ``AUTO_DISCOVERED`` — surfaced by the LLM extraction pass over a
+    recent answer; sits in ``status=PENDING`` until the user confirms.
+    """
+
+    MANUAL = "manual"
+    AUTO_DISCOVERED = "auto_discovered"
+
+
+class CompetitorStatus(str, Enum):
+    """Lifecycle of a ``ProjectCompetitor`` row.
+
+    ``CONFIRMED`` — actively watched, ranks in the analysis.
+    ``PENDING`` — Agent-discovered, awaiting user confirmation.
+    ``DISMISSED`` — explicitly rejected by the user; excluded from
+    future extraction but kept for audit.
+    """
+
+    CONFIRMED = "confirmed"
+    PENDING = "pending"
+    DISMISSED = "dismissed"
+
+
+class ExtractStatus(str, Enum):
+    """Pipeline state for a ``geo_brand_mentions`` row.
+
+    ``PENDING`` — regex hit recorded, LLM pass not yet finished.
+    ``SUCCESS`` — every field the LLM was supposed to fill is filled.
+    ``FAILED`` — LLM call blew up; row still has the regex data so the
+    count is honest, ``extract_error`` carries the traceback tail.
+    ``SKIPPED`` — regex did not hit any brand; no LLM call needed.
+    """
+
+    PENDING = "pending"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"

@@ -1,15 +1,15 @@
 """``POST /api/auth/login`` tests.
 
-Same in-process ASGI + in-memory SQLite setup as ``test_auth_me``. We use
-``app.services.password.hash_password`` so the stored hash matches what the
-endpoint verifies with — verifying against a hand-written bcrypt hash would
-work too but couples the tests to the salt format.
+We use ``app.services.password.hash_password`` so the stored hash matches
+what the endpoint verifies with — verifying against a hand-written bcrypt
+hash would work too but couples the tests to the salt format.
 """
 
 from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from jose import jwt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -43,15 +43,11 @@ def override_db():
 
 @pytest.fixture(autouse=True)
 def _setup_db():
-    prev = app.dependency_overrides.get(get_db)
     app.dependency_overrides[get_db] = override_db
     Base.metadata.create_all(test_engine)
     yield
     Base.metadata.drop_all(test_engine)
-    if prev is None:
-        app.dependency_overrides.pop(get_db, None)
-    else:
-        app.dependency_overrides[get_db] = prev
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture()
@@ -93,8 +89,6 @@ def disabled_admin():
 
 
 def _decode_sub(token: str) -> str:
-    from jose import jwt
-
     return jwt.decode(
         token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
     )["sub"]
@@ -119,7 +113,11 @@ async def test_login_records_last_login_at(client, seeded_admin):
         "/api/auth/login", json={"username": "admin", "password": "s3cret"}
     )
     assert r.status_code == 200, r.text
+    # The login handler commits ``last_login_at`` via its own session; end
+    # the test session's open transaction and expire the cached row so the
+    # next read picks up the API's update.
     with TestSessionLocal() as db:
+        db.expire_all()
         u = db.get(AdminUser, seeded_admin)
         assert u.last_login_at is not None
 

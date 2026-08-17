@@ -18,7 +18,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
-    ForeignKey,
     Index,
     Integer,
     SmallInteger,
@@ -27,6 +26,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import foreign
 
 from app.db import Base
 from app.models.enums import RunStatus, RunTrigger
@@ -50,11 +50,8 @@ class ScheduleRun(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("geo_projects.id", name="fk_schedule_runs_project"),
-        nullable=False,
-    )
+    # Plain column (no FK) — see CLAUDE.md "外键约定".
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False)
     # 1 or 2 for cron slots, 0 for manual triggers.
     slot_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     trigger_type: Mapped[RunTrigger] = mapped_column(
@@ -78,14 +75,23 @@ class ScheduleRun(Base):
         default=RunStatus.QUEUED,
     )
     # Plain column (no FK): breaks the Task<->Run cycle and survives the
-    # SQLAlchemy ``after_insert`` ordering for back-references.
-    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # SQLAlchemy ``after_insert`` ordering for back-references. Stores the
+    # remote ``taskId`` (string) rather than a local surrogate.
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # ``project-{id}-slot-{idx}-{YYYYMMDDHH}{floor(minute/5)}`` — 5 minute dedupe window.
     cooldown_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    project: Mapped["Project"] = relationship("Project", back_populates="runs")
-    tasks: Mapped[list["Task"]] = relationship("Task", back_populates="schedule_run")
+    project: Mapped["Project | None"] = relationship(
+        "Project",
+        primaryjoin="foreign(ScheduleRun.project_id) == Project.id",
+        passive_deletes=True,
+    )
+    tasks: Mapped[list["Task"]] = relationship(
+        "Task",
+        primaryjoin="foreign(Task.schedule_run_id) == ScheduleRun.id",
+        viewonly=True,
+    )
 
     def __repr__(self) -> str:
         return (

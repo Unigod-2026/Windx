@@ -23,15 +23,21 @@ def db_module_with_sqlite(monkeypatch: pytest.MonkeyPatch):
 
     ``JWT_SECRET`` is forced for the same reason: ``Settings`` now requires
     it, so the lazy ``_build_engine`` call would otherwise raise during
-    the test.
+    the test. ``get_settings.cache_clear()`` is also called so the next
+    ``Settings()`` read picks up the patched env vars instead of returning
+    a previously-cached instance.
     """
     monkeypatch.setenv("DATABASE_URL", "sqlite+pysqlite:///:memory:")
     monkeypatch.setenv("JWT_SECRET", "test-secret")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
     db_module.reset_engine()
     try:
         yield db_module
     finally:
         db_module.reset_engine()
+        get_settings.cache_clear()
 
 
 def test_engine_uses_sqlite_url(db_module_with_sqlite) -> None:

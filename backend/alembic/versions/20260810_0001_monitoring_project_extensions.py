@@ -113,12 +113,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
-        sa.ForeignKeyConstraint(
-            ["project_id"],
-            ["geo_projects.id"],
-            name="fk_project_competitors_project",
-            ondelete="CASCADE",
-        ),
         sa.UniqueConstraint(
             "project_id", "name", name="uq_project_competitors_project_name"
         ),

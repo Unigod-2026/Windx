@@ -33,7 +33,7 @@ def list_tasks(
         stmt = stmt.where(Task.project_id == project_id)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = db.scalars(
-        stmt.order_by(Task.id.desc()).offset((page - 1) * size).limit(size)
+        stmt.order_by(Task.task_id.desc()).offset((page - 1) * size).limit(size)
     ).all()
     return {
         "items": [

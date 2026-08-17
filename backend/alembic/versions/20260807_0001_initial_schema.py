@@ -16,6 +16,13 @@ per project in `geo_schedule_runs`.
 All DATETIME columns are naive local time; the container and MySQL session both
 run in Asia/Shanghai (see CLAUDE.md). Remote millisecond epochs are stored as
 BIGINT to stay lossless.
+
+No foreign keys
+---------------
+This migration (and every subsequent one) intentionally declares zero
+``ForeignKeyConstraint`` blocks. Every relationship between rows is
+expressed as a plain indexed column plus a SQLAlchemy ``relationship`` on
+the ORM side. See CLAUDE.md "外键约定" for the rationale.
 """
 
 import sqlalchemy as sa
@@ -76,9 +83,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint("username", name="uq_admin_users_username"),
-        sa.ForeignKeyConstraint(
-            ["customer_id"], ["geo_customers.id"], name="fk_admin_users_customer"
-        ),
         **MYSQL_OPTS,
     )
 
@@ -108,9 +112,6 @@ def upgrade() -> None:
         sa.Column("slot2_minute", sa.SmallInteger(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["customer_id"], ["geo_customers.id"], name="fk_projects_customer"
-        ),
         sa.UniqueConstraint("customer_id", "code", name="uq_project_customer_code"),
         **MYSQL_OPTS,
     )
@@ -124,12 +125,6 @@ def upgrade() -> None:
         sa.Column("prompt", sa.Text(), nullable=False),
         sa.Column("sort", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["project_id"],
-            ["geo_projects.id"],
-            name="fk_project_prompts_project",
-            ondelete="CASCADE",
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_project_prompts_project_id", "geo_project_prompts", ["project_id"])
@@ -141,12 +136,6 @@ def upgrade() -> None:
         sa.Column("keyword", sa.String(255), nullable=False),
         sa.Column("sort", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["project_id"],
-            ["geo_projects.id"],
-            name="fk_project_keywords_project",
-            ondelete="CASCADE",
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_project_keywords_project_id", "geo_project_keywords", ["project_id"])
@@ -159,19 +148,14 @@ def upgrade() -> None:
         sa.Column("mode", sa.String(32), nullable=False),
         sa.Column("screenshot", sa.SmallInteger(), nullable=False, server_default="0"),
         sa.Column("sort", sa.Integer(), nullable=False, server_default="0"),
-        sa.ForeignKeyConstraint(
-            ["project_id"],
-            ["geo_projects.id"],
-            name="fk_project_platforms_project",
-            ondelete="CASCADE",
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_project_platforms_project_id", "geo_project_platforms", ["project_id"])
 
-    # Created before geo_tasks: geo_tasks.schedule_run_id carries a real FK here,
-    # while geo_schedule_runs.task_id stays a plain column to break the cycle
-    # (SQLite cannot ALTER ... ADD CONSTRAINT, so the FK cannot be added later).
+    # Created before geo_tasks so the ScheduleRun row can be reserved
+    # before the Task row exists. Both directions of the run↔task link
+    # (geo_tasks.schedule_run_id and geo_schedule_runs.task_id) are plain
+    # indexed columns — no FK on either side (see module docstring).
     op.create_table(
         "geo_schedule_runs",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -198,9 +182,6 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         # project-{id}-slot-{idx}-{YYYYMMDDHH}{floor(minute/5)} — 5 minute dedupe window.
         sa.Column("cooldown_key", sa.String(64), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["project_id"], ["geo_projects.id"], name="fk_schedule_runs_project"
-        ),
         sa.UniqueConstraint("cooldown_key", name="uq_schedule_runs_cooldown_key"),
         sa.CheckConstraint("slot_index IN (0, 1, 2)", name="ck_run_slot_index_range"),
         **MYSQL_OPTS,
@@ -238,17 +219,6 @@ def upgrade() -> None:
         sa.Column("project_id", sa.Integer(), nullable=True),
         sa.Column("schedule_run_id", sa.Integer(), nullable=True),
         sa.UniqueConstraint("task_id", name="uq_tasks_task_id"),
-        sa.ForeignKeyConstraint(
-            ["customer_id"], ["geo_customers.id"], name="fk_tasks_customer"
-        ),
-        sa.ForeignKeyConstraint(
-            ["project_id"], ["geo_projects.id"], name="fk_tasks_project"
-        ),
-        sa.ForeignKeyConstraint(
-            ["schedule_run_id"],
-            ["geo_schedule_runs.id"],
-            name="fk_tasks_schedule_run",
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_tasks_status", "geo_tasks", ["status"])
@@ -282,9 +252,6 @@ def upgrade() -> None:
         sa.Column("raw_result_json", sa.JSON(), nullable=True),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint("subtask_id", name="uq_subtasks_subtask_id"),
-        sa.ForeignKeyConstraint(
-            ["task_id"], ["geo_tasks.id"], name="fk_subtasks_task", ondelete="CASCADE"
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_subtasks_task_id", "geo_subtasks", ["task_id"])
@@ -302,15 +269,6 @@ def upgrade() -> None:
         ),
         sa.Column("raw_json", sa.JSON(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["task_id"], ["geo_tasks.id"], name="fk_competitors_task", ondelete="CASCADE"
-        ),
-        sa.ForeignKeyConstraint(
-            ["subtask_id"],
-            ["geo_subtasks.id"],
-            name="fk_competitors_subtask",
-            ondelete="SET NULL",
-        ),
         **MYSQL_OPTS,
     )
     op.create_index("ix_competitors_task_id", "geo_competitors", ["task_id"])

@@ -56,12 +56,16 @@ def _scheduled_projects(db: Session) -> list[tuple[int, int, int, int]]:
 
 
 def reload_jobs(scheduler: AsyncIOScheduler) -> int:
-    """Rebuild the scheduler's job set from ``geo_projects``.
+    """Rebuild the per-project job set from ``geo_projects``.
 
-    Existing jobs are dropped first so a reload always mirrors the database
-    exactly. Returns the number of jobs registered.
+    Only removes ``project-*-slot-*`` jobs — system jobs added in
+    ``main.lifespan`` (e.g. ``sync_pending_tasks``) are left alone, so a
+    schedule edit doesn't accidentally kill the background poll. Returns
+    the number of project jobs registered.
     """
-    scheduler.remove_all_jobs()
+    for job in scheduler.get_jobs():
+        if job.id.startswith("project-"):
+            scheduler.remove_job(job.id)
     with get_session_factory()() as db:
         entries = _scheduled_projects(db)
 

@@ -1,12 +1,10 @@
 """Customer CRUD + logo upload API tests.
 
-Hits the FastAPI app in-process via ``httpx.ASGITransport`` against an
-in-memory SQLite DB. The ``get_db`` dependency is overridden so each test
-sees a fresh schema (tables dropped/recreated on entry/exit).
+In-process ASGI + in-memory SQLite setup; logo uploads are redirected to
+a per-test tmp dir so the test never tries to write under ``/data/logos``.
 
-Auth: the plan defers real JWT issuance to Task 6. For now we mint a
-signed token whose ``sub`` claim is an ``AdminUser.id`` we just inserted;
-``app.deps.get_current_user`` does the decode + lookup and
+Auth: we mint a signed token whose ``sub`` claim is an ``AdminUser.id`` we
+just inserted; ``app.deps.get_current_user`` does the decode + lookup and
 ``require_super_admin`` checks the role.
 """
 
@@ -24,24 +22,19 @@ from sqlalchemy.pool import StaticPool
 from app.config import get_settings
 from app.db import Base, get_db
 from app.main import app
-# Importing the models package ensures every mapper is registered on
-# ``Base.metadata`` before ``create_all`` runs; without this the test
-# engine sees an empty schema.
 from app.models import AdminUser, Customer  # noqa: F401
 
 settings = get_settings()
 
-# A dedicated engine so the override doesn't fight the (lazily-built)
-# cached engine in app.db. StaticPool + a single shared connection is
-# required so every new Session sees the same in-memory database (the
-# default behaviour is a fresh DB per connection).
 test_engine = create_engine(
     "sqlite+pysqlite:///:memory:",
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
     future=True,
 )
-TestSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False, future=True)
+TestSessionLocal = sessionmaker(
+    bind=test_engine, autoflush=False, autocommit=False, future=True
+)
 
 
 def override_db():
@@ -52,20 +45,17 @@ def override_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_db
-
-
 @pytest.fixture(autouse=True)
 def _setup_db(monkeypatch, tmp_path):
     # Redirect logo storage into a per-test tmp dir so we don't try to
     # create /data/logos on a developer laptop.
     monkeypatch.setenv("LOGO_STORAGE_DIR", str(tmp_path / "logos"))
     settings.logo_storage_dir = str(tmp_path / "logos")
+    app.dependency_overrides[get_db] = override_db
     Base.metadata.create_all(test_engine)
     yield
     Base.metadata.drop_all(test_engine)
-    app.dependency_overrides.clear()
-    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture()

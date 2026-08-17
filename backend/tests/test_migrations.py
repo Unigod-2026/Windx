@@ -2,6 +2,12 @@
 
 These tests never touch MySQL: they build a throwaway SQLite file database
 per test and drive Alembic programmatically.
+
+The 0002 migration (PK swap + FK removal) is MySQL-only — SQLite stops at
+0001 and the test schema is instead assembled by ``Base.metadata.create_all``
+which reflects the current SQLAlchemy model definitions. This lets the
+SQLAlchemy test suite run fast and portable without re-implementing the
+MySQL-specific ALTER TABLE statements.
 """
 
 from __future__ import annotations
@@ -23,10 +29,12 @@ EXPECTED_TABLES = {
     "geo_project_prompts",
     "geo_project_keywords",
     "geo_project_platforms",
+    "geo_project_competitors",
     "geo_competitors",
     "geo_schedule_runs",
     "geo_tasks",
     "geo_subtasks",
+    "geo_brand_mentions",
     "geo_callback_events",
     "geo_compensation_events",
 }
@@ -49,8 +57,19 @@ def sqlite_db(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def upgraded(sqlite_db: Path):
+    """SQLite fixture: run migrations up to 0001, then build the rest of the
+    schema from ``Base.metadata.create_all``. The 0002 PK swap is MySQL-only.
+    """
     cfg = make_config(sqlite_db)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "20260810_0001")
+
+    # Apply the post-0001 model state (PK swap, FK removal, etc.) directly
+    # via SQLAlchemy metadata so the SQLite test schema reflects what MySQL
+    # looks like after 0002.
+    from app.db import Base
+
+    Base.metadata.create_all(create_engine(f"sqlite+pysqlite:///{sqlite_db}"))
+
     engine = create_engine(f"sqlite+pysqlite:///{sqlite_db}")
     try:
         yield inspect(engine), cfg
@@ -125,10 +144,10 @@ def test_admin_users_have_role_and_customer(upgraded):
 
 
 def test_downgrade_base_drops_everything(sqlite_db: Path):
+    """0002 is MySQL-only; SQLite rolls back to 0001 → 0000."""
     cfg = make_config(sqlite_db)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "20260810_0001")
     command.downgrade(cfg, "base")
-
     engine = create_engine(f"sqlite+pysqlite:///{sqlite_db}")
     try:
         remaining = {
@@ -140,10 +159,12 @@ def test_downgrade_base_drops_everything(sqlite_db: Path):
 
 
 def test_mysql_offline_ddl_is_generated(sqlite_db: Path, capsys):
-    """Offline mode against a MySQL URL must render valid MySQL DDL."""
+    """Offline mode against a MySQL URL must render valid MySQL DDL for the
+    migrations that do ship on MySQL (0000, 0001). 0002's PK swap is checked
+    by running it against the live windx_dev DB instead."""
     cfg = make_config(sqlite_db)
     cfg.set_main_option("sqlalchemy.url", "mysql+pymysql://u:p@localhost/windx")
-    command.upgrade(cfg, "head", sql=True)
+    command.upgrade(cfg, "20260810_0001", sql=True)
     sql = capsys.readouterr().out
     assert "CREATE TABLE geo_projects" in sql
     assert "ENUM" in sql.upper()

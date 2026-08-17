@@ -105,7 +105,16 @@ async def test_project_crud_and_config_tabs(client, h):
     assert r.status_code == 200, r.text
     pid = r.json()["id"]
 
-    r = await client.put(f"/api/projects/{pid}/prompts", json={"prompts": ["q1", "q2"]}, headers=h)
+    r = await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={
+            "prompts": [
+                {"prompt": "q1", "category": "引流感"},
+                {"prompt": "q2", "category": "场景类"},
+            ]
+        },
+        headers=h,
+    )
     assert r.status_code == 200, r.text
     r = await client.put(f"/api/projects/{pid}/keywords", json={"keywords": ["k1"]}, headers=h)
     assert r.status_code == 200, r.text
@@ -119,7 +128,8 @@ async def test_project_crud_and_config_tabs(client, h):
     r = await client.get(f"/api/projects/{pid}", headers=h)
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["prompts"] == ["q1", "q2"]
+    assert [p["prompt"] for p in data["prompts"]] == ["q1", "q2"]
+    assert [p["category"] for p in data["prompts"]] == ["引流感", "场景类"]
     assert data["keywords"] == ["k1"]
     assert data["platforms"] == [
         {
@@ -295,12 +305,20 @@ async def test_config_put_is_full_replace_and_keeps_order(client, h):
     cid = await _customer(client, h)
     pid = await _project(client, h, cid)
 
-    await client.put(f"/api/projects/{pid}/prompts", json={"prompts": ["a", "b", "c"]}, headers=h)
-    r = await client.put(f"/api/projects/{pid}/prompts", json={"prompts": ["z", "y"]}, headers=h)
-    assert r.json() == {"ok": True, "count": 2}
+    await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={"prompts": [{"prompt": p} for p in ["a", "b", "c"]]},
+        headers=h,
+    )
+    r = await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={"prompts": [{"prompt": p} for p in ["z", "y"]]},
+        headers=h,
+    )
+    assert r.json() == {"ok": True, "count": 2, "dropped_categories": []}
 
     r = await client.get(f"/api/projects/{pid}", headers=h)
-    assert r.json()["prompts"] == ["z", "y"]
+    assert [p["prompt"] for p in r.json()["prompts"]] == ["z", "y"]
 
     # Emptying a tab is allowed.
     await client.put(f"/api/projects/{pid}/keywords", json={"keywords": []}, headers=h)
@@ -356,3 +374,137 @@ async def test_platforms_roundtrip_with_thinking_and_mobile(client, h):
     r = await client.get(f"/api/projects/{pid}", headers=h)
     assert r.json()["platforms"][0]["delivery_mode"] == "mobile"
     assert r.json()["platforms"][0]["thinking_mode"] is True
+
+
+# --------------------------------------------------------------------------
+# Prompt answers (查看原文 modal)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_prompt_answers_filters_by_prompt_and_window(client, h):
+    """Seed two projects + tasks + subtasks; only the matching (project,
+    prompt, window) subset should come back."""
+    from datetime import datetime, timedelta
+
+    from app.models.task import Subtask, Task
+
+    cid = await _customer(client, h)
+    pid = await _project(client, h, cid)
+    r = await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={"prompts": [{"prompt": "q-keep"}, {"prompt": "q-other"}]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"/api/projects/{pid}", headers=h)
+    prompts = r.json()["prompts"]
+    keep_id = next(p["id"] for p in prompts if p["prompt"] == "q-keep")
+
+    now = datetime(2026, 8, 14, 12, 0, 0)
+    with TestSessionLocal() as db:
+        for offset, prompt_text, platform in [
+            (-3, "q-keep", "deepseek"),
+            (-1, "q-keep", "doubao"),
+            (-10, "q-keep", "kimi"),
+            (-1, "q-other", "deepseek"),
+        ]:
+            t = Task(
+                task_id=f"t-{offset}-{platform}",
+                status="completed",
+                project_id=pid,
+                customer_id=cid,
+                created_local_at=now + timedelta(days=offset),
+            )
+            db.add(t)
+            db.flush()
+            db.add(
+                Subtask(
+                    subtask_id=f"s-{offset}-{platform}",
+                    task_id=t.task_id,
+                    platform=platform,
+                    mode="web",
+                    prompt=prompt_text,
+                    status="completed",
+                    answer_content=f"answer-{offset}-{platform}",
+                )
+            )
+        # Decoy: same prompt text, but on a task under a different project.
+        other_pid = await _project(client, h, cid, code="P2")
+        other_t = Task(
+            task_id="t-other-project",
+            status="completed",
+            project_id=other_pid,
+            customer_id=cid,
+            created_local_at=now,
+        )
+        db.add(other_t)
+        db.flush()
+        db.add(
+            Subtask(
+                subtask_id="s-other-project",
+                task_id=other_t.task_id,
+                platform="deepseek",
+                mode="web",
+                prompt="q-keep",
+                status="completed",
+                answer_content="should-not-show",
+            )
+        )
+        db.commit()
+
+    # Default days=15 should include everything (-3, -1, -10) but exclude
+    # the decoy from a different project.
+    r = await client.get(f"/api/projects/{pid}/prompts/{keep_id}/answers", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 3
+    texts = {item["answer_content"] for item in body["items"]}
+    assert "should-not-show" not in texts
+    assert "answer--10-kimi" in texts  # inside 15 days
+
+    # Tighten the window to 7 days: the -10 day row should drop.
+    r = await client.get(
+        f"/api/projects/{pid}/prompts/{keep_id}/answers?days=7", headers=h
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2
+
+    # Explicit start/end window over the past day only.
+    r = await client.get(
+        f"/api/projects/{pid}/prompts/{keep_id}/answers"
+        f"?start=2026-08-13&end=2026-08-14",
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 1
+    assert body["items"][0]["answer_content"] == "answer--1-doubao"
+
+
+@pytest.mark.asyncio
+async def test_list_prompt_answers_404_for_unknown_prompt(client, h):
+    cid = await _customer(client, h)
+    pid = await _project(client, h, cid)
+    r = await client.get(f"/api/projects/{pid}/prompts/9999/answers", headers=h)
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_prompt_answers_rejects_mismatched_window(client, h):
+    cid = await _customer(client, h)
+    pid = await _project(client, h, cid)
+    r = await client.put(
+        f"/api/projects/{pid}/prompts",
+        json={"prompts": [{"prompt": "q"}]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    r = await client.get(f"/api/projects/{pid}", headers=h)
+    prompt_id = r.json()["prompts"][0]["id"]
+    r = await client.get(
+        f"/api/projects/{pid}/prompts/{prompt_id}/answers?start=2026-08-14", headers=h
+    )
+    # start without end is a 400.
+    assert r.status_code == 400
