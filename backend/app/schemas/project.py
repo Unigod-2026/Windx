@@ -505,44 +505,6 @@ class QuestionPrevStat(BaseModel):
     rank_avg: float | None
 
 
-class QuestionAnalyticsItem(BaseModel):
-    """One question's roll-up for the 问题提及分析 tab.
-
-    Items are keyed by the prompt text (matches ``BrandMention.prompt``).
-    The prompt's category / status come from ``geo_project_prompts`` so
-    the frontend can group + sort without re-fetching project detail.
-    """
-
-    # ``ProjectPrompt.id`` for this prompt — needed by the frontend to
-    # call ``listPromptAnswers`` (which keys by numeric prompt_id).
-    prompt_id: int
-    prompt: str
-    category: str | None
-    status: str
-    # KPI cards.
-    total: int
-    matched: int
-    top1_rate: float
-    top3_rate: float
-    mention_rate: float
-    rank_avg: float | None
-    # Coverage: distinct platforms in the rows for this prompt.
-    coverage: int
-    # Per-platform breakdown for the 模型对比 table.
-    platforms: list[QuestionPlatformStat]
-    # Same-shape KPI block for the immediately-preceding window;
-    # None when the prev window is empty.
-    prev: QuestionPrevStat | None
-    # Same-shape KPI block for the "30 days back" window, used by the
-    # 「本月 vs 上月」 comparison card. None when no data exists that
-    # far back (e.g. fresh projects).
-    long_prev: QuestionPrevStat | None = None
-    # Latest 200-char AI answer excerpt per platform. Keys are the
-    # platform identifier; missing platforms get ``None`` so the UI
-    # can render a muted "暂无原文" card.
-    excerpts: dict[str, PlatformExcerpt | None] = {}
-
-
 class CategoryStat(BaseModel):
     """One category's roll-up, used by the 「下钻分析」 chip strip.
 
@@ -634,27 +596,6 @@ class QuestionCompetitorAnalyticsOut(BaseModel):
     excerpts: dict[str, PlatformExcerpt | None]
 
 
-class QuestionAnalyticsOut(BaseModel):
-    """Top-level response for ``GET /projects/{id}/questions/analytics``."""
-
-    project_id: int
-    # Inclusive window used for the "current" KPI block. Returned so the
-    # UI can echo "(2026-08-01 ~ 2026-08-14)" without re-deriving the
-    # window math on the client.
-    start: str
-    end: str
-    items: list[QuestionAnalyticsItem]
-    # Per-category roll-up, drives the 「下钻分析」 chip strip.
-    category_summary: list[CategoryStat] = []
-    # Brand × model matrix for each prompt that has any brand_mention
-    # rows in the window. Drives the 竞品分析 sub-pane (品牌 KPI 卡 +
-    # 位次表). Returned regardless of ``view`` so the client can flip
-    # between 产品 / 竞品 without a re-fetch — the matrix is small
-    # enough (≤5 brands × ≤7 models per prompt) that the cost is
-    # negligible compared to the other GROUP BYs we already run.
-    competitor: list[QuestionCompetitorOut] = []
-
-
 class CompetitorBrandStat(BaseModel):
     """One brand's row in the 竞品分析 view's brand × model matrix.
 
@@ -685,8 +626,8 @@ class CompetitorBrandStat(BaseModel):
 
 
 class QuestionCompetitorOut(BaseModel):
-    """One prompt's brand × model matrix. Returned inside
-    ``QuestionAnalyticsOut.competitor`` so a single round-trip gives the
+    """One prompt's brand × model matrix. Returned inside the
+    competitor endpoint response so a single round-trip gives the
     frontend everything the 竞品分析 sub-pane needs to render.
 
     ``brands`` is pre-sorted by the backend: the self brand first, then
