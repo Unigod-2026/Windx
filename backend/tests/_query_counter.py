@@ -1,5 +1,3 @@
-from collections.abc import Iterator
-
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 

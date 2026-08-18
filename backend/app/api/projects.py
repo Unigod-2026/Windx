@@ -12,8 +12,9 @@ swallowed by the int path converter.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import Integer, and_, case, func, select, update
@@ -44,6 +45,7 @@ from app.schemas.project import (
     CitationAnalysisOut,
     CitationOut,
     CompetitorAnalysisOut,
+    CompetitorBrandStat,
     CompetitorIn,
     CompetitorKpi,
     CompetitorListOut,
@@ -55,6 +57,7 @@ from app.schemas.project import (
     PromptAnswerOut,
     PromptAnswerDetailOut,
     KeywordsUpdate,
+    ModelDimension,
     PlatformsUpdate,
     ProjectCreate,
     ProjectDetailOut,
@@ -70,8 +73,16 @@ from app.schemas.project import (
     PromptsUpdate,
     QuestionAnalyticsItem,
     QuestionAnalyticsOut,
+    QuestionCompetitorOut,
     QuestionPlatformStat,
     QuestionPrevStat,
+    QuestionStableItem,
+    QuestionStatusChangesOut,
+    QuestionSummaryItem,
+    QuestionSummaryOut,
+    PlatformExcerpt,
+    CategoryStat,
+    DropEvent,
     RunSummary,
     ScheduleOut,
     ScheduleRunListOut,
@@ -88,6 +99,17 @@ from app.schemas.project import (
 from app.services.schedule_time import cooldown_key, next_run_at
 
 router = APIRouter(prefix="/api", tags=["projects"])
+
+
+# Sentiment label → float. The DB column is VARCHAR(16) holding the API label
+# ("positive" / "neutral" / "negative") since the API-pass refactor (migration
+# 20260818_0001). Dashboard KPIs still want a numeric average for the color
+# buckets (>=0.7 green / >=0.5 orange / else red), so we translate on the fly.
+_SENTIMENT_TO_FLOAT: dict[str, float] = {
+    "positive": 1.0,
+    "neutral": 0.5,
+    "negative": 0.0,
+}
 
 
 # --------------------------------------------------------------------------
@@ -1149,6 +1171,164 @@ def list_brand_mentions(
     )
 
 
+def _compute_question_summary(
+    db: Session,
+    project: Project,
+    *,
+    start: datetime,
+    end: datetime,
+) -> QuestionSummaryOut:
+    """按项目当前窗口聚合每个 prompt 的 KPI + 项目级 category summary。
+
+    单次 SELECT 取 per-(prompt, category, status, platform, rank) 行,
+    在 Python 中派生 per-prompt 和 per-category 两套聚合,严格遵守 spec
+    §4.1「从同一统计结果汇总,不再额外扫描 geo_brand_mentions」。
+    SQL 预算 = 1 条核心 SELECT。
+    """
+    rows = db.execute(
+        select(
+            ProjectPrompt.id,
+            BrandMention.prompt,
+            ProjectPrompt.category,
+            ProjectPrompt.status,
+            BrandMention.platform,
+            BrandMention.rank_position,
+        )
+        .join(ProjectPrompt, ProjectPrompt.prompt == BrandMention.prompt)
+        .where(
+            BrandMention.project_id == project.id,
+            ProjectPrompt.project_id == project.id,
+            BrandMention.is_self.is_(True),
+            BrandMention.created_at >= start,
+            BrandMention.created_at < end,
+        )
+    ).all()
+
+    per_prompt: dict[int, dict] = {}
+    cat_prompts: dict[str | None, set[int]] = defaultdict(set)
+    cat_matched: dict[str | None, int] = defaultdict(int)
+    cat_total: dict[str | None, int] = defaultdict(int)
+    cat_top1: dict[str | None, int] = defaultdict(int)
+    cat_top3: dict[str | None, int] = defaultdict(int)
+
+    for r in rows:
+        bucket = per_prompt.setdefault(
+            int(r.id),
+            {
+                "prompt": r.prompt or "",
+                "category": r.category,
+                "status": r.status or "active",
+                "total": 0,
+                "matched": 0,
+                "rank_sum": 0,
+                "rank_count": 0,
+                "top1": 0,
+                "top3": 0,
+                "platforms": set(),
+            },
+        )
+        bucket["total"] += 1
+        bucket["platforms"].add(r.platform)
+        if r.rank_position is not None:
+            bucket["matched"] += 1
+            bucket["rank_sum"] += r.rank_position
+            bucket["rank_count"] += 1
+            if r.rank_position == 1:
+                bucket["top1"] = 1
+            if r.rank_position <= 3:
+                bucket["top3"] = 1
+
+        cat = r.category
+        cat_prompts[cat].add(int(r.id))
+        cat_total[cat] += 1
+        if r.rank_position is not None:
+            cat_matched[cat] += 1
+        if r.rank_position == 1:
+            cat_top1[cat] += 1
+        if r.rank_position is not None and r.rank_position <= 3:
+            cat_top3[cat] += 1
+
+    items: list[QuestionSummaryItem] = []
+    for prompt_id, b in sorted(per_prompt.items()):
+        total = b["total"]
+        matched = b["matched"]
+        items.append(
+            QuestionSummaryItem(
+                prompt_id=prompt_id,
+                prompt=b["prompt"],
+                category=b["category"],
+                status=b["status"],
+                total=total,
+                matched=matched,
+                mention_rate=(matched / total) if total else 0.0,
+                top1_rate=b["top1"],
+                top3_rate=b["top3"],
+                rank_avg=(b["rank_sum"] / b["rank_count"]) if b["rank_count"] else None,
+                coverage=len(b["platforms"]),
+            )
+        )
+
+    category_summary: list[CategoryStat] = []
+    for cat, prompt_ids in cat_prompts.items():
+        total = cat_total[cat]
+        category_summary.append(
+            CategoryStat(
+                category=cat,
+                prompt_count=len(prompt_ids),
+                mention_rate=(cat_matched[cat] / total) if total else 0.0,
+                top1_rate=(cat_top1[cat] / total) if total else 0.0,
+                top3_rate=(cat_top3[cat] / total) if total else 0.0,
+            )
+        )
+
+    return QuestionSummaryOut(
+        project_id=project.id,
+        start=start,
+        end=end,
+        items=items,
+        category_summary=category_summary,
+    )
+
+
+@router.get("/projects/{project_id}/questions/summary", response_model=QuestionSummaryOut)
+def questions_summary(
+    project_id: int,
+    days: int = 15,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+) -> QuestionSummaryOut:
+    """摘要:左侧列表 + 项目级 category 汇总,只算当前窗口。
+
+    与旧 `/questions/analytics` 的差别:不返回平台明细、prev/long_prev、
+    摘录、竞品矩阵;由后续 tasks 的 product-analytics / competitor-analytics
+    端点按需加载。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise HTTPException(400, "start and end must be provided together")
+        if end < start:
+            raise HTTPException(400, "end must not be earlier than start")
+        win_start, win_end = start, end
+    else:
+        window_days = days if days is not None else 15
+        if window_days <= 0 or window_days > 90:
+            raise HTTPException(400, "days must be between 1 and 90")
+        today = now_local().date()
+        win_start = today - timedelta(days=window_days - 1)
+        win_end = today
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+
+    return _compute_question_summary(
+        db, project, start=win_start_dt, end=win_end_dt
+    )
+
+
 @router.get(
     "/projects/{project_id}/questions/analytics",
     response_model=QuestionAnalyticsOut,
@@ -1158,6 +1338,7 @@ def questions_analytics(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    view: Literal["self", "competitor"] = "self",
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
@@ -1170,15 +1351,19 @@ def questions_analytics(
     800+ self-brand rows, and the operator only saw the newest 100.
 
     This route fixes it: two ``GROUP BY``s on ``geo_brand_mentions``,
-    restricted to ``is_self=true`` and the requested window. The
-    client gets one round-trip with the exact numbers the backend
-    computed, and renders them.
+    restricted to the requested window and ``view`` mode. The client
+    gets one round-trip with the exact numbers the backend computed.
+
+    ``view=competitor`` flips the filter to ``is_self=false`` and adds
+    the dominant competitor brand to each per-platform row so the
+    模型对比 table can show which competitor drove the aggregation.
 
     Window handling matches :func:`list_brand_mentions`: ``start``/
     ``end`` (inclusive local dates) win over ``days``; without them
     the window is the last ``days`` days ending today. The same
     length is reused for the prev window (``[end-N, end-1]``) so the
-    delta row in the UI is apples-to-apples.
+    delta row in the UI is apples-to-apples; the long prev window
+    (``[end-N-30, end-31]``) drives the 「本月 vs 上月」 card.
 
     Customers only see prompts from their own ``geo_project_prompts``
     row set, sorted by ``sort`` — the rest of the analytics is
@@ -1187,6 +1372,8 @@ def questions_analytics(
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
+
+    is_self_filter = view == "self"
 
     # Window resolution — same shape as list_brand_mentions.
     if start is not None or end is not None:
@@ -1206,10 +1393,6 @@ def questions_analytics(
     win_end_dt = datetime.combine(win_end, time.max)
 
     length_days = (win_end - win_start).days + 1
-    prev_end = win_start - timedelta(days=1)
-    prev_start = prev_end - timedelta(days=length_days - 1)
-    prev_start_dt = datetime.combine(prev_start, time.min)
-    prev_end_dt = datetime.combine(prev_end, time.max)
 
     # Pull the project's prompt catalogue so the response is in the
     # operator's configured order and category / status come along.
@@ -1232,9 +1415,106 @@ def questions_analytics(
         for pid, prompt, cat, status_ in prompt_rows
     }
 
+    # Brand-mention rows for the 竞品分析 sub-pane. One row per brand in
+    # the window, covering both self + competitors. Pulled once and
+    # consumed by ``_competitor_brands_for_prompt`` per prompt — that
+    # helper does the in-memory rollup. Doing it in SQL would be
+    # marginally faster for huge projects but the row count is tiny
+    # (≤5 brands × ≤7 platforms × N runs/prompt) so Python aggregation
+    # keeps the SQL simple and debuggable.
+    brand_rows = db.execute(
+        select(
+            BrandMention.prompt,
+            BrandMention.brand_canonical,
+            BrandMention.is_self,
+            BrandMention.platform,
+            BrandMention.rank_position,
+            BrandMention.mention_count,
+        )
+        .where(
+            BrandMention.project_id == project_id,
+            BrandMention.created_at >= win_start_dt,
+            BrandMention.created_at <= win_end_dt,
+        )
+    ).all()
+
+    # Fixed palette for the brand × model matrix view — slots are
+    # assigned by ranked mention count so the visual layout is stable
+    # across windows (blue=always the self brand; orange/green/purple/
+    # cyan cycle through competitors). The cap of 4 competitor colors
+    # matches docs/更新版UI/data.js which only seeds 4 competitors per
+    # project; if a project has more, the cycle wraps and the duplicate
+    # color is harmless.
+    _SELF_COLOR = "#1a55e8"
+    _COMP_COLORS = ("#ff6b1a", "#52c41a", "#722ed1", "#13c2c2")
+
+    def _competitor_brands_for_prompt(prompt: str) -> list[CompetitorBrandStat]:
+        rows = [r for r in brand_rows if r.prompt == prompt and r.brand_canonical]
+        if not rows:
+            return []
+        agg: dict[str, dict] = {}
+        for r in rows:
+            bd = agg.setdefault(
+                r.brand_canonical,
+                {
+                    "is_self": bool(r.is_self),
+                    "total": 0,
+                    "matched": 0,
+                    "top1": 0,
+                    "top3": 0,
+                    "ranks": [],
+                    "model_ranks": {},
+                },
+            )
+            bd["total"] += 1
+            bd["matched"] += int(r.mention_count or 0)
+            if r.rank_position == 1:
+                bd["top1"] += 1
+            if r.rank_position is not None and r.rank_position <= 3:
+                bd["top3"] += 1
+            if r.rank_position is not None:
+                bd["ranks"].append(r.rank_position)
+                plat = r.platform or "(unknown)"
+                cur = bd["model_ranks"].get(plat)
+                if cur is None or r.rank_position < cur:
+                    bd["model_ranks"][plat] = r.rank_position
+        # Sort: self first, then competitors by matched desc. Stable
+        # secondary sort on brand_canonical so equal-match brands don't
+        # flicker between requests.
+        ordered = sorted(
+            agg.items(),
+            key=lambda kv: (not kv[1]["is_self"], -kv[1]["matched"], kv[0]),
+        )
+        out: list[CompetitorBrandStat] = []
+        comp_idx = 0
+        for brand, bd in ordered:
+            n = bd["total"]
+            out.append(
+                CompetitorBrandStat(
+                    brand_canonical=brand,
+                    is_self=bd["is_self"],
+                    color=_SELF_COLOR if bd["is_self"] else _COMP_COLORS[comp_idx % len(_COMP_COLORS)],
+                    mention_rate=(bd["matched"] / n) if n else 0.0,
+                    top1_rate=(bd["top1"] / n) if n else 0.0,
+                    top3_rate=(bd["top3"] / n) if n else 0.0,
+                    avg_rank=(sum(bd["ranks"]) / len(bd["ranks"])) if bd["ranks"] else None,
+                    model_ranks=bd["model_ranks"],
+                )
+            )
+            if not bd["is_self"]:
+                comp_idx += 1
+        return out
+
     def _window_stats(start_dt: datetime, end_dt: datetime) -> dict[str, dict]:
         """``prompt -> {total, matched, top1, top3, rank_avg, coverage,
-        platforms: {platform -> stat}}`` for one window."""
+        platforms: {platform -> stat}}`` for one window.
+
+        ``is_self_filter`` selects which side of the brand split to
+        aggregate. Self-view sums the project's own brand rows; the
+        competitor view sums every row where ``is_self=false`` and
+        also tags the dominant competitor per (prompt, platform) so
+        the model comparison table can show "X 与 Y 竞品共同出现".
+        """
         rows = db.execute(
             select(
                 BrandMention.prompt,
@@ -1245,8 +1525,19 @@ def questions_analytics(
                 func.sum(BrandMention.mention_count).label("matched"),
                 # min rank observed (null when no row has a rank)
                 func.min(BrandMention.rank_position).label("best_rank"),
-                # average sentiment over rows where it's non-null (AVG ignores NULLs)
-                func.avg(BrandMention.sentiment_score).label("avg_sentiment"),
+                # average sentiment over rows where it's non-null (AVG ignores NULLs).
+                # sentiment_score is stored as a label string ("positive"/"neutral"/
+                # "negative") since the API-pass refactor; translate to float here
+                # so the UI's color buckets (>=0.7 green / >=0.5 orange / else red)
+                # continue to work without a schema migration of the response.
+                func.avg(
+                    case(
+                        (BrandMention.sentiment_score == "positive", 1.0),
+                        (BrandMention.sentiment_score == "neutral", 0.5),
+                        (BrandMention.sentiment_score == "negative", 0.0),
+                        else_=None,
+                    )
+                ).label("avg_sentiment"),
                 # any run recommended?
                 func.max(
                     func.cast(BrandMention.is_recommended, Integer)
@@ -1254,7 +1545,7 @@ def questions_analytics(
             )
             .where(
                 BrandMention.project_id == project_id,
-                BrandMention.is_self.is_(True),
+                BrandMention.is_self.is_(is_self_filter),
                 BrandMention.created_at >= start_dt,
                 BrandMention.created_at <= end_dt,
             )
@@ -1285,6 +1576,7 @@ def questions_analytics(
                 "best_rank": best_rank,
                 "avg_sentiment": float(avg_sent) if avg_sent is not None else None,
                 "recommend_yes": bool(recommend_int),
+                "brand_canonical": None,
             }
 
         # Second pass: rank-level aggregates per prompt (sum of rank<=3,
@@ -1308,7 +1600,7 @@ def questions_analytics(
             )
             .where(
                 BrandMention.project_id == project_id,
-                BrandMention.is_self.is_(True),
+                BrandMention.is_self.is_(is_self_filter),
                 BrandMention.created_at >= start_dt,
                 BrandMention.created_at <= end_dt,
                 BrandMention.rank_position.is_not(None),
@@ -1334,15 +1626,217 @@ def questions_analytics(
             meta["top1"] = int(top1 or 0)
             meta["top3"] = int(top3 or 0)
             meta["rank_avg"] = float(rank_avg) if rank_avg is not None else None
+
+        # Competitor view: tag each (prompt, platform) with the
+        # dominant competitor brand (most-matched brand_canonical).
+        # Skipped for self view — brand_canonical stays null and the
+        # response surface is unchanged.
+        if not is_self_filter:
+            brand_rows = db.execute(
+                select(
+                    BrandMention.prompt,
+                    BrandMention.platform,
+                    BrandMention.brand_canonical,
+                    func.count(BrandMention.id).label("c"),
+                )
+                .where(
+                    BrandMention.project_id == project_id,
+                    BrandMention.is_self.is_(False),
+                    BrandMention.created_at >= start_dt,
+                    BrandMention.created_at <= end_dt,
+                    BrandMention.brand_canonical.is_not(None),
+                )
+                .group_by(
+                    BrandMention.prompt,
+                    BrandMention.platform,
+                    BrandMention.brand_canonical,
+                )
+                .order_by(
+                    BrandMention.prompt,
+                    BrandMention.platform,
+                    func.count(BrandMention.id).desc(),
+                )
+            ).all()
+            for prompt, platform, brand, _c in brand_rows:
+                meta = by_prompt.get(prompt or "(空问题)")
+                if not meta:
+                    continue
+                plat = meta["platforms"].get(platform)
+                if plat and plat["brand_canonical"] is None:
+                    plat["brand_canonical"] = brand
         return by_prompt
 
+    def _prev_window(end_dt: datetime, length: int) -> tuple[datetime, datetime]:
+        """[end_dt - length, end_dt - 1 day] clamped to the wall clock."""
+        p_end = end_dt.date() - timedelta(days=1)
+        p_start = p_end - timedelta(days=length - 1)
+        return (
+            datetime.combine(p_start, time.min),
+            datetime.combine(p_end, time.max),
+        )
+
     cur_stats = _window_stats(win_start_dt, win_end_dt)
+    prev_start_dt, prev_end_dt = _prev_window(win_end_dt, length_days)
     prev_stats = _window_stats(prev_start_dt, prev_end_dt)
+
+    # Long prev window: same length, offset 30 days further back.
+    # Drives the 「本月 vs 上月」 card. None when the offset would
+    # push start before any data exists (the SQL would still run but
+    # always return empty — check cheaply to skip a wasted query).
+    long_offset = 30
+    long_start_dt, long_end_dt = _prev_window(win_end_dt, length_days + long_offset)
+    long_stats = _window_stats(long_start_dt, long_end_dt)
+
+    # Latest AI answer excerpt per (prompt, platform) in the current
+    # window. Powers the 「AI 回答原文摘录」 section. Truncation is
+    # hard 200 chars + "..." (matches the design mockup — no markdown
+    # stripping, no word boundary). ``run_id`` is the latest
+    # Subtask.subtask_id so the client can open the full answer
+    # modal. ``rank`` comes from the matching BrandMention rows
+    # computed above; falls back to None when the prompt has no
+    # mention rows on that platform.
+    _EXCERPT_CHARS = 200
+
+    def _latest_excerpts(prompt: str) -> dict[str, PlatformExcerpt | None]:
+        # Per-platform latest Subtask in the window, ordered by
+        # updated_at desc. We pick the most recent run so a fresh
+        # answer always wins over a stale one. One row per platform.
+        sub_rows = db.execute(
+            select(
+                Subtask.platform,
+                Subtask.subtask_id,
+                Subtask.answer_content,
+            )
+            .where(
+                Subtask.prompt == prompt,
+                Subtask.updated_at >= win_start_dt,
+                Subtask.updated_at <= win_end_dt,
+                Subtask.answer_content.is_not(None),
+            )
+            .order_by(Subtask.platform, Subtask.updated_at.desc())
+        ).all()
+        # Keep only the first row per platform (already ordered desc).
+        latest: dict[str, tuple[str, str | None]] = {}
+        for platform, subtask_id, answer in sub_rows:
+            key = platform or "(unknown)"
+            if key not in latest:
+                latest[key] = (subtask_id, answer)
+        out: dict[str, PlatformExcerpt | None] = {}
+        for platform, (subtask_id, answer) in latest.items():
+            text = answer or ""
+            excerpt = (text[:_EXCERPT_CHARS] + "...") if len(text) > _EXCERPT_CHARS else text
+            out[platform] = PlatformExcerpt(
+                excerpt=excerpt or None,
+                rank=None,
+                run_id=subtask_id,
+            )
+        # Decorate each entry with the brand-mention best rank for
+        # the matching (prompt, platform) pair, when one exists.
+        cur = cur_stats.get(prompt)
+        if cur:
+            for plat_stat, excerpt in zip(
+                [
+                    p
+                    for p in (
+                        cur["platforms"].get(k) for k in out.keys()
+                    )
+                    if p is not None
+                ],
+                [out[k] for k in out.keys() if cur["platforms"].get(k) is not None],
+            ):
+                if excerpt is not None and plat_stat["best_rank"] is not None:
+                    excerpt.rank = plat_stat["best_rank"]
+        return out
+
+    # Category roll-up at the project level. One row per category in
+    # the current window; ``mention_rate`` averages the per-prompt
+    # rates weighted by total so a single busy prompt doesn't drown
+    # out the small ones. ``prompt_count`` is distinct prompts in
+    # the category that produced at least one mention row.
+    category_rows = db.execute(
+        select(
+            ProjectPrompt.category,
+            func.count(func.distinct(ProjectPrompt.id)).label("prompt_count"),
+            func.sum(BrandMention.mention_count).label("matched"),
+            func.count(BrandMention.id).label("total"),
+        )
+        .join(
+            BrandMention,
+            and_(
+                BrandMention.project_id == ProjectPrompt.project_id,
+                BrandMention.prompt == ProjectPrompt.prompt,
+                BrandMention.is_self.is_(is_self_filter),
+                BrandMention.created_at >= win_start_dt,
+                BrandMention.created_at <= win_end_dt,
+            ),
+            isouter=True,
+        )
+        .where(ProjectPrompt.project_id == project_id)
+        .group_by(ProjectPrompt.category)
+    ).all()
+    category_summary: list[CategoryStat] = []
+    for cat, prompt_count, matched, total in category_rows:
+        m = int(matched or 0)
+        t = int(total or 0)
+        category_summary.append(
+            CategoryStat(
+                category=cat,
+                prompt_count=int(prompt_count or 0),
+                mention_rate=(m / t) if t else 0.0,
+                # top1 / top3 below — the join doesn't include rank
+                # so they're filled in a second pass.
+                top1_rate=0.0,
+                top3_rate=0.0,
+            )
+        )
+    # Second pass for top1/top3 per category (rank-aware).
+    rank_cat_rows = db.execute(
+        select(
+            ProjectPrompt.category,
+            func.sum(
+                func.cast(BrandMention.rank_position == 1, Integer)
+            ).label("top1"),
+            func.sum(
+                func.cast(
+                    (BrandMention.rank_position != None)  # noqa: E711
+                    & (BrandMention.rank_position <= 3),
+                    Integer,
+                )
+            ).label("top3"),
+        )
+        .join(
+            BrandMention,
+            and_(
+                BrandMention.project_id == ProjectPrompt.project_id,
+                BrandMention.prompt == ProjectPrompt.prompt,
+                BrandMention.is_self.is_(is_self_filter),
+                BrandMention.created_at >= win_start_dt,
+                BrandMention.created_at <= win_end_dt,
+                BrandMention.rank_position.is_not(None),
+            ),
+            isouter=True,
+        )
+        .where(ProjectPrompt.project_id == project_id)
+        .group_by(ProjectPrompt.category)
+    ).all()
+    cat_top: dict[str | None, tuple[int, int]] = {
+        cat: (int(top1 or 0), int(top3 or 0))
+        for cat, top1, top3 in rank_cat_rows
+    }
+    cat_total: dict[str | None, int] = {
+        cat: int(total or 0) for cat, _pc, _m, total in category_rows
+    }
+    for s in category_summary:
+        top1, top3 = cat_top.get(s.category, (0, 0))
+        t = cat_total.get(s.category, 0)
+        s.top1_rate = (top1 / t) if t else 0.0
+        s.top3_rate = (top3 / t) if t else 0.0
 
     items: list[QuestionAnalyticsItem] = []
     for prompt, meta in prompt_meta.items():
         cur = cur_stats.get(prompt)
         prev = prev_stats.get(prompt)
+        long_prev = long_stats.get(prompt)
         n = cur["total"] if cur else 0
         matched = cur["matched"] if cur else 0
         top1 = cur["top1"] if cur else 0
@@ -1368,6 +1862,7 @@ def questions_analytics(
                         best_rank=p["best_rank"],
                         avg_sentiment=p["avg_sentiment"],
                         recommend_yes=p["recommend_yes"],
+                        brand_canonical=p.get("brand_canonical"),
                     )
                     for plat, p in (cur["platforms"].items() if cur else [])
                 ],
@@ -1381,14 +1876,306 @@ def questions_analytics(
                 )
                 if prev and prev["total"] > 0
                 else None,
+                long_prev=QuestionPrevStat(
+                    total=long_prev["total"],
+                    matched=long_prev["matched"],
+                    top1_rate=(long_prev["top1"] / long_prev["total"])
+                    if long_prev["total"]
+                    else 0.0,
+                    top3_rate=(long_prev["top3"] / long_prev["total"])
+                    if long_prev["total"]
+                    else 0.0,
+                    mention_rate=(long_prev["matched"] / long_prev["total"])
+                    if long_prev["total"]
+                    else 0.0,
+                    rank_avg=long_prev.get("rank_avg"),
+                )
+                if long_prev and long_prev["total"] > 0
+                else None,
+                excerpts=_latest_excerpts(prompt),
             )
         )
+
+    # Brand × model matrix for every prompt that produced at least one
+    # brand_mention row in the window. Returned regardless of ``view``
+    # so the client can flip 产品 / 竞品 without re-fetching — see the
+    # field docstring in QuestionAnalyticsOut for why this is cheap
+    # enough to always include.
+    competitor = [
+        QuestionCompetitorOut(
+            prompt_id=meta["id"],
+            brands=_competitor_brands_for_prompt(prompt),
+        )
+        for prompt, meta in prompt_meta.items()
+        if _competitor_brands_for_prompt(prompt)
+    ]
 
     return QuestionAnalyticsOut(
         project_id=project_id,
         start=win_start.isoformat(),
         end=win_end.isoformat(),
         items=items,
+        category_summary=category_summary,
+        competitor=competitor,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/questions/status-changes",
+    response_model=QuestionStatusChangesOut,
+)
+def questions_status_changes(
+    project_id: int,
+    days: int = 15,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """Classify each question into one of 4 sets for the 稳定与掉落 pane.
+
+    Window handling matches :func:`questions_analytics` (same
+    ``start``/``end``/``days`` semantics). ``is_self=true`` rows are
+    the only ones considered — the operator's own brand is what the
+    project monitors. Paused prompts (``status != monitoring``) are
+    filtered out entirely: a paused question can never be "stable" or
+    "dropped" because the scheduler isn't asking it.
+
+    Four sets (NOT a 2x2 cross-tab):
+      - ``stable``: prev_window had a mention AND current_window has
+        at least one mention → kept being mentioned.
+      - ``drops``: per (prompt, platform) loss-of-mention events.
+        Emitted when prev had a mention and current has either no
+        mention or a rank_position that's worse than Top-3.
+      - ``never_listed``: no mention in either window.
+      - ``listed``: at least one mention in the current window
+        (regardless of prev).
+
+    Drops carry a ``reason`` for the UI badge: "从排名 N 跌出 Top3"
+    when the rank went from in-range to out-of-range, "从上榜掉出"
+    when the mention disappeared entirely.
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    # Window resolution — copy the same shape as questions_analytics.
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise HTTPException(400, "start and end must be provided together")
+        if end < start:
+            raise HTTPException(400, "end must not be earlier than start")
+        win_start, win_end = start, end
+    else:
+        window_days = days if days is not None else 15
+        if window_days <= 0 or window_days > 90:
+            raise HTTPException(400, "days must be between 1 and 90")
+        today = now_local().date()
+        win_start = today - timedelta(days=window_days - 1)
+        win_end = today
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+
+    length_days = (win_end - win_start).days + 1
+    prev_end_dt = datetime.combine(win_start - timedelta(days=1), time.max)
+    prev_start_dt = datetime.combine(
+        win_start - timedelta(days=length_days), time.min
+    )
+
+    # Pull the catalogue — monitoring prompts only, in the operator's
+    # configured order.
+    prompt_rows = db.execute(
+        select(
+            ProjectPrompt.id,
+            ProjectPrompt.prompt,
+            ProjectPrompt.category,
+        )
+        .where(
+            ProjectPrompt.project_id == project_id,
+            ProjectPrompt.status == "monitoring",
+        )
+        .order_by(ProjectPrompt.sort)
+    ).all()
+    prompt_meta: dict[str, dict] = {
+        prompt: {"id": pid, "category": cat}
+        for pid, prompt, cat in prompt_rows
+    }
+
+    # Per-(prompt, platform) presence in each window, plus the best
+    # rank observed. One row per (prompt, platform) that has at least
+    # one mention in either window.
+    presence_rows = db.execute(
+        select(
+            BrandMention.prompt,
+            BrandMention.platform,
+            func.max(
+                case(
+                    (
+                        and_(
+                            BrandMention.created_at >= prev_start_dt,
+                            BrandMention.created_at <= prev_end_dt,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("in_prev"),
+            func.max(
+                case(
+                    (
+                        and_(
+                            BrandMention.created_at >= win_start_dt,
+                            BrandMention.created_at <= win_end_dt,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("in_cur"),
+            # Best (smallest) rank per window — used by drops to
+            # describe the rank transition. Null when no rank rows.
+            func.min(
+                case(
+                    (
+                        and_(
+                            BrandMention.created_at >= prev_start_dt,
+                            BrandMention.created_at <= prev_end_dt,
+                            BrandMention.rank_position.is_not(None),
+                        ),
+                        BrandMention.rank_position,
+                    ),
+                    else_=None,
+                )
+            ).label("best_prev_rank"),
+            func.min(
+                case(
+                    (
+                        and_(
+                            BrandMention.created_at >= win_start_dt,
+                            BrandMention.created_at <= win_end_dt,
+                            BrandMention.rank_position.is_not(None),
+                        ),
+                        BrandMention.rank_position,
+                    ),
+                    else_=None,
+                )
+            ).label("best_cur_rank"),
+        )
+        .where(
+            BrandMention.project_id == project_id,
+            BrandMention.is_self.is_(True),
+        )
+        .group_by(BrandMention.prompt, BrandMention.platform)
+    ).all()
+
+    # Per-prompt current platform list — for the 上榜 quadrant the
+    # UI shows the platforms that drove the mention. Cache once.
+    cur_platforms: dict[str, set[str]] = {}
+    for prompt, platform, _p, in_cur, _bp, _bc in presence_rows:
+        if in_cur:
+            cur_platforms.setdefault(prompt or "(空问题)", set()).add(platform)
+    prev_platforms: dict[str, set[str]] = {}
+    for prompt, platform, in_prev, _c, _bp, _bc in presence_rows:
+        if in_prev:
+            prev_platforms.setdefault(prompt or "(空问题)", set()).add(platform)
+
+    # Build the 4 sets.
+    stable: list[QuestionStableItem] = []
+    drops: list[DropEvent] = []
+    listed: list[QuestionStableItem] = []
+    never_listed: list[QuestionStableItem] = []
+
+    # Track which prompts have already been emitted into listed/
+    # stable so the loop below doesn't double-emit.
+    emitted: set[str] = set()
+    # Per-prompt mention count for stable sort (most-mentioned first).
+    stable_mentions: dict[str, int] = {}
+    listed_mentions: dict[str, int] = {}
+
+    for prompt, meta in prompt_meta.items():
+        in_cur_set = cur_platforms.get(prompt, set())
+        in_prev_set = prev_platforms.get(prompt, set())
+        if in_cur_set and in_prev_set:
+            stable.append(
+                QuestionStableItem(
+                    prompt_id=meta["id"],
+                    prompt=prompt,
+                    category=meta["category"],
+                    platforms=sorted(in_cur_set),
+                )
+            )
+            stable_mentions[prompt] = len(in_cur_set)
+            emitted.add(prompt)
+        if in_cur_set:
+            listed.append(
+                QuestionStableItem(
+                    prompt_id=meta["id"],
+                    prompt=prompt,
+                    category=meta["category"],
+                    platforms=sorted(in_cur_set),
+                )
+            )
+            listed_mentions[prompt] = len(in_cur_set)
+            emitted.add(prompt)
+
+    # Drops — per (prompt, platform) row that was in prev but is
+    # either missing in current or fell out of Top-3.
+    for prompt, platform, in_prev, in_cur, best_prev, best_cur in presence_rows:
+        if not in_prev or in_cur:
+            continue
+        meta = prompt_meta.get(prompt or "(空问题)")
+        if not meta:
+            continue
+        if best_prev is None:
+            # Prev had a mention without a rank — can't describe a
+            # rank transition. Fall back to "掉出" wording.
+            reason = "从上榜掉出"
+        elif best_cur is None:
+            reason = f"从排名 {best_prev} 跌出 Top3"
+        else:
+            reason = f"从排名 {best_prev} 跌出 Top3"
+        drops.append(
+            DropEvent(
+                prompt_id=meta["id"],
+                prompt=prompt,
+                category=meta["category"],
+                platform=platform,
+                dropped_day=win_end.isoformat(),
+                from_rank=best_prev,
+                to_rank=best_cur,
+                reason=reason,
+            )
+        )
+
+    # never_listed — catalogue prompts that never appeared in either
+    # window. Sort by configured order (already ordered, but
+    # convert set to list for stable JSON output).
+    for prompt, meta in prompt_meta.items():
+        if prompt in emitted:
+            continue
+        if not cur_platforms.get(prompt) and not prev_platforms.get(prompt):
+            never_listed.append(
+                QuestionStableItem(
+                    prompt_id=meta["id"],
+                    prompt=prompt,
+                    category=meta["category"],
+                    platforms=[],
+                )
+            )
+
+    # Sort for stable UI rendering.
+    stable.sort(key=lambda x: (-stable_mentions.get(x.prompt, 0), x.prompt_id))
+    listed.sort(key=lambda x: (-listed_mentions.get(x.prompt, 0), x.prompt_id))
+    drops.sort(key=lambda x: (x.dropped_day, x.platform, x.prompt_id))
+    never_listed.sort(key=lambda x: x.prompt_id)
+
+    return QuestionStatusChangesOut(
+        project_id=project_id,
+        start=win_start.isoformat(),
+        end=win_end.isoformat(),
+        stable=stable,
+        drops=drops,
+        never_listed=never_listed,
+        listed=listed,
     )
 
 
@@ -1435,7 +2222,13 @@ def brand_mentions_summary(
     n = len(rows)
     top1 = sum(1 for r in rows if r.rank_position == 1)
     top3 = sum(1 for r in rows if r.rank_position is not None and r.rank_position <= 3)
-    sentiment_values = [r.sentiment_score for r in rows if r.sentiment_score is not None]
+    # sentiment_score is stored as a label string; translate to float for the
+    # UI's color buckets (>=0.7 green / >=0.5 orange / else red).
+    sentiment_values = [
+        _SENTIMENT_TO_FLOAT[r.sentiment_score]
+        for r in rows
+        if r.sentiment_score in _SENTIMENT_TO_FLOAT
+    ]
     avg_sentiment = (
         sum(sentiment_values) / len(sentiment_values) if sentiment_values else None
     )
@@ -1572,7 +2365,15 @@ def competitor_analysis(
             func.count().label("rows_total"),
             func.avg(
                 case(
-                    (BrandMention.mention_count > 0, BrandMention.sentiment_score),
+                    (
+                        BrandMention.mention_count > 0,
+                        case(
+                            (BrandMention.sentiment_score == "positive", 1.0),
+                            (BrandMention.sentiment_score == "neutral", 0.5),
+                            (BrandMention.sentiment_score == "negative", 0.0),
+                            else_=None,
+                        ),
+                    ),
                     else_=None,
                 )
             ).label("avg_sentiment"),
@@ -1683,8 +2484,12 @@ def competitor_analysis(
             is_self=is_self,
             mention_count=matched,
             mention_rate=matched / total_subtasks if total_subtasks else 0.0,
-            top3_rate=top3 / matched if matched else 0.0,
-            recommend_rate=rec / matched if matched else 0.0,
+            # Top3 / 推荐度 跟 mention_rate 共用同一个分母(total_subtasks),
+            # 这样三个率都是"所有 subtask 中发生 X 的比例",可以直接对比。
+            # 之前用 matched 当分母会让"被提到的 100% 都是 Top3"这种 case
+            # 退化成 100%,变成不携带信息的常数。/Q: 这个在 8/18 看截图确认的
+            top3_rate=top3 / total_subtasks if total_subtasks else 0.0,
+            recommend_rate=rec / total_subtasks if total_subtasks else 0.0,
             avg_sentiment=avg_sent,
             avg_rank=avg_rk,
             spark=spark,
@@ -1843,10 +2648,19 @@ def citation_analysis(
 
     The UI on docs/ui-sample/index.html #tab-citation shows per-URL rows
     with type, citation count and rank position. We pull every
-    ``geo_subtasks.reference_list_json`` in the last ``days`` days
+    ``geo_subtasks.citation_list_json`` in the last ``days`` days
     (default 15, max 90 — the same ceiling the 竞品分析 tab uses),
     explode each list into (subtask, rank, url, site, title) rows,
     and aggregate by URL.
+
+    Per Molizhishu API contract: ``referenceList`` is the *complete*
+    pool of references the model had available, while ``citationList``
+    is the *subset* the model actually cited in the answer body. This
+    endpoint therefore reads ``citationList`` — counting every
+    reference would inflate the metrics with sources the operator's
+    audience never saw. On non-yuanbao platforms ``citationList``
+    comes back as plain URL strings; on yuanbao it's a list of
+    ``{url, site, title, ...}`` dicts. The handler accepts both.
 
     The secondary tabs (全部 / 官方网站 / 新闻网站 / 自媒体) and the
     filter bar (模型 / 业务排名 / 关键词) are the only axis the UI
@@ -1870,7 +2684,6 @@ def citation_analysis(
         select(
             Subtask.subtask_id,
             Subtask.platform,
-            Subtask.reference_list_json,
             Subtask.citation_list_json,
             Task.created_local_at,
         )
@@ -1887,23 +2700,34 @@ def citation_analysis(
     #   total_citations -> (subtask, citation) pair count
     total_citations = 0
     buckets: dict[str, dict] = {}
-    for subtask_id, platform, refs, _cites, created_at in rows:
-        items = refs if isinstance(refs, list) else []
+    for subtask_id, platform, cites, created_at in rows:
+        items = cites if isinstance(cites, list) else []
         if not items:
             continue
         for idx, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            url = item.get("url") or item.get("link")
-            if not isinstance(url, str) or not url.strip():
+            # citation_list_json shape is platform-dependent:
+            #   - yuanbao returns {url, site, title, summary, index, ...}
+            #   - deepseek / doubao / hunyuan / qianwen / wenxinyiyan
+            #     return a flat list of URL strings
+            # Treat both as the same row — the dict carries site/title,
+            # the string carries just the URL.
+            if isinstance(item, dict):
+                url = item.get("url") or item.get("link")
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                site = item.get("site") or ""
+                if not isinstance(site, str):
+                    site = ""
+                title = item.get("title") or ""
+                if not isinstance(title, str):
+                    title = ""
+            elif isinstance(item, str):
+                url = item
+                site = ""
+                title = ""
+            else:
                 continue
             url = url.strip()
-            site = item.get("site") or ""
-            if not isinstance(site, str):
-                site = ""
-            title = item.get("title") or ""
-            if not isinstance(title, str):
-                title = ""
             total_citations += 1
             cur = buckets.get(url)
             if cur is None:
@@ -2043,6 +2867,43 @@ class _OverviewWindow:
             )
         ).all()
 
+        # Per-subtask status rollup. Used for:
+        #   - ``correct_rate`` 分子 (status in success/completed)
+        #   - per-platform ``total_subtasks`` 分母 in model_dimensions
+        # We pull only the columns we need; ``answer_content`` (potentially
+        # large) stays in self.answers via its own select.
+        self.subtask_rows = db.execute(
+            select(
+                Subtask.platform,
+                Subtask.status,
+                Task.created_local_at,
+            )
+            .join(Task, Task.task_id == Subtask.task_id)
+            .where(
+                Task.project_id == project_id,
+                Task.created_local_at >= lo,
+                Task.created_local_at <= hi,
+            )
+        ).all()
+
+    @property
+    def total_subtasks(self) -> int:
+        """Window subtask count. Denominator for ``mention_rate`` and
+        ``correct_rate``."""
+        return len(self.subtask_rows)
+
+    @property
+    def correct_subtasks(self) -> int:
+        """Count of subtasks whose ``status`` is ``success`` (production
+        pipeline terminal state) or ``completed`` (legacy mock data).
+        Mirrors what frontend used to filter the 查看原文 modal — see
+        ``QuestionTab.tsx`` "completed || success" comment."""
+        return sum(
+            1
+            for _platform, status, _created in self.subtask_rows
+            if status in ("success", "completed")
+        )
+
     def kpis(self) -> dict[str, tuple[float, list[float]]]:
         """Window totals plus the per-day sparkline for each KPI card."""
         by_day_mentions: dict[date, list[BrandMention]] = {d: [] for d in self.days}
@@ -2068,7 +2929,36 @@ class _OverviewWindow:
             for m in self.mentions
             if m.rank_position is not None and m.rank_position <= 3
         )
+
+        # Subtask counts bucketed per day, used for the new
+        # ``mention_rate`` and ``correct_rate`` sparklines.
+        subtasks_by_day: dict[date, int] = {d: 0 for d in self.days}
+        correct_by_day: dict[date, int] = {d: 0 for d in self.days}
+        for _platform, status, created_at in self.subtask_rows:
+            day = created_at.date()
+            if day not in subtasks_by_day:
+                continue
+            subtasks_by_day[day] += 1
+            if status in ("success", "completed"):
+                correct_by_day[day] += 1
+
+        total_subs = max(self.total_subtasks, 1)
         return {
+            # Mention rate: % of subtasks in which the brand was actually
+            # named in the answer (mention_count > 0). Sum-of-counts is
+            # 0/1 in the new pipeline, but we keep the sum form so a
+            # future pipeline that emits per-mention counters stays
+            # consistent.
+            "mention_rate": (
+                _rate(sum(m.mention_count for m in self.mentions), total_subs),
+                [
+                    _rate(
+                        sum(m.mention_count for m in by_day_mentions[d]),
+                        max(subtasks_by_day[d], 1),
+                    )
+                    for d in self.days
+                ],
+            ),
             "total_mentions": (
                 float(sum(m.mention_count for m in self.mentions)),
                 [
@@ -2100,6 +2990,17 @@ class _OverviewWindow:
                     for d in self.days
                 ],
             ),
+            # Correct rate: % of subtasks that returned a usable answer.
+            # "Correct" = status in (success, completed) — see
+            # correct_subtasks property for the rationale on the dual
+            # accepted values.
+            "correct_rate": (
+                _rate(self.correct_subtasks, total_subs),
+                [
+                    _rate(correct_by_day[d], max(subtasks_by_day[d], 1))
+                    for d in self.days
+                ],
+            ),
             "question_count": (
                 float(sum(len(asked[d]) for d in self.days)),
                 [float(len(asked[d])) for d in self.days],
@@ -2120,7 +3021,12 @@ def project_overview(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """Everything the 首屏概览 tab renders: 5 KPI cards + 2 charts.
+    """Everything the 首屏概览 tab renders: 4 KPI cards + trend/model sub-panes.
+
+    The 4 KPI cards mirror docs/更新版UI #tab-overview: 总提及率 / Top1 / Top3
+    / 正确率. Per-day sparklines come from the same windowed buckets as
+    the count card (mention_rate / correct_rate bucket subtasks, top1
+    and top3 bucket mentions).
 
     ``start``/``end`` (inclusive, local dates) drive the 自定义 range and
     win over ``days``; without them the window is the last ``days`` days
@@ -2162,8 +3068,18 @@ def project_overview(
         if m.platform and m.platform not in platforms:
             platforms.append(m.platform)
 
+    # Per-platform subtask counts (for model_dimensions 分母). Built once
+    # here so the loop below is O(mentions + subtasks) instead of
+    # O(platforms * mentions + platforms * subtasks).
+    subtasks_by_platform: dict[str, int] = {}
+    for platform, _status, _created in cur.subtask_rows:
+        if not platform:
+            continue
+        subtasks_by_platform[platform] = subtasks_by_platform.get(platform, 0) + 1
+
     trend: list[TrendSeries] = []
     ranking: list[PlatformRank] = []
+    model_dimensions: list[ModelDimension] = []
     for platform in platforms:
         rows = [m for m in cur.mentions if m.platform == platform]
         per_day = {d: 0 for d in cur.days}
@@ -2183,6 +3099,39 @@ def project_overview(
                 sample=len(rows),
             )
         )
+
+        # 模型维度 4 指标 — 全部用「该平台的 subtasks 总数」做分母,与
+        # 竞品分析的 per-brand rate 口径一致(见 _kpi_for / CompetitorKpi)。
+        platform_subs = subtasks_by_platform.get(platform, 0)
+        model_dimensions.append(
+            ModelDimension(
+                platform=platform,
+                mention_rate=_rate(
+                    sum(m.mention_count for m in rows), max(platform_subs, 1)
+                ),
+                top1_rate=_rate(
+                    sum(1 for m in rows if m.rank_position == 1),
+                    max(platform_subs, 1),
+                ),
+                top2_rate=_rate(
+                    sum(
+                        1
+                        for m in rows
+                        if m.rank_position is not None and m.rank_position <= 2
+                    ),
+                    max(platform_subs, 1),
+                ),
+                top3_rate=_rate(
+                    sum(
+                        1
+                        for m in rows
+                        if m.rank_position is not None and m.rank_position <= 3
+                    ),
+                    max(platform_subs, 1),
+                ),
+                sample=platform_subs,
+            )
+        )
     ranking.sort(key=lambda r: (r.top1_rate, r.sample), reverse=True)
 
     return ProjectOverviewOut(
@@ -2191,13 +3140,16 @@ def project_overview(
         end=win_end,
         days=span,
         labels=[d.strftime("%m-%d") for d in cur.days],
-        total_mentions=card("total_mentions"),
+        mention_rate=card("mention_rate"),
         top1_rate=card("top1_rate"),
         top3_rate=card("top3_rate"),
+        correct_rate=card("correct_rate"),
+        total_mentions=card("total_mentions"),
         question_count=card("question_count"),
         answer_count=card("answer_count"),
         trend=trend,
         ranking=ranking,
+        model_dimensions=model_dimensions,
         pending_count=sum(
             1 for m in cur.mentions if m.extract_status.value == "pending"
         ),
