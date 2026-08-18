@@ -1802,6 +1802,11 @@ export default function QuestionTab({ projectId, detail }: Props) {
 
         /* 稳定与掉落 2x2 网格 */
         .qt-stable-pane {
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
           padding: 16px 0 0;
         }
         .qt-stable-filter {
@@ -1815,12 +1820,15 @@ export default function QuestionTab({ projectId, detail }: Props) {
           margin-left: auto;
         }
         .qt-stable-grid {
+          flex: 1;
+          min-height: 0;
           display: grid;
           grid-template-columns: 1fr 1fr;
+          grid-template-rows: 1fr 1fr;
           gap: 16px;
         }
         @media (max-width: 1100px) {
-          .qt-stable-grid { grid-template-columns: 1fr; }
+          .qt-stable-grid { grid-template-columns: 1fr; grid-template-rows: repeat(4, 1fr); }
         }
         .qt-stable-quad {
           background: #fff;
@@ -1828,7 +1836,8 @@ export default function QuestionTab({ projectId, detail }: Props) {
           box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04);
           padding: 16px 18px 14px;
           border-top: 3px solid;
-          min-height: 240px;
+          min-height: 0;
+          overflow: hidden;
           display: flex;
           flex-direction: column;
         }
