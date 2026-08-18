@@ -441,14 +441,21 @@ async def test_competitor_analytics_aggregates_by_brand(client, h):
     )
     assert response.status_code == 200
     body = response.json()
-    # _bootstrap 种了 1 个竞品 brand_canonical="珂润",每个 prompt × 6 platform × 15 天
-    canonicals = {b["brand_canonical"] for b in body["brands"]}
-    assert canonicals == {"珂润"}
+    # _bootstrap 种了 1 个自身 brand "Acme" + 1 个竞品 "珂润",每个 prompt
+    # × 6 platform × 15 天。竞品面板首张卡必须是自身品牌,方便对比。
+    canonicals = [(b["brand_canonical"], b["is_self"]) for b in body["brands"]]
+    assert ("Acme", True) in canonicals
+    assert ("珂润", False) in canonicals
+    assert canonicals[0] == ("Acme", True), (
+        f"self brand must be first, got order: {canonicals}"
+    )
+    # 自身品牌拿到保留的 primary blue,竞品走 palette
+    self_brand = body["brands"][0]
+    assert self_brand["color"] == "#1a55e8"
     # 6 platform 都出现在 model_ranks
-    brand = body["brands"][0]
-    assert len(brand["model_ranks"]) == len(PLATFORMS)
+    assert len(self_brand["model_ranks"]) == len(PLATFORMS)
     # mention_rate 字段存在,数值在 0-1 之间
-    assert 0.0 <= brand["mention_rate"] <= 1.0
+    assert 0.0 <= self_brand["mention_rate"] <= 1.0
     # 6 平台摘录 key 都在(只要 subtask 存在)
     assert len(body["excerpts"]) == len(PLATFORMS)
 

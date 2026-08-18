@@ -1583,12 +1583,13 @@ def _compute_question_competitor_analytics(
     """单问题竞品分析:按 brand × platform 聚合,SQL 预算 ≤ 2。
 
     与产品分析的差别:产品分析走 ``is_self=true`` + per-platform stats +
-    prev/long_prev;这里走 ``is_self=false`` + per-brand stats,只取当前
-    窗口(竞品面板不显示 prev delta,UI 在 OverviewTab 已经有 delta 行)。
+    prev/long_prev;这里按 brand × platform 聚合,既包括自身品牌也包括
+    竞品,自身品牌始终排在最前,方便对比。只取当前窗口(竞品面板不显示
+    prev delta,UI 在 OverviewTab 已经有 delta 行)。
 
     SQL 预算 = 2 条核心 SELECT:
-      1) brand aggregation:扫 ``BrandMention``(过滤 ``is_self=false``),
-         在 Python 中按 (brand_canonical, platform) 汇总 ranks。
+      1) brand aggregation:扫 ``BrandMention``,在 Python 中按
+         (is_self, brand_canonical, platform) 汇总 ranks。
       2) excerpts:每个 platform 取窗口内最新 Subtask + 对应
          (is_self=false) rank,join ``Task`` 用 project_id 防御
          (同一 prompt 文本可能跨项目存在)。左连接 ``BrandMention`` —
@@ -1597,55 +1598,62 @@ def _compute_question_competitor_analytics(
     """
     rows = db.execute(
         select(
+            BrandMention.is_self,
             BrandMention.brand_canonical,
             BrandMention.platform,
             BrandMention.rank_position,
         ).where(
             BrandMention.project_id == project.id,
-            BrandMention.is_self.is_(False),
             BrandMention.prompt == prompt.prompt,
             BrandMention.created_at >= start,
             BrandMention.created_at < end,
         )
     ).all()
 
-    grouped: dict[tuple[str, str], list[int | None]] = defaultdict(list)
-    total_per_brand: dict[str, int] = defaultdict(int)
+    grouped: dict[tuple[bool, str, str], list[int | None]] = defaultdict(list)
+    total_per_brand: dict[tuple[bool, str], int] = defaultdict(int)
     for r in rows:
-        grouped[(r.brand_canonical, r.platform)].append(r.rank_position)
-        total_per_brand[r.brand_canonical] += 1
+        grouped[(r.is_self, r.brand_canonical, r.platform)].append(r.rank_position)
+        total_per_brand[(r.is_self, r.brand_canonical)] += 1
 
-    by_brand: dict[str, dict[str, list[int | None]]] = defaultdict(dict)
-    for (brand, platform), ranks in grouped.items():
-        by_brand[brand][platform] = ranks
+    by_brand: dict[tuple[bool, str], dict[str, list[int | None]]] = defaultdict(dict)
+    for (is_self, brand, platform), ranks in grouped.items():
+        by_brand[(is_self, brand)][platform] = ranks
 
     # Fixed palette for the competitor panel — same slot cycle as the
     # analytics endpoint's competitor matrix so the visual layout is
-    # stable across windows. Self brand color is reserved (not used
-    # here since the competitor endpoint never returns self rows).
+    # stable across windows. Self brand gets the reserved primary blue
+    # so the operator can spot it instantly; competitors cycle the rest.
     _COMP_COLORS = ("#ff6b1a", "#52c41a", "#722ed1", "#13c2c2")
+    _SELF_COLOR = "#1a55e8"
 
     brands_out: list[CompetitorBrandStat] = []
-    # Sort by mention_rate desc so the highest-traffic competitor
-    # always lands on the first palette slot; ties broken by
-    # brand_canonical so the order is deterministic across windows.
-    sorted_brands = sorted(
-        by_brand.keys(),
-        key=lambda b: (
-            -(total_per_brand[b]),
-            b,
+    # Self brand always wins the first slot; competitors follow by
+    # total mentions desc (ties broken by brand_canonical for stable
+    # order across windows).
+    self_keys = [k for k in by_brand.keys() if k[0]]
+    comp_keys = [k for k in by_brand.keys() if not k[0]]
+    self_keys.sort(key=lambda k: k[1])
+    comp_keys.sort(
+        key=lambda k: (
+            -(total_per_brand[k]),
+            k[1],
         ),
     )
-    for slot, brand_canonical in enumerate(sorted_brands):
-        platforms = by_brand[brand_canonical]
+    sorted_keys: list[tuple[bool, str]] = [*self_keys, *comp_keys]
+
+    for slot, (is_self, brand_canonical) in enumerate(sorted_keys):
+        platforms = by_brand[(is_self, brand_canonical)]
         all_ranks = [r for rs in platforms.values() for r in rs if r is not None]
         matched = len(all_ranks)
-        total = total_per_brand[brand_canonical]
+        total = total_per_brand[(is_self, brand_canonical)]
+        comp_slot = max(0, slot - len(self_keys))
+        color = _SELF_COLOR if is_self else _COMP_COLORS[comp_slot % len(_COMP_COLORS)]
         brands_out.append(
             CompetitorBrandStat(
                 brand_canonical=brand_canonical,
-                is_self=False,
-                color=_COMP_COLORS[slot % len(_COMP_COLORS)],
+                is_self=is_self,
+                color=color,
                 mention_rate=(matched / total) if total else 0.0,
                 top1_rate=(sum(1 for r in all_ranks if r == 1) / total) if total else 0.0,
                 top3_rate=(sum(1 for r in all_ranks if r <= 3) / total) if total else 0.0,
