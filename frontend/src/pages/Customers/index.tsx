@@ -77,7 +77,7 @@ export default function Customers() {
   const [items, setItems] = useState<Customer[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize] = useState(20);
   const [loading, setLoading] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [editing, setEditing] = useState<Customer | null>(null);

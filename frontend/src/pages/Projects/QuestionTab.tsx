@@ -20,8 +20,8 @@ import {
   type PromptAnswerOut,
   type ProjectDetailOut,
   type ProjectPlatform,
-  type QuestionAnalyticsItem,
   type QuestionCompetitorAnalyticsOut,
+  type QuestionPlatformStat,
   type QuestionPrevStat,
   type QuestionProductAnalyticsOut,
   type QuestionStatusChangesOut,
@@ -51,6 +51,28 @@ interface PrevWindow {
   top1Rate: number;
   top3Rate: number;
   rankAvg: number | null;
+}
+
+// Adapter shape the inner panes (QuestionDetail / CompetitorDetail)
+// consume. The legacy /questions/analytics endpoint is gone, so this
+// is built locally from per-prompt product / competitor analytics
+// responses instead of coming from the API surface.
+interface QuestionAnalyticsItem {
+  prompt_id: number;
+  prompt: string;
+  category: string | null;
+  status: string;
+  total: number;
+  matched: number;
+  top1_rate: number;
+  top3_rate: number;
+  mention_rate: number;
+  rank_avg: number | null;
+  coverage: number;
+  platforms: QuestionPlatformStat[];
+  prev: QuestionPrevStat | null;
+  long_prev: QuestionPrevStat | null;
+  excerpts: Record<string, PlatformExcerpt | null>;
 }
 
 interface QuestionStat {

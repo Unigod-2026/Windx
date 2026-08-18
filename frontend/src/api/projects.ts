@@ -508,26 +508,6 @@ export interface PlatformExcerpt {
   run_id: string | null;
 }
 
-export interface QuestionAnalyticsItem {
-  prompt_id: number;
-  prompt: string;
-  category: string | null;
-  status: string;
-  total: number;
-  matched: number;
-  top1_rate: number;
-  top3_rate: number;
-  mention_rate: number;
-  rank_avg: number | null;
-  coverage: number;
-  platforms: QuestionPlatformStat[];
-  prev: QuestionPrevStat | null;
-  // 30-days-back prev window driving the 「本月 vs 上月」 card.
-  long_prev: QuestionPrevStat | null;
-  // Latest AI answer excerpt per platform (truncated to 200 chars).
-  excerpts: Record<string, PlatformExcerpt | null>;
-}
-
 export interface CategoryStat {
   category: string | null;
   prompt_count: number;
@@ -550,15 +530,6 @@ export interface CompetitorBrandStat {
 export interface QuestionCompetitorOut {
   prompt_id: number;
   brands: CompetitorBrandStat[];
-}
-
-export interface QuestionAnalyticsOut {
-  project_id: number;
-  start: string;
-  end: string;
-  items: QuestionAnalyticsItem[];
-  category_summary: CategoryStat[];
-  competitor: QuestionCompetitorOut[];
 }
 
 export interface QuestionSummaryItem {
@@ -608,30 +579,6 @@ export interface QuestionWindowParams {
   start?: string;
   end?: string;
 }
-
-export type QuestionView = "self" | "competitor";
-
-/**
- * 问题提及分析 — 服务端聚合,前端只渲染。
- *
- * 历史:之前前端用 ``listBrandMentions`` 拉明细再做 useMemo 聚合,
- * 但明细接口 size 上限 100,15 天窗口下常常拿不到完整数据,
- * 导致提及率 / 提及次数 / 模型覆盖 等 KPI 飘。新接口直接走
- * ``GROUP BY (prompt[, platform])`` 算出准确值。
- *
- * ``view=competitor`` 切换到 ``is_self=false`` 聚合,4 张 KPI 卡和
- * 模型对比表按竞品 brand 重排。
- */
-export const getQuestionsAnalytics = (
-  projectId: number,
-  params: { days?: number; start?: string; end?: string; view?: QuestionView } = {},
-) =>
-  client
-    .get<QuestionAnalyticsOut>(
-      `/projects/${projectId}/questions/analytics`,
-      { params },
-    )
-    .then((r) => r.data);
 
 export interface QuestionStableItem {
   prompt_id: number;

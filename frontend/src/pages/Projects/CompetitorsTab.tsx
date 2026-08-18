@@ -60,7 +60,7 @@ const STATUS_LABELS: Record<CompetitorStatus, { text: string; color: string }> =
  */
 export default function CompetitorsTab({ projectId }: Props) {
   const [items, setItems] = useState<CompetitorOut[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterTab>("all");
   const [editOpen, setEditOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
