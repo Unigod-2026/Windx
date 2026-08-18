@@ -1,23 +1,35 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { DatePicker, Empty, Modal, Skeleton, Spin, Tag, message } from "antd";
 import { LinkOutlined, SearchOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
+import { useSearchParams } from "react-router-dom";
 import {
   getProject,
-  getQuestionsAnalytics,
+  getQuestionCompetitorAnalytics,
+  getQuestionProductAnalytics,
+  getQuestionStatusChanges,
+  getQuestionSummary,
   getSubtaskDetail,
   listCompetitors,
   listPromptAnswers,
+  type CompetitorBrandStat,
   type CompetitorOut,
+  type PlatformExcerpt,
   type PromptAnswerDetailOut,
   type PromptAnswerOut,
   type ProjectDetailOut,
   type ProjectPlatform,
   type QuestionAnalyticsItem,
+  type QuestionCompetitorAnalyticsOut,
+  type QuestionPrevStat,
+  type QuestionProductAnalyticsOut,
+  type QuestionStatusChangesOut,
+  type QuestionSummaryOut,
 } from "../../api/projects";
-import { platformLabel } from "./platforms";
+import { cachedFetch, cacheKey } from "./questionTabCache";
+import { platformColor, platformLabel } from "./platforms";
 
 interface Props {
   projectId: number;
@@ -58,28 +70,15 @@ interface QuestionStat {
   prev: PrevWindow | null;
 }
 
-function toStat(item: QuestionAnalyticsItem): QuestionStat {
-  const prev: PrevWindow | null = item.prev
-    ? {
-        mentionRate: item.prev.mention_rate,
-        top1Rate: item.prev.top1_rate,
-        top3Rate: item.prev.top3_rate,
-        rankAvg: item.prev.rank_avg,
-      }
-    : null;
+// Lightweight conversion from the per-prompt product detail ``prev``
+// block into the ``PrevWindow`` shape the right pane consumes.
+function toPrevWindow(prev: QuestionPrevStat | null): PrevWindow | null {
+  if (!prev) return null;
   return {
-    promptId: item.prompt_id,
-    prompt: item.prompt,
-    category: item.category,
-    status: item.status,
-    totalMentions: item.matched,
-    coverage: item.coverage,
-    top1Rate: item.top1_rate,
-    top3Rate: item.top3_rate,
-    mentionRate: item.mention_rate,
-    rankAvg: item.rank_avg,
-    models: item.platforms,
-    prev,
+    mentionRate: prev.mention_rate,
+    top1Rate: prev.top1_rate,
+    top3Rate: prev.top3_rate,
+    rankAvg: prev.rank_avg,
   };
 }
 
@@ -299,24 +298,38 @@ function rankClass(rank: number | null): string {
  */
 export default function QuestionTab({ projectId }: Props) {
   const [platforms, setPlatforms] = useState<ProjectPlatform[]>([]);
-  // Aggregated KPI rows from the server-side endpoint
-  // ``GET /projects/{id}/questions/analytics``. The backend already
-  // rolled up ``geo_brand_mentions`` per (prompt [, platform]) for both
-  // the current window and the immediately-preceding same-length
-  // window — see ``QuestionAnalyticsOut``. The UI only renders; it
-  // doesn't pull a paginated detail list and roll up counts in a
-  // ``useMemo`` (which used to drift when the detail endpoint capped
-  // size at 100).
-  const [analytics, setAnalytics] = useState<QuestionAnalyticsItem[]>([]);
+  // Layered analytics loads — replaced the single ``analytics`` blob in
+  // 2026-08-18 so the left list shows instantly and each pane fetches its
+  // own detail lazily:
+  //   - ``summary`` always loads on project / window change
+  //   - ``productDetail`` loads when product pane is active (or the
+  //     previously-selected prompt needs an update)
+  //   - ``competitorDetail`` loads ONLY on the competitor pane
+  //   - ``stableChanges`` loads ONLY on the stable pane
+  const [summary, setSummary] = useState<QuestionSummaryOut | null>(null);
+  const [productDetail, setProductDetail] =
+    useState<QuestionProductAnalyticsOut | null>(null);
+  const [competitorDetail, setCompetitorDetail] =
+    useState<QuestionCompetitorAnalyticsOut | null>(null);
+  const [stableChanges, setStableChanges] = useState<QuestionStatusChangesOut | null>(
+    null,
+  );
   const [projectDetail, setProjectDetail] = useState<ProjectDetailOut | null>(null);
   const [competitors, setCompetitors] = useState<CompetitorOut[]>([]);
+  // True while project + summary are both in flight for the first time —
+  // gates the full-screen skeleton so the UI doesn't flash an empty
+  // state mid-load. Per-pane refetches don't flip this.
   const [loading, setLoading] = useState(true);
 
-  const [subTab, setSubTab] = useState<string>("all");
   const [keyword, setKeyword] = useState("");
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [rankFilter, setRankFilter] = useState<RankFilter>("all");
   const [selectedPromptId, setSelectedPromptId] = useState<number | null>(null);
+  // Project-level category roll-up from the analytics endpoint, used by
+  // the 「下钻分析」 chip strip. Empty when the project has no prompts.
+  const [categorySummary, setCategorySummary] = useState<
+    import("../../api/projects").CategoryStat[]
+  >([]);
   // Top-right time selector — mirrors OverviewTab's range buttons so the
   // "查看原文" modal pulls answers from the same window the operator just
   // saw on screen. Default is 15 天 per the spec.
@@ -325,6 +338,27 @@ export default function QuestionTab({ projectId }: Props) {
     dayjs().subtract(14, "day"),
     dayjs(),
   ]);
+
+  // Top-level sub-pane switcher. URL-synced via ``?sub=product|competitor|
+  // stable`` so a deep link / refresh keeps the operator where they were.
+  // The default is "product" (自品牌分析) per the spec.
+  type PaneTab = "product" | "competitor" | "stable";
+  const PANE_TABS: { key: PaneTab; label: string }[] = [
+    { key: "product", label: "产品分析" },
+    { key: "competitor", label: "竞品分析" },
+    { key: "stable", label: "稳定与掉落" },
+  ];
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawSub = searchParams.get("sub");
+  const paneTab: PaneTab =
+    rawSub === "competitor" || rawSub === "stable" ? rawSub : "product";
+  const setPaneTab = (next: PaneTab) => {
+    const np = new URLSearchParams(searchParams);
+    np.set("sub", next);
+    setSearchParams(np, { replace: true });
+  };
+  // Stable pane has its own server round-trip; cached alongside the
+  // analytics fetch so the time selector invalidates both at once.
 
   const dateQuery = useMemo(
     () =>
@@ -362,58 +396,186 @@ export default function QuestionTab({ projectId }: Props) {
     return `${prevStart.format("YYYY-MM-DD")} ~ ${prevEnd.format("YYYY-MM-DD")}`;
   }, [range, custom]);
 
+  // Long prev window — same length as the current window, but offset
+  // 30 days further back. Drives the 「本月 vs 上月」 card. The offset
+  // is fixed at 30 days regardless of the chosen range — for short
+  // ranges the two windows are spaced 30 days apart, for long ranges
+  // they still touch one month back. None of this is configurable; if
+  // we need per-window "this month vs same month last year" the
+  // backend would need a second offset param.
+  const prevLongLabel = useMemo(() => {
+    const lengthDays =
+      range === "custom"
+        ? custom[1].diff(custom[0], "day") + 1
+        : Number(range);
+    let anchor: Dayjs;
+    if (range !== "custom") {
+      anchor = dayjs().subtract(lengthDays, "day");
+    } else {
+      anchor = custom[0].subtract(1, "day");
+    }
+    const prevLongEnd = anchor.subtract(30, "day");
+    const prevLongStart = prevLongEnd.subtract(lengthDays - 1, "day");
+    return `${prevLongStart.format("YYYY-MM-DD")} ~ ${prevLongEnd.format("YYYY-MM-DD")}`;
+  }, [range, custom]);
+
+  // Stable key for the time window — keeps the cache stable when only
+  // object identity differs (``dateQuery`` is recreated by useMemo every
+  // render). Used by every effect that depends on the window.
+  const dateQueryKey = useMemo(() => JSON.stringify(dateQuery), [dateQuery]);
+
+  // Project + competitor list — independent of the analytics endpoints.
+  // Powers brand alias / keyword highlighting and the per-platform
+  // model chooser. Re-fetched only when projectId changes.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([
-      getProject(projectId),
-      getQuestionsAnalytics(projectId, dateQuery),
-      listCompetitors(projectId),
-    ])
-      .then(([project, analyticsRes, competitorsRes]) => {
-        if (cancelled) return;
+    const ac = new AbortController();
+    const tasks = [
+      cachedFetch<ProjectDetailOut>(cacheKey(["project", projectId]), () =>
+        getProject(projectId),
+      ),
+      cachedFetch<{ items: CompetitorOut[] }>(
+        cacheKey(["competitors", projectId]),
+        () => listCompetitors(projectId),
+      ),
+    ] as const;
+    Promise.all(tasks)
+      .then(([project, competitorsRes]) => {
+        if (ac.signal.aborted) return;
         setPlatforms(project.platforms ?? []);
         setProjectDetail(project);
         setCompetitors(competitorsRes.items);
-        setAnalytics(analyticsRes.items);
-        if (analyticsRes.items.length && selectedPromptId === null) {
-          setSelectedPromptId(analyticsRes.items[0].prompt_id);
-        }
       })
-      .catch((err) => {
-        if (cancelled) return;
-        message.error((err as Error).message || "问题数据加载失败");
+      .catch((err: Error) => {
+        if (ac.signal.aborted) return;
+        message.error(err.message || "项目配置加载失败");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!ac.signal.aborted) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => ac.abort();
+  }, [projectId]);
+
+  // ``summary`` — left list + category drill-down. Always loaded on
+  // project / window change; cheap (one row per prompt, no per-model
+  // breakdown).
+  useEffect(() => {
+    const ac = new AbortController();
+    setLoading(true);
+    cachedFetch<QuestionSummaryOut>(
+      cacheKey(["summary", projectId, dateQueryKey]),
+      () => getQuestionSummary(projectId, dateQuery),
+    )
+      .then((data) => {
+        if (ac.signal.aborted) return;
+        setSummary(data);
+        setCategorySummary(data.category_summary ?? []);
+        if (data.items.length && selectedPromptId === null) {
+          setSelectedPromptId(data.items[0].prompt_id);
+        }
+      })
+      .catch((err: Error) => {
+        if (ac.signal.aborted) return;
+        message.error(err.message || "问题摘要加载失败");
+        setSummary(null);
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setLoading(false);
+      });
+    return () => ac.abort();
+    // ``selectedPromptId`` is read for the auto-select default; not
+    // listed so changing the selection doesn't refetch summary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, dateQuery]);
+  }, [projectId, dateQueryKey]);
 
-  // Categories shown as subtabs — driven by the project's ``category_taxonomy``.
-  // When the project hasn't configured a taxonomy yet (legacy projects), fall
-  // back to deriving from analytics rows so the page still renders.
-  const categories = useMemo(() => {
-    const taxonomy = projectDetail?.category_taxonomy;
-    if (taxonomy && taxonomy.length > 0) {
-      return ["all", ...taxonomy];
-    }
-    const set = new Set<string>();
-    analytics.forEach((a) => a.category && set.add(a.category));
-    return ["all", ...Array.from(set).sort()];
-  }, [projectDetail?.category_taxonomy, analytics]);
+  // ``productDetail`` — single-prompt KPIs + model breakdown + excerpts.
+  // Fires when the product pane is active AND a prompt is selected.
+  // Falls through to selectedPromptId-driven re-runs so switching
+  // prompts reloads.
+  useEffect(() => {
+    if (!selectedPromptId || paneTab !== "product") return;
+    const ac = new AbortController();
+    cachedFetch<QuestionProductAnalyticsOut>(
+      cacheKey(["product", projectId, selectedPromptId, dateQueryKey]),
+      () => getQuestionProductAnalytics(projectId, selectedPromptId, dateQuery),
+    )
+      .then((data) => {
+        if (ac.signal.aborted) return;
+        setProductDetail(data);
+      })
+      .catch((err: Error) => {
+        if (ac.signal.aborted) return;
+        message.error(err.message || "产品视角数据加载失败");
+        setProductDetail(null);
+      });
+    return () => ac.abort();
+  }, [paneTab, selectedPromptId, projectId, dateQueryKey]);
 
-  // Convert backend aggregate items into the ``QuestionStat`` shape the
-  // list + detail UI consume. The backend already filters to the project's
-  // configured prompts (in sort order), so this is a straight map; the
-  // rank/model selectors only narrow the per-model breakdown list below.
+  // ``competitorDetail`` — single-prompt competitor brands breakdown.
+  // Fires ONLY on the competitor pane, otherwise the round-trip is
+  // skipped (spec calls for self/competitor view isolation).
+  useEffect(() => {
+    if (!selectedPromptId || paneTab !== "competitor") return;
+    const ac = new AbortController();
+    cachedFetch<QuestionCompetitorAnalyticsOut>(
+      cacheKey(["competitor", projectId, selectedPromptId, dateQueryKey]),
+      () => getQuestionCompetitorAnalytics(projectId, selectedPromptId, dateQuery),
+    )
+      .then((data) => {
+        if (ac.signal.aborted) return;
+        setCompetitorDetail(data);
+      })
+      .catch((err: Error) => {
+        if (ac.signal.aborted) return;
+        message.error(err.message || "竞品视角数据加载失败");
+        setCompetitorDetail(null);
+      });
+    return () => ac.abort();
+  }, [paneTab, selectedPromptId, projectId, dateQueryKey]);
+
+  // ``stableChanges`` — 2×2 grid quadrants. Fires ONLY on the stable
+  // pane.
+  useEffect(() => {
+    if (paneTab !== "stable") return;
+    const ac = new AbortController();
+    cachedFetch<QuestionStatusChangesOut>(
+      cacheKey(["stable", projectId, dateQueryKey]),
+      () => getQuestionStatusChanges(projectId, dateQuery),
+    )
+      .then((data) => {
+        if (ac.signal.aborted) return;
+        setStableChanges(data);
+      })
+      .catch((err: Error) => {
+        if (ac.signal.aborted) return;
+        message.error(err.message || "稳定与掉落数据加载失败");
+        setStableChanges(null);
+      });
+    return () => ac.abort();
+  }, [paneTab, projectId, dateQueryKey]);
+
+  // Per-platform ``QuestionPlatformStat`` for the currently-selected
+  // prompt. Sourced from ``productDetail.platforms`` (which is the only
+  // place we have per-model breakdown under the layered split). Other
+  // prompts in the list keep an empty ``models`` array — only the
+  // selected prompt's model table renders, so this is fine.
+  const productPlatforms = useMemo(
+    () => productDetail?.platforms ?? [],
+    [productDetail],
+  );
+
+  // Convert the lightweight ``QuestionSummaryItem`` rows into the
+  // ``QuestionStat`` shape the list + detail UI consume. Per-prompt
+  // platform breakdown is only present for the currently-selected
+  // prompt (via ``productPlatforms``); the model's table in the right
+  // pane filters down from there.
   const stats = useMemo<QuestionStat[]>(
     () =>
-      analytics.map((a) => {
-        const filteredModels = a.platforms.filter((m) => {
+      (summary?.items ?? []).map((a) => {
+        // Inject per-model breakdown only for the selected prompt so
+        // the right pane's model table can render the filtered rows.
+        const sourcePlatforms =
+          a.prompt_id === selectedPromptId ? productPlatforms : [];
+        const filteredModels = sourcePlatforms.filter((m) => {
           if (modelFilter !== "all" && m.platform !== modelFilter) return false;
           if (rankFilter === "top1" && m.best_rank !== 1) return false;
           if (rankFilter === "top3" && (m.best_rank === null || m.best_rank > 3)) return false;
@@ -421,24 +583,93 @@ export default function QuestionTab({ projectId }: Props) {
           return true;
         });
         return {
-          ...toStat(a),
+          promptId: a.prompt_id,
+          prompt: a.prompt,
+          category: a.category,
+          status: a.status,
+          totalMentions: a.matched,
+          coverage: a.coverage,
+          top1Rate: a.top1_rate,
+          top3Rate: a.top3_rate,
+          mentionRate: a.mention_rate,
+          rankAvg: a.rank_avg,
           models: filteredModels.sort((x, y) => (x.best_rank ?? 99) - (y.best_rank ?? 99)),
+          // prev comes from the per-prompt product detail. Other
+          // prompts in the list (non-selected) have ``prev = null``
+          // because we never had the window-pair data for them. They
+          // aren't shown in the right pane anyway, only the selected
+          // prompt's detail page.
+          prev: productDetail && a.prompt_id === selectedPromptId
+            ? toPrevWindow(productDetail.prev)
+            : null,
         };
       }),
-    [analytics, modelFilter, rankFilter],
+    [summary, productPlatforms, selectedPromptId, modelFilter, rankFilter, productDetail],
   );
 
-  // Apply subTab (category) + keyword filter
+  // Apply keyword filter only — category subtabs were removed in
+  // 2026-08-18 cleanup; prompts are no longer sliced by category here.
   const visibleStats = useMemo(() => {
     const k = keyword.trim().toLowerCase();
     return stats.filter((s) => {
-      if (subTab !== "all" && s.category !== subTab) return false;
       if (k && !s.prompt.toLowerCase().includes(k)) return false;
       return true;
     });
-  }, [stats, subTab, keyword]);
+  }, [stats, keyword]);
 
   const selected = visibleStats.find((s) => s.promptId === selectedPromptId) ?? visibleStats[0] ?? null;
+
+  // Project the per-prompt detail endpoints into the
+  // ``QuestionAnalyticsItem`` shape that the right pane (QuestionDetail
+  // / CompetitorDetail) consumes. They only read ``excerpts`` and
+  // ``long_prev.mention_rate`` from ``item``; both are present on
+  // ``QuestionProductAnalyticsOut`` and ``QuestionCompetitorAnalyticsOut``
+  // under the same keys.
+  const effectiveProductItem = useMemo<QuestionAnalyticsItem | null>(() => {
+    if (!productDetail) return null;
+    if (!selected) return null;
+    return {
+      ...productDetail,
+      prompt_id: selected.promptId,
+      prompt: selected.prompt,
+      category: selected.category,
+      status: selected.status,
+      total: selected.totalMentions,
+      matched: selected.totalMentions,
+      top1_rate: selected.top1Rate,
+      top3_rate: selected.top3Rate,
+      mention_rate: selected.mentionRate,
+      rank_avg: selected.rankAvg,
+      coverage: selected.coverage,
+      platforms: productDetail.platforms,
+      prev: productDetail.prev,
+      long_prev: productDetail.long_prev,
+      excerpts: productDetail.excerpts as Record<string, PlatformExcerpt | null>,
+    };
+  }, [productDetail, selected]);
+
+  const effectiveCompetitorItem = useMemo<QuestionAnalyticsItem | null>(() => {
+    if (!competitorDetail) return null;
+    if (!selected) return null;
+    return {
+      ...competitorDetail,
+      prompt_id: selected.promptId,
+      prompt: selected.prompt,
+      category: selected.category,
+      status: selected.status,
+      total: selected.totalMentions,
+      matched: selected.totalMentions,
+      top1_rate: selected.top1Rate,
+      top3_rate: selected.top3Rate,
+      mention_rate: selected.mentionRate,
+      rank_avg: selected.rankAvg,
+      coverage: selected.coverage,
+      platforms: [],
+      prev: null,
+      long_prev: null,
+      excerpts: competitorDetail.excerpts as Record<string, PlatformExcerpt | null>,
+    };
+  }, [competitorDetail, selected]);
 
   // Tokens used by the 查看原文 modal to colour-code brand / competitor /
   // keyword hits in the answer body. Order is the visual priority.
@@ -513,7 +744,17 @@ export default function QuestionTab({ projectId }: Props) {
         // Pending/processing rows show "此回答无文本内容" and aren't useful
         // for reading the AI's actual answer; drop them so the modal only
         // lists finished answers.
-        setAnswers(res.items.filter((a) => a.status === "completed"));
+        //
+        // ``completed`` is the historical value (legacy mock data), while
+        // ``success`` is what ``RunStatus.SUCCESS`` writes through the real
+        // sync pipeline — see backend/app/models/enums.py. Accept both
+        // so old fixture projects and production-synced projects render
+        // the same modal.
+        setAnswers(
+          res.items.filter(
+            (a) => a.status === "completed" || a.status === "success",
+          ),
+        );
       })
       .catch((err: Error) => {
         if (cancelled) return;
@@ -558,7 +799,7 @@ export default function QuestionTab({ projectId }: Props) {
     return <Skeleton active paragraph={{ rows: 10 }} />;
   }
 
-  if (analytics.length === 0) {
+  if ((summary?.items ?? []).length === 0) {
     return (
       <div
         style={{
@@ -576,22 +817,22 @@ export default function QuestionTab({ projectId }: Props) {
 
   return (
     <div className="qt-root">
-      {/* 二级 Tab + 时间选择器 —— 与 OverviewTab 右上角的 time-selector
-          同款;默认 15 天,跟首屏概览一致。 */}
-      <div className="qt-secondary-tabs">
-        <div className="qt-secondary-tabs-left">
-          {categories.map((c) => (
-            <button
-              key={c}
-              type="button"
-              className={`qt-subtab${subTab === c ? " active" : ""}`}
-              onClick={() => setSubTab(c)}
-            >
-              {c === "all" ? "全部问题" : c}
-            </button>
-          ))}
-        </div>
-        <div className="qt-secondary-tabs-right">
+      {/* 顶部子面板 Tab(产品分析 / 竞品分析 / 稳定与掉落)+ 共享时间选择器
+         —— 「产品分析」与「竞品分析」共用下面的左列表 + 右详情布局,
+         区别仅是后端的 view 参数。「稳定与掉落」换成一个独立的 2x2
+         四宫格视图,不再需要左列表。 */}
+      <div className="qt-pane-tabs">
+        {PANE_TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            className={`qt-pane-tab${paneTab === t.key ? " active" : ""}`}
+            onClick={() => setPaneTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+        <div className="qt-pane-tabs-right">
           <div className="qt-time-selector">
             {TIME_RANGES.map((r) => (
               <button
@@ -618,6 +859,14 @@ export default function QuestionTab({ projectId }: Props) {
         </div>
       </div>
 
+      {paneTab === "stable" ? (
+        <StablePane
+          data={stableChanges}
+          loading={loading}
+          platformLabel={platformLabel}
+        />
+      ) : (
+      <>
       <div className="qt-split">
         {/* 左侧:问题列表 */}
         <div className="qt-split-left">
@@ -701,17 +950,34 @@ export default function QuestionTab({ projectId }: Props) {
         {/* 右侧:问题详情 */}
         <div className="qt-split-right">
           {selected ? (
-            <QuestionDetail
-              stat={selected}
-              totalPlatforms={platforms.length}
-              onViewOriginal={openAnswers}
-              prevWindowLabel={prevWindowLabel}
-            />
+            paneTab === "competitor" ? (
+              <CompetitorDetail
+                stat={selected}
+                item={effectiveCompetitorItem}
+                brands={competitorDetail?.brands ?? []}
+                platforms={platforms.map((entry) => entry.platform)}
+              />
+            ) : (
+              <QuestionDetail
+                stat={selected}
+                item={effectiveProductItem}
+                totalPlatforms={platforms.length}
+                onViewOriginal={openAnswers}
+                prevWindowLabel={prevWindowLabel}
+                prevLongLabel={prevLongLabel}
+                categorySummary={categorySummary}
+                view="self"
+              />
+            )
           ) : (
             <Empty description="请选择左侧问题查看详情" style={{ padding: 60 }} />
           )}
         </div>
       </div>
+      </>
+      )}
+
+      {/* 查看原文 弹窗 —— 列出当前问题在所选时间窗内的所有回答。
 
       {/* 查看原文 弹窗 —— 列出当前问题在所选时间窗内的所有回答。
           用 ``100vh`` 计算 maxHeight 而不是写死 768px,避免窄屏
@@ -770,7 +1036,7 @@ export default function QuestionTab({ projectId }: Props) {
                   fontWeight: 400,
                 }}
               >
-                {analytics.find((a) => a.prompt_id === answersTarget.promptId)?.prompt}
+                {summary?.items.find((a) => a.prompt_id === answersTarget.promptId)?.prompt}
               </div>
             )}
           </div>
@@ -810,53 +1076,22 @@ export default function QuestionTab({ projectId }: Props) {
       )}
 
       <style>{`
-        /* Root fills the visible area below the AppLayout header. We
-           subtract the 24+24 px padding on .app-content so .qt-root
-           ends at the inner edge of that padding — without this offset
-           the global box-sizing: border-box lets .qt-root overflow
-           the content box by the padding amount and .app-content's
-           overflow-y: auto lights up a vertical scrollbar on the
-           right edge of the page. */
+        /* Root fills the visible area below the AppLayout header. The parent
+           .project-detail-page is sized to .app-content content box (which
+           already excludes the 24+24 px padding via box-sizing: border-box),
+           so .qt-root just takes 100% of that. The earlier minus-48 offset
+           was only correct when .qt-root was a direct child of .app-content;
+           now that there is an intermediate wrapper, that subtraction would
+           double-count the padding. */
         .qt-root {
           display: flex;
           flex-direction: column;
           gap: 12px;
-          height: calc(100% - 48px);
-          /* Even with the -48px padding offset, an extra pixel of sub-pixel
-             rounding (or a child that exceeds its flex space by a hair)
-             can still bleed onto .app-content and re-light its right-edge
-             scrollbar. Clipping at the root absorbs that overflow instead
-             of letting it propagate up. */
+          height: 100%;
+          /* Clipping at the root absorbs any sub-pixel overflow from flex
+             children so it does not re-light .app-content right-edge
+             scrollbar. */
           overflow: hidden;
-        }
-        .qt-secondary-tabs {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          border-bottom: 1px solid var(--border-light, #f0f0f0);
-          padding-bottom: 0;
-          flex-shrink: 0;
-        }
-        .qt-secondary-tabs-left { display: flex; gap: 4px; flex-wrap: wrap; }
-        .qt-secondary-tabs-right {
-          display: flex;
-          align-items: center;
-        }
-        .qt-subtab {
-          background: transparent;
-          border: 0;
-          padding: 10px 14px;
-          font-size: 14px;
-          color: var(--text-secondary, #4f4f4f);
-          cursor: pointer;
-          border-bottom: 2px solid transparent;
-          margin-bottom: -1px;
-        }
-        .qt-subtab:hover { color: var(--brand-blue, #1a55e8); }
-        .qt-subtab.active {
-          color: var(--brand-blue, #1a55e8);
-          border-bottom-color: var(--brand-blue, #1a55e8);
-          font-weight: 500;
         }
         /* Time selector (top-right) — mirrors .time-selector in OverviewTab
            so the two pages feel consistent. */
@@ -1003,6 +1238,14 @@ export default function QuestionTab({ projectId }: Props) {
           min-height: 0;
           overflow: hidden;
         }
+        /* Plain block layout — every section (KPI row / 模型对比 /
+           AI 摘录 / 时间对比 / 下钻) keeps its natural height and
+           stacks top-to-bottom. The previous flex-column + table-wrap
+           flex:1 design forced the model-compare table into a flex slot
+           that <table> cannot shrink into, so the table collapsed and
+           its rows visually overlapped the AI excerpt grid that came
+           right after. Letting the body block-scroll avoids the
+           flex/table height contract entirely. */
         .qt-detail-body {
           padding: 18px 20px;
           overflow-y: auto;
@@ -1061,6 +1304,151 @@ export default function QuestionTab({ projectId }: Props) {
           color: var(--text-tertiary);
           margin: -10px 0 12px;
           padding-left: 2px;
+        }
+        .qc-detail-header p {
+          margin: 0 0 16px;
+          color: var(--text-tertiary);
+          font-size: 13px;
+        }
+        .qc-overview {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 12px;
+          margin-bottom: 16px;
+        }
+        .qc-overview-item {
+          border: 1px solid var(--border-light, #f0f0f0);
+          border-top: 3px solid var(--accent, #1a55e8);
+          border-radius: 8px;
+          padding: 12px;
+          background: #fff;
+        }
+        .qc-overview-item.qc-self {
+          box-shadow: 0 0 0 2px rgba(26, 85, 232, 0.12);
+        }
+        .qc-name {
+          min-height: 22px;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-primary);
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          flex-wrap: wrap;
+        }
+        .qc-self-tag {
+          display: inline-flex;
+          align-items: center;
+          height: 20px;
+          padding: 0 7px;
+          border-radius: 4px;
+          background: rgba(26, 85, 232, 0.1);
+          color: #1a55e8;
+          font-size: 11px;
+          font-weight: 500;
+          white-space: nowrap;
+        }
+        .qc-num {
+          font-size: 26px;
+          font-weight: 700;
+          color: var(--accent, #1a55e8);
+          margin: 6px 0 2px;
+        }
+        .qc-label {
+          font-size: 12px;
+          color: var(--text-tertiary);
+        }
+        .qc-sub {
+          font-size: 12px;
+          color: var(--text-secondary);
+          margin-top: 2px;
+          white-space: nowrap;
+        }
+        .qc-panel {
+          border: 1px solid var(--border-light, #f0f0f0);
+          border-radius: 8px;
+          background: #fff;
+          margin-top: 16px;
+          overflow: hidden;
+        }
+        .qc-panel-header {
+          padding: 14px 16px 10px;
+          border-bottom: 1px solid var(--border-light, #f0f0f0);
+        }
+        .qc-panel-header h3 {
+          margin: 0;
+          color: var(--text-primary);
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .qc-panel-header p {
+          margin: 4px 0 0;
+          color: var(--text-tertiary);
+          font-size: 12px;
+        }
+        .qc-table-scroll {
+          overflow-x: auto;
+        }
+        .qc-rank-table {
+          min-width: 680px;
+        }
+        .qc-rank-table th:not(:first-child),
+        .qc-rank-table td:not(:first-child) {
+          text-align: center;
+        }
+        .qc-brand-cell {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          white-space: nowrap;
+        }
+        .qc-brand-dot {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          flex: 0 0 10px;
+        }
+        .qc-rank {
+          display: inline-flex;
+          min-width: 24px;
+          height: 24px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+          background: var(--bg-page, #f5f6f8);
+          color: var(--text-secondary);
+          font-weight: 600;
+          font-size: 13px;
+        }
+        .qc-rank.qc-rank-top {
+          background: rgba(26, 85, 232, 0.1);
+          color: #1a55e8;
+        }
+        .qc-answer-list {
+          padding: 0 16px;
+        }
+        .qc-answer-brief {
+          padding: 8px 0;
+          border-bottom: 1px dashed var(--border-light, #f0f0f0);
+          font-size: 13px;
+          color: var(--text-secondary);
+          line-height: 1.7;
+        }
+        .qc-answer-brief:last-child {
+          border-bottom: none;
+        }
+        .qc-model-dot {
+          display: inline-block;
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          margin-right: 6px;
+        }
+        @media (max-width: 1280px) {
+          .qc-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        }
+        @media (max-width: 720px) {
+          .qc-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         .qt-section { margin-top: 18px; }
         .qt-section h3 {
@@ -1198,22 +1586,707 @@ export default function QuestionTab({ projectId }: Props) {
           max-width: 100%;
           height: auto;
         }
+
+        /* ----------------------------------------------------------------
+         * 2026-08-18 refactor — 顶部子面板 tab + 3 个新右栏段 + 稳定 2x2
+         * ---------------------------------------------------------------- */
+        .qt-pane-tabs {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          border-bottom: 1px solid var(--border-light, #f0f0f0);
+          padding: 0 4px;
+        }
+        .qt-pane-tab {
+          padding: 10px 16px;
+          font-size: 14px;
+          color: var(--text-secondary, #4f4f4f);
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          margin-bottom: -1px;
+          background: transparent;
+          border-left: 0;
+          border-right: 0;
+          border-top: 0;
+        }
+        .qt-pane-tab:hover { color: var(--brand-blue, #1a55e8); }
+        .qt-pane-tab.active {
+          color: var(--brand-blue, #1a55e8);
+          border-bottom-color: var(--brand-blue, #1a55e8);
+          font-weight: 500;
+        }
+        .qt-pane-tabs-right {
+          margin-left: auto;
+          display: flex;
+          align-items: center;
+        }
+
+        /* AI 摘录 2 列 grid(6 张 = 3 行 × 2 列) */
+        .qt-ai-excerpts-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 12px;
+        }
+        @media (max-width: 1100px) {
+          .qt-ai-excerpts-grid { grid-template-columns: 1fr; }
+        }
+        .qt-ai-excerpt-card {
+          background: var(--bg-page, #f5f6f8);
+          border-radius: 6px;
+          padding: 12px 14px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          min-height: 140px;
+        }
+        .qt-ai-excerpt-head {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .qt-ai-excerpt-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          display: inline-block;
+        }
+        .qt-ai-excerpt-name {
+          font-weight: 600;
+          font-size: 13px;
+          color: var(--text-primary, #181818);
+        }
+        .qt-ai-excerpt-rank {
+          margin-left: auto;
+          font-size: 12px;
+          color: var(--color-success, #52c41a);
+          font-weight: 500;
+        }
+        .qt-ai-excerpt-rank.muted {
+          color: var(--text-tertiary, #8c8c8c);
+        }
+        .qt-ai-excerpt-body {
+          font-size: 12.5px;
+          line-height: 1.55;
+          color: var(--text-secondary, #4f4f4f);
+          flex: 1;
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 5;
+          -webkit-box-orient: vertical;
+        }
+        .qt-ai-excerpt-empty {
+          color: var(--text-tertiary, #8c8c8c);
+          font-style: italic;
+        }
+        .qt-ai-excerpt-link {
+          align-self: flex-end;
+          background: transparent;
+          border: 0;
+          color: var(--brand-blue, #1a55e8);
+          font-size: 12px;
+          cursor: pointer;
+          padding: 0;
+        }
+        .qt-ai-excerpt-link:disabled {
+          color: var(--text-tertiary, #8c8c8c);
+          cursor: not-allowed;
+        }
+
+        /* 时间维度对比 — 2 张卡横向 */
+        .qt-time-compare-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 12px;
+        }
+        @media (max-width: 1100px) {
+          .qt-time-compare-row { grid-template-columns: 1fr; }
+        }
+        .qt-time-card {
+          background: var(--bg-page, #f5f6f8);
+          border-radius: 6px;
+          padding: 14px 16px;
+        }
+        .qt-time-card-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-primary, #181818);
+        }
+        .qt-time-card-hint {
+          font-size: 11px;
+          color: var(--text-tertiary, #8c8c8c);
+          margin-top: 2px;
+        }
+        .qt-time-card-body {
+          margin-top: 10px;
+          display: flex;
+          align-items: baseline;
+          gap: 8px;
+        }
+        .qt-time-card-prev {
+          font-size: 14px;
+          color: var(--text-tertiary, #8c8c8c);
+          text-decoration: line-through;
+        }
+        .qt-time-card-arrow { color: var(--text-tertiary, #8c8c8c); }
+        .qt-time-card-cur {
+          font-size: 22px;
+          font-weight: 700;
+          color: var(--text-primary, #181818);
+        }
+        .qt-time-card-delta {
+          font-size: 12px;
+          font-weight: 600;
+          margin-left: auto;
+        }
+        .qt-time-card-delta.up { color: var(--color-success, #52c41a); }
+        .qt-time-card-delta.down { color: var(--color-danger, #ff4d4f); }
+        .qt-time-card-empty {
+          margin-top: 10px;
+          font-size: 12px;
+          color: var(--text-tertiary, #8c8c8c);
+        }
+
+        /* 下钻分析 — chip 网格 */
+        .qt-drill-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .qt-drill-chip {
+          background: var(--bg-page, #f5f6f8);
+          border: 1px solid var(--border-light, #e8e9ec);
+          border-radius: 8px;
+          padding: 12px 14px;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 4px;
+          font-family: inherit;
+        }
+        .qt-drill-chip-name {
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--text-primary, #181818);
+        }
+        .qt-drill-chip-count {
+          font-size: 12px;
+          color: var(--text-tertiary, #8c8c8c);
+        }
+        .qt-drill-chip-rate {
+          font-size: 12px;
+          color: var(--color-success, #52c41a);
+          font-weight: 500;
+        }
+
+        /* 稳定与掉落 2x2 网格 */
+        .qt-stable-pane {
+          padding: 16px 0 0;
+        }
+        .qt-stable-filter {
+          display: flex;
+          align-items: center;
+          margin-bottom: 12px;
+        }
+        .qt-stable-filter-hint {
+          font-size: 12px;
+          color: var(--text-tertiary, #8c8c8c);
+          margin-left: auto;
+        }
+        .qt-stable-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 16px;
+        }
+        @media (max-width: 1100px) {
+          .qt-stable-grid { grid-template-columns: 1fr; }
+        }
+        .qt-stable-quad {
+          background: #fff;
+          border-radius: 8px;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04);
+          padding: 16px 18px 14px;
+          border-top: 3px solid;
+          min-height: 240px;
+          display: flex;
+          flex-direction: column;
+        }
+        .qt-stable-quad-green { border-top-color: #52c41a; }
+        .qt-stable-quad-orange { border-top-color: #faad14; }
+        .qt-stable-quad-gray { border-top-color: #8c8c8c; }
+        .qt-stable-quad-blue { border-top-color: #1a55e8; }
+        .qt-stable-quad-head {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .qt-stable-quad-head h3 {
+          margin: 0;
+          font-size: 15px;
+          font-weight: 600;
+          color: var(--text-primary, #181818);
+        }
+        .qt-stable-quad-count {
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--brand-blue, #1a55e8);
+          background: rgba(26, 85, 232, 0.08);
+          border-radius: 12px;
+          padding: 2px 10px;
+        }
+        .qt-stable-quad-caption {
+          font-size: 12px;
+          color: var(--text-tertiary, #8c8c8c);
+          margin-top: 4px;
+        }
+        .qt-stable-quad-list {
+          margin-top: 12px;
+          flex: 1;
+          overflow-y: auto;
+          min-height: 0;
+        }
+        .qt-stable-quad-item {
+          padding: 6px 0;
+          border-bottom: 1px solid var(--border-light, #f0f0f0);
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .qt-stable-quad-item:last-child { border-bottom: 0; }
+        .qt-stable-quad-item-label {
+          font-size: 13px;
+          color: var(--text-primary, #181818);
+        }
+        .qt-stable-quad-item-sub {
+          font-size: 11px;
+          color: var(--text-tertiary, #8c8c8c);
+        }
+        .qt-stable-quad-empty {
+          font-size: 12px;
+          color: var(--text-tertiary, #8c8c8c);
+          font-style: italic;
+          padding: 16px 0;
+          text-align: center;
+        }
       `}</style>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------
+ * 3 new right-panel sections added in 2026-08-18 refactor:
+ *   - AiExcerptsGrid: 6 platform cards × 200 chars each, with a
+ *     「查看完整原文」 link that opens the existing 查看原文 modal.
+ *   - TimeCompareCard: shows prev% → current% + green ↑ +X% delta.
+ *   - DrillDownGrid: project-level category roll-up; read-only —
+ *     chips are pure display after the 2026-08-18 cleanup removed
+ *     the category sub-tabs.
+ * ---------------------------------------------------------------------- */
+
+function AiExcerptsGrid({
+  excerpts,
+  platforms,
+  onOpenFull,
+}: {
+  excerpts: Record<string, PlatformExcerpt | null>;
+  platforms: string[];
+  onOpenFull: (platform: string, runId: string | null) => void;
+}) {
+  if (platforms.length === 0) {
+    return (
+      <Empty
+        description="该项目暂未配置任何模型"
+        style={{ padding: 24 }}
+      />
+    );
+  }
+  return (
+    <div className="qt-ai-excerpts-grid">
+      {platforms.map((plat) => {
+        const ex = excerpts[plat] ?? null;
+        return (
+          <div key={plat} className="qt-ai-excerpt-card">
+            <div className="qt-ai-excerpt-head">
+              <i
+                className="qt-ai-excerpt-dot"
+                style={{ background: platformColor(plat) }}
+              />
+              <span className="qt-ai-excerpt-name">{platformLabel(plat)}</span>
+              {ex?.rank !== null && ex?.rank !== undefined ? (
+                <span className="qt-ai-excerpt-rank">排名 No.{ex.rank}</span>
+              ) : (
+                <span className="qt-ai-excerpt-rank muted">未上榜</span>
+              )}
+            </div>
+            <div className="qt-ai-excerpt-body">
+              {ex?.excerpt ? (
+                ex.excerpt
+              ) : (
+                <span className="qt-ai-excerpt-empty">暂无原文</span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="qt-ai-excerpt-link"
+              onClick={() => onOpenFull(plat, ex?.run_id ?? null)}
+              disabled={!ex?.run_id}
+            >
+              查看完整原文 →
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TimeCompareCard({
+  title,
+  hint,
+  current,
+  prev,
+}: {
+  title: string;
+  hint: string;
+  current: number;
+  prev: number | null;
+}) {
+  // Delta = (current - prev) / prev. Pct points (not relative) when
+  // both are rates: the design mockup shows `+3.2%` style numbers,
+  // not a relative growth — that matches what an operator wants to
+  // see on a 0-100% KPI.
+  const hasPrev = prev !== null && prev !== undefined;
+  const delta = hasPrev ? current - (prev as number) : null;
+  const up = delta !== null && delta >= 0;
+  return (
+    <div className="qt-time-card">
+      <div className="qt-time-card-title">{title}</div>
+      <div className="qt-time-card-hint">{hint}</div>
+      {hasPrev ? (
+        <div className="qt-time-card-body">
+          <span className="qt-time-card-prev">{pct(prev as number)}</span>
+          <span className="qt-time-card-arrow">→</span>
+          <span className="qt-time-card-cur">{pct(current)}</span>
+          <span className={`qt-time-card-delta ${up ? "up" : "down"}`}>
+            {up ? "↑" : "↓"} {Math.abs((delta as number) * 100).toFixed(1)}%
+          </span>
+        </div>
+      ) : (
+        <div className="qt-time-card-empty">该窗口暂无数据,无法对比</div>
+      )}
+    </div>
+  );
+}
+
+function DrillDownGrid({
+  categorySummary,
+}: {
+  categorySummary: import("../../api/projects").CategoryStat[];
+}) {
+  if (categorySummary.length === 0) {
+    return (
+      <Empty
+        description="该时间窗口内没有分类数据"
+        style={{ padding: 24 }}
+      />
+    );
+  }
+  return (
+    <div className="qt-drill-grid">
+      {categorySummary.map((s) => {
+        const label = s.category ?? "未分类";
+        return (
+          <div
+            key={label}
+            className="qt-drill-chip"
+          >
+            <span className="qt-drill-chip-name">{label}</span>
+            <span className="qt-drill-chip-count">{s.prompt_count} 个问题</span>
+            <span className="qt-drill-chip-rate">提及率 {pct(s.mention_rate)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------
+ * StablePane — 2×2 四宫格视图,每个宫显示一类问题列表。
+ * 标题纯展示,不绑 onClick(用户确认不需要跳转)。
+ * ---------------------------------------------------------------------- */
+
+function StablePane({
+  data,
+  loading,
+  platformLabel: _platformLabel,
+}: {
+  data: QuestionStatusChangesOut | null;
+  loading: boolean;
+  platformLabel: (raw: string) => string;
+}) {
+  if (loading) {
+    return <Skeleton active paragraph={{ rows: 6 }} />;
+  }
+  if (!data) {
+    return <Empty description="暂无数据" style={{ padding: 60 }} />;
+  }
+
+  return (
+    <div className="qt-stable-pane">
+      <div className="qt-stable-filter">
+        <span className="qt-stable-filter-hint">
+          判定窗口 {data.start} ~ {data.end};「上榜」= 窗口内被任一模型提及过
+        </span>
+      </div>
+
+      <div className="qt-stable-grid">
+        <StableQuadrant
+          tone="green"
+          title="稳定的问题"
+          caption="连续 2 个窗口都至少被 1 个模型提及"
+          items={data.stable.map((it) => ({
+            key: `stable-${it.prompt_id}`,
+            label: it.prompt,
+            sub: it.platforms.map(_platformLabel).join(" · "),
+          }))}
+        />
+        <StableQuadrant
+          tone="orange"
+          title="掉落分析"
+          caption="上一窗口被提及,本窗口掉出 Top3 或消失(按事件)"
+          items={data.drops.map((d) => ({
+            key: `drop-${d.prompt_id}-${d.platform}-${d.dropped_day}`,
+            label: d.prompt,
+            sub: `${_platformLabel(d.platform)} · ${d.dropped_day} · ${d.reason ?? ""}`,
+          }))}
+        />
+        <StableQuadrant
+          tone="gray"
+          title="从未上榜"
+          caption="两个窗口内都未被任何模型提及"
+          items={data.never_listed.map((it) => ({
+            key: `never-${it.prompt_id}`,
+            label: it.prompt,
+            sub: it.category ?? "未分类",
+          }))}
+        />
+        <StableQuadrant
+          tone="blue"
+          title="上榜的提及问题"
+          caption="本窗口内被至少 1 个模型提过(不含 dropped)"
+          items={data.listed.map((it) => ({
+            key: `listed-${it.prompt_id}`,
+            label: it.prompt,
+            sub: it.platforms.map(_platformLabel).join(" · "),
+          }))}
+        />
+      </div>
+    </div>
+  );
+}
+
+function StableQuadrant({
+  tone,
+  title,
+  caption,
+  items,
+}: {
+  tone: "green" | "orange" | "gray" | "blue";
+  title: string;
+  caption: string;
+  items: { key: string; label: string; sub: string }[];
+}) {
+  return (
+    <div className={`qt-stable-quad qt-stable-quad-${tone}`}>
+      <div className="qt-stable-quad-head">
+        <h3>{title}</h3>
+        <span className="qt-stable-quad-count">{items.length}</span>
+      </div>
+      <div className="qt-stable-quad-caption">{caption}</div>
+      <div className="qt-stable-quad-list">
+        {items.length === 0 ? (
+          <div className="qt-stable-quad-empty">窗口内暂无相关问题</div>
+        ) : (
+          items.map((it) => (
+            <div key={it.key} className="qt-stable-quad-item">
+              <span className="qt-stable-quad-item-label">{it.label}</span>
+              {it.sub && <span className="qt-stable-quad-item-sub">{it.sub}</span>}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompetitorDetail({
+  stat,
+  item,
+  brands,
+  platforms,
+}: {
+  stat: QuestionStat;
+  item: QuestionAnalyticsItem | null;
+  brands: CompetitorBrandStat[];
+  platforms: string[];
+}) {
+  const modelColumns = useMemo(() => {
+    const keys = new Set(platforms);
+    brands.forEach((brand) => {
+      Object.keys(brand.model_ranks).forEach((platform) => keys.add(platform));
+    });
+    return Array.from(keys);
+  }, [brands, platforms]);
+  const rankedBrands = useMemo(
+    () =>
+      [...brands].sort(
+        (left, right) => (left.avg_rank ?? 99) - (right.avg_rank ?? 99),
+      ),
+    [brands],
+  );
+  const summaries = modelColumns
+    .map((platform) => ({ platform, excerpt: item?.excerpts[platform]?.excerpt }))
+    .filter((entry) => entry.excerpt);
+
+  return (
+    <div className="qt-detail-body qc-detail">
+      <div className="qt-detail-header qc-detail-header">
+        <h2>{stat.prompt}</h2>
+        <p>自身品牌 vs 竞品在各模型回答中的提及率与推荐位次</p>
+      </div>
+
+      {brands.length === 0 ? (
+        <Empty description="该问题暂无自身品牌与竞品对比数据" style={{ padding: 48 }} />
+      ) : (
+        <>
+          <div className="qc-overview">
+            {brands.map((brand) => (
+              <div
+                key={brand.brand_canonical}
+                className={`qc-overview-item${brand.is_self ? " qc-self" : ""}`}
+                style={{ "--accent": brand.color } as CSSProperties}
+              >
+                <div className="qc-name">
+                  {brand.brand_canonical}
+                  {brand.is_self && <span className="qc-self-tag">自身</span>}
+                </div>
+                <div className="qc-num">{pct(brand.mention_rate)}</div>
+                <div className="qc-label">提及率</div>
+                <div className="qc-sub">
+                  Top1 {pct(brand.top1_rate)} · Top3 {pct(brand.top3_rate)}
+                </div>
+                <div className="qc-sub">
+                  平均位次 {brand.avg_rank === null ? "—" : `No.${brand.avg_rank.toFixed(1)}`}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="qc-panel">
+            <div className="qc-panel-header">
+              <h3>各模型中的品牌位次</h3>
+              <p>数字为该模型答案中品牌的推荐名次</p>
+            </div>
+            <div className="qc-table-scroll">
+              <table className="qt-table qc-rank-table">
+                <thead>
+                  <tr>
+                    <th>品牌</th>
+                    {modelColumns.map((platform) => (
+                      <th key={platform}>{platformLabel(platform)}</th>
+                    ))}
+                    <th>综合位次</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rankedBrands.map((brand) => (
+                    <tr key={brand.brand_canonical}>
+                      <td>
+                        <span className="qc-brand-cell">
+                          <span
+                            className="qc-brand-dot"
+                            style={{ background: brand.color }}
+                          />
+                          <strong>{brand.brand_canonical}</strong>
+                          {brand.is_self && <span className="qc-self-tag">自身</span>}
+                        </span>
+                      </td>
+                      {modelColumns.map((platform) => {
+                        const rank = brand.model_ranks[platform];
+                        return (
+                          <td key={platform}>
+                            <span className={`qc-rank${rank === 1 ? " qc-rank-top" : ""}`}>
+                              {rank ?? "—"}
+                            </span>
+                          </td>
+                        );
+                      })}
+                      <td>
+                        <strong>
+                          {brand.avg_rank === null ? "—" : `No.${brand.avg_rank.toFixed(1)}`}
+                        </strong>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="qc-panel">
+            <div className="qc-panel-header">
+              <h3>答案摘要</h3>
+              <p>该问题下各模型对品牌的推荐表述</p>
+            </div>
+            <div className="qc-answer-list">
+              {summaries.length === 0 ? (
+                <Empty description="暂无答案摘要" style={{ padding: 24 }} />
+              ) : (
+                summaries.map(({ platform, excerpt }, index) => (
+                  <div key={platform} className="qc-answer-brief">
+                    <span
+                      className="qc-model-dot"
+                      style={{ background: platformColor(platform, index) }}
+                    />
+                    <strong>{platformLabel(platform)}</strong> — {excerpt}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 function QuestionDetail({
   stat,
+  item,
   totalPlatforms,
   onViewOriginal,
   prevWindowLabel,
+  prevLongLabel,
+  categorySummary,
+  view,
 }: {
   stat: QuestionStat;
+  item: QuestionAnalyticsItem | null;
   totalPlatforms: number;
   onViewOriginal: (promptId: number, platform: string) => void;
   prevWindowLabel: string;
+  prevLongLabel: string;
+  categorySummary: import("../../api/projects").CategoryStat[];
+  view: "self" | "competitor";
 }) {
+  // Platforms to render AI excerpt cards for. The user spec calls for
+  // "6 models each" — the actual count comes from whichever platforms
+  // produced an excerpt for this prompt in the current window, not the
+  // project's configured platforms (which can be smaller). Sorted for
+  // stable order so the same card layout shows up across reloads.
+  const excerptPlatforms = Object.keys(item?.excerpts ?? {}).sort();
   return (
     <div className="qt-detail-body">
       <div className="qt-detail-header">
@@ -1230,7 +2303,7 @@ function QuestionDetail({
 
       <div className="qt-metric-row">
         <div className="qt-metric-card">
-          <div className="qt-metric-label">提及率</div>
+          <div className="qt-metric-label">{view === "competitor" ? "竞品提及率" : "提及率"}</div>
           <div className="qt-metric-value">{pct(stat.mentionRate)}</div>
           <DeltaRow
             current={stat.mentionRate}
@@ -1239,7 +2312,7 @@ function QuestionDetail({
           />
         </div>
         <div className="qt-metric-card">
-          <div className="qt-metric-label">Top1 率</div>
+          <div className="qt-metric-label">{view === "competitor" ? "竞品 Top1 率" : "Top1 率"}</div>
           <div className="qt-metric-value">{pct(stat.top1Rate)}</div>
           <DeltaRow
             current={stat.top1Rate}
@@ -1248,7 +2321,7 @@ function QuestionDetail({
           />
         </div>
         <div className="qt-metric-card">
-          <div className="qt-metric-label">Top3 率</div>
+          <div className="qt-metric-label">{view === "competitor" ? "竞品 Top3 率" : "Top3 率"}</div>
           <div className="qt-metric-value">{pct(stat.top3Rate)}</div>
           <DeltaRow
             current={stat.top3Rate}
@@ -1257,7 +2330,7 @@ function QuestionDetail({
           />
         </div>
         <div className="qt-metric-card">
-          <div className="qt-metric-label">平均排名</div>
+          <div className="qt-metric-label">{view === "competitor" ? "竞品平均排名" : "平均排名"}</div>
           <div className="qt-metric-value">
             {stat.rankAvg !== null ? `No.${stat.rankAvg.toFixed(1)}` : "—"}
           </div>
@@ -1269,7 +2342,7 @@ function QuestionDetail({
         </div>
       </div>
 
-      <div className="qt-section">
+      <div className="qt-section qt-table-wrap">
         <h3>
           模型对比
           <span className="badge">{stat.models.length} 个模型</span>
@@ -1291,17 +2364,36 @@ function QuestionDetail({
             <tbody>
               {stat.models.map((m) => {
                 const sc = m.avg_sentiment;
+                // avg_sentiment comes from the API as the float average of
+                // the Molizhishu sentiment labels (positive=1.0, neutral=0.5,
+                // negative=0.0). Translate back to a label so the operator
+                // sees the discrete verdict rather than a number.
+                const sLabel =
+                  sc === null
+                    ? "—"
+                    : sc >= 0.66
+                    ? "正面"
+                    : sc >= 0.33
+                    ? "中性"
+                    : "负面";
                 const sColor =
                   sc === null
                     ? "var(--text-tertiary)"
-                    : sc >= 0.7
-                    ? "#16a34a"
-                    : sc >= 0.5
-                    ? "#d97706"
-                    : "#dc2626";
+                    : sc >= 0.66
+                    ? "#059669"
+                    : sc >= 0.33
+                    ? "#64748B"
+                    : "#DC2626";
                 return (
                   <tr key={m.platform}>
-                    <td>{m.platform}</td>
+                    <td>
+                      {m.platform}
+                      {view === "competitor" && m.brand_canonical && (
+                        <Tag color="orange" style={{ marginLeft: 6 }}>
+                          {m.brand_canonical}
+                        </Tag>
+                      )}
+                    </td>
                     <td>
                       <span className={`qt-rank-pill ${rankClass(m.best_rank)}`}>
                         {m.best_rank !== null ? `No.${m.best_rank}` : "未提及"}
@@ -1314,7 +2406,7 @@ function QuestionDetail({
                       </span>
                     </td>
                     <td style={{ color: sColor, fontWeight: 600 }}>
-                      {sc !== null ? `${(sc * 100).toFixed(0)}%` : "—"}
+                      {sLabel}
                     </td>
                     <td>
                       {m.recommend_yes ? (
@@ -1340,8 +2432,45 @@ function QuestionDetail({
         )}
       </div>
 
-      <div className="qt-section" style={{ marginTop: 18, padding: "12px 16px", background: "var(--bg-page, #f5f6f8)", borderRadius: 6, fontSize: 13, color: "var(--text-tertiary)" }}>
-        「AI 回答原文摘录」「本周 vs 上周环比」「下钻分析」三项需要后端提供独立的接口 — 已在备忘里记下,等接口就绪后接入
+      <div className="qt-section qt-ai-excerpts" style={{ marginTop: 18 }}>
+        <h3>
+          AI 回答原文摘录
+          <span className="badge">{excerptPlatforms.length} 个模型 · 截取前 200 字</span>
+        </h3>
+        <AiExcerptsGrid
+          excerpts={item?.excerpts ?? {}}
+          platforms={excerptPlatforms}
+          onOpenFull={(platform, runId) => {
+            if (!runId) {
+              message.info("暂无完整原文可查看");
+              return;
+            }
+            onViewOriginal(stat.promptId, platform);
+          }}
+        />
+      </div>
+
+      <div className="qt-section qt-time-compare" style={{ marginTop: 18 }}>
+        <h3>时间维度对比</h3>
+        <div className="qt-time-compare-row">
+          <TimeCompareCard
+            title="本周 vs 上周"
+            hint={prevWindowLabel}
+            current={stat.mentionRate}
+            prev={stat.prev?.mentionRate ?? null}
+          />
+          <TimeCompareCard
+            title="本月 vs 上月"
+            hint={prevLongLabel}
+            current={stat.mentionRate}
+            prev={item?.long_prev?.mention_rate ?? null}
+          />
+        </div>
+      </div>
+
+      <div className="qt-section qt-drill" style={{ marginTop: 18 }}>
+        <h3>下钻分析</h3>
+        <DrillDownGrid categorySummary={categorySummary} />
       </div>
     </div>
   );
