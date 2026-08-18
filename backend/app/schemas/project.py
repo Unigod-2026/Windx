@@ -387,9 +387,13 @@ class BrandMentionOut(BaseModel):
     is_self: bool
     mention_count: int
     rank_position: int | None
-    sentiment_score: float | None
+    # Discrete label from the Molizhishu API: positive / neutral / negative.
+    sentiment_score: str | None
     is_recommended: bool | None
-    concern_hits_json: list[str] | None
+    # For self brand rows only: ``[{"text": mentionContext}]`` so the UI
+    # can show the snippet where the brand was mentioned. Competitor rows
+    # stay null (the API doesn't expose per-competitor context).
+    concern_hits_json: list | None
     extract_status: ExtractStatus
     extract_error: str | None
     created_at: datetime
@@ -423,6 +427,28 @@ class BrandMentionSummary(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class QuestionSummaryItem(BaseModel):
+    prompt_id: int
+    prompt: str
+    category: str | None = None
+    status: str
+    total: int
+    matched: int
+    mention_rate: float
+    top1_rate: float
+    top3_rate: float
+    rank_avg: float | None = None
+    coverage: int
+
+
+class QuestionSummaryOut(BaseModel):
+    project_id: int
+    start: datetime
+    end: datetime
+    items: list[QuestionSummaryItem]
+    category_summary: list[CategoryStat]
+
+
 class QuestionPlatformStat(BaseModel):
     """Per-(prompt × platform) row used by the 模型对比 table.
 
@@ -447,6 +473,25 @@ class QuestionPlatformStat(BaseModel):
     avg_sentiment: float | None
     # True iff at least one run in the window has ``is_recommended=true``.
     recommend_yes: bool
+    # Only filled when ``view=competitor``: which competitor brand
+    # drove the aggregation. ``None`` for self-view rows.
+    brand_canonical: str | None = None
+
+
+class PlatformExcerpt(BaseModel):
+    """One platform's latest AI answer excerpt for the selected prompt.
+
+    Used by the 「AI 回答原文摘录」 section. ``excerpt`` is truncated to
+    200 chars on the server (no markdown stripping, no word boundary —
+    matches the design mockup). ``run_id`` is the latest matching
+    ``Subtask.subtask_id`` so the client can open the full answer
+    modal. ``rank`` is the best rank observed in the window for this
+    (prompt, platform) pair.
+    """
+
+    excerpt: str | None
+    rank: int | None
+    run_id: str | None
 
 
 class QuestionPrevStat(BaseModel):
@@ -488,6 +533,105 @@ class QuestionAnalyticsItem(BaseModel):
     # Same-shape KPI block for the immediately-preceding window;
     # None when the prev window is empty.
     prev: QuestionPrevStat | None
+    # Same-shape KPI block for the "30 days back" window, used by the
+    # 「本月 vs 上月」 comparison card. None when no data exists that
+    # far back (e.g. fresh projects).
+    long_prev: QuestionPrevStat | None = None
+    # Latest 200-char AI answer excerpt per platform. Keys are the
+    # platform identifier; missing platforms get ``None`` so the UI
+    # can render a muted "暂无原文" card.
+    excerpts: dict[str, PlatformExcerpt | None] = {}
+
+
+class CategoryStat(BaseModel):
+    """One category's roll-up, used by the 「下钻分析」 chip strip.
+
+    Aggregated at the project level (not per-question) over the same
+    window as the rest of the analytics response. The category is the
+    raw ``ProjectPrompt.category`` value; the UI joins it against
+    ``category_taxonomy`` for ordered display and falls back to
+    「未分类」 when null.
+    """
+
+    category: str | None
+    prompt_count: int
+    mention_rate: float
+    top1_rate: float
+    top3_rate: float
+
+
+class DropEvent(BaseModel):
+    """One (prompt × platform) drop event for the 稳定与掉落 pane.
+
+    Emitted when a prompt was mentioned in the prev window but the
+    current window's latest run is either missing or has dropped out
+    of the Top-3. ``from_rank`` / ``to_rank`` come from
+    ``BrandMention.rank_position`` (best observed rank per window).
+    """
+
+    prompt_id: int
+    prompt: str
+    category: str | None
+    platform: str
+    dropped_day: str
+    from_rank: int | None
+    to_rank: int | None
+    reason: str | None
+
+
+class QuestionStatusChangesOut(BaseModel):
+    """Top-level response for ``GET /projects/{id}/questions/status-changes``.
+
+    Four independent sets (NOT a 2x2 cross-tab). Each list is
+    pre-sorted by the server so the 2x2 grid can render straight
+    from the JSON without re-sorting on the client.
+    """
+
+    project_id: int
+    start: str
+    end: str
+    # Questions mentioned in BOTH the prev and current window.
+    stable: list["QuestionStableItem"]
+    # Drop events: per (prompt, platform) loss-of-mention in current.
+    drops: list[DropEvent]
+    # Questions with no mention in either window.
+    never_listed: list["QuestionStableItem"]
+    # Questions mentioned at least once in the current window.
+    listed: list["QuestionStableItem"]
+
+
+class QuestionStableItem(BaseModel):
+    """Minimal row used by the 稳定 / 从未上榜 / 上榜 quadrants."""
+
+    prompt_id: int
+    prompt: str
+    category: str | None
+    platforms: list[str] = []
+
+
+# Late resolution — DropEvent / QuestionStatusChangesOut reference
+# QuestionStableItem in their type annotations.
+QuestionStatusChangesOut.model_rebuild()
+
+
+class QuestionProductAnalyticsOut(BaseModel):
+    project_id: int
+    prompt_id: int
+    start: datetime
+    end: datetime
+    platforms: list[QuestionPlatformStat]
+    prev: QuestionPrevStat | None = None
+    long_prev: QuestionPrevStat | None = None
+    excerpts: dict[str, PlatformExcerpt | None]
+
+
+class QuestionCompetitorAnalyticsOut(BaseModel):
+    project_id: int
+    prompt_id: int
+    start: datetime
+    end: datetime
+    brands: list[CompetitorBrandStat]
+    excerpts: dict[str, PlatformExcerpt | None]
 
 
 class QuestionAnalyticsOut(BaseModel):
@@ -500,6 +644,58 @@ class QuestionAnalyticsOut(BaseModel):
     start: str
     end: str
     items: list[QuestionAnalyticsItem]
+    # Per-category roll-up, drives the 「下钻分析」 chip strip.
+    category_summary: list[CategoryStat] = []
+    # Brand × model matrix for each prompt that has any brand_mention
+    # rows in the window. Drives the 竞品分析 sub-pane (品牌 KPI 卡 +
+    # 位次表). Returned regardless of ``view`` so the client can flip
+    # between 产品 / 竞品 without a re-fetch — the matrix is small
+    # enough (≤5 brands × ≤7 models per prompt) that the cost is
+    # negligible compared to the other GROUP BYs we already run.
+    competitor: list[QuestionCompetitorOut] = []
+
+
+class CompetitorBrandStat(BaseModel):
+    """One brand's row in the 竞品分析 view's brand × model matrix.
+
+    Re-aggregates ``geo_brand_mentions`` per (prompt × brand_canonical)
+    over the same window the analytics item uses. ``is_self`` flags the
+    monitored brand so the UI can render the 「自身」 tag + accent ring
+    around its card. ``color`` is a fixed palette slot (NOT derived from
+    data) so the visual layout stays stable across windows — see the
+    backend helper for the assignment rule.
+
+    ``model_ranks`` keys are the platform identifiers (``豆包`` /
+    ``元宝`` / ...). The value is the best (smallest) rank observed in
+    the window for that brand on that platform; ``None`` when the brand
+    never appeared on that platform in the window.
+    """
+
+    brand_canonical: str
+    is_self: bool
+    color: str
+    # KPI cards in the brand × matrix view.
+    mention_rate: float
+    top1_rate: float
+    top3_rate: float
+    avg_rank: float | None
+    # Best rank per model — ``None`` means the brand didn't appear on
+    # that platform in this window.
+    model_ranks: dict[str, int | None] = {}
+
+
+class QuestionCompetitorOut(BaseModel):
+    """One prompt's brand × model matrix. Returned inside
+    ``QuestionAnalyticsOut.competitor`` so a single round-trip gives the
+    frontend everything the 竞品分析 sub-pane needs to render.
+
+    ``brands`` is pre-sorted by the backend: the self brand first, then
+    competitors by mention_rate descending (the higher-mention brands
+    sit next to the operator's own brand for easier comparison).
+    """
+
+    prompt_id: int
+    brands: list[CompetitorBrandStat] = []
 
 
 # --------------------------------------------------------------------------
@@ -529,19 +725,42 @@ class PlatformRank(BaseModel):
     sample: int
 
 
+class ModelDimension(BaseModel):
+    """Per-platform rollup for the 模型维度 sub-pane (2×2 grid:
+    mention_rate / top1_rate / top2_rate / top3_rate).
+
+    Every rate here uses the platform's own ``total_subtasks`` as the
+    denominator — same shape as CompetitorAnalysisTab's per-brand KPI,
+    so the UI can mix self + competitors on a single chart later if
+    needed. ``sample`` is the raw subtask count for tooltip display.
+    """
+
+    platform: str
+    mention_rate: float
+    top1_rate: float
+    top2_rate: float
+    top3_rate: float
+    sample: int
+
+
 class ProjectOverviewOut(BaseModel):
     project_id: int
     start: date
     end: date
     days: int
     labels: list[str]
-    total_mentions: OverviewKpi
+    # 4 KPI cards (matching docs/更新版UI #tab-overview)
+    mention_rate: OverviewKpi
     top1_rate: OverviewKpi
     top3_rate: OverviewKpi
+    correct_rate: OverviewKpi
+    # Detail numbers fed into each card's KPI-meta block
+    total_mentions: OverviewKpi
     question_count: OverviewKpi
     answer_count: OverviewKpi
     trend: list[TrendSeries]
     ranking: list[PlatformRank]
+    model_dimensions: list[ModelDimension]
     pending_count: int
     failed_count: int
 
