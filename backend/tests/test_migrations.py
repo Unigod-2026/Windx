@@ -168,3 +168,40 @@ def test_mysql_offline_ddl_is_generated(sqlite_db: Path, capsys):
     sql = capsys.readouterr().out
     assert "CREATE TABLE geo_projects" in sql
     assert "ENUM" in sql.upper()
+
+
+def test_question_analytics_indexes_upgrade_and_downgrade(sqlite_db: Path):
+    """``20260818_0002`` adds two prefix-191 indexes for the question
+    analytics lazy-loading path; this exercises both the upgrade (indexes
+    appear) and the downgrade (indexes disappear) on SQLite.
+
+    We can't walk Alembic from <base> through ``20260810_0002`` (the PK swap
+    is MySQL-only and breaks SQLite), so we use ``Base.metadata.create_all``
+    to materialize the post-MySQL-only schema, then ``stamp`` Alembic to
+    ``20260818_0001`` and ``upgrade`` only the new revision. The MySQL
+    ``mysql_length`` parameter is dialect-gated inside the migration, so
+    SQLite still picks up the same two index names.
+    """
+    import app.models  # noqa: F401  registers every model on Base.metadata
+    from app.db import Base
+
+    engine_url = f"sqlite+pysqlite:///{sqlite_db}"
+    Base.metadata.create_all(create_engine(engine_url))
+
+    cfg = make_config(sqlite_db)
+    command.stamp(cfg, "20260818_0001")
+    command.upgrade(cfg, "20260818_0002")
+
+    insp = inspect(create_engine(engine_url))
+    subtask_indexes = {ix["name"] for ix in insp.get_indexes("geo_subtasks")}
+    mention_indexes = {ix["name"] for ix in insp.get_indexes("geo_brand_mentions")}
+    assert "ix_subtasks_prompt_updated" in subtask_indexes
+    assert "ix_brand_mentions_proj_self_prompt_created" in mention_indexes
+
+    command.downgrade(cfg, "20260818_0001")
+
+    insp = inspect(create_engine(engine_url))
+    subtask_indexes = {ix["name"] for ix in insp.get_indexes("geo_subtasks")}
+    mention_indexes = {ix["name"] for ix in insp.get_indexes("geo_brand_mentions")}
+    assert "ix_subtasks_prompt_updated" not in subtask_indexes
+    assert "ix_brand_mentions_proj_self_prompt_created" not in mention_indexes
