@@ -443,6 +443,81 @@ async def test_summary_returns_window_kpis(client, h):
 
 
 @pytest.mark.asyncio
+async def test_product_analytics_returns_platforms_prev_long_prev(client, h):
+    pid = _bootstrap(seed_window_days=15)
+    from app.models import ProjectPrompt
+
+    with TestSessionLocal() as db:
+        first_prompt_id = (
+            db.query(ProjectPrompt.id).filter_by(project_id=pid).first()[0]
+        )
+
+    response = await client.get(
+        f"/api/projects/{pid}/questions/{first_prompt_id}/product-analytics?days=15",
+        headers=h,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["prompt_id"] == first_prompt_id
+    # 6 platforms 都有 stat
+    assert len(body["platforms"]) == len(PLATFORMS)
+    # prev / long_prev 都是 15 天窗口,各自有数据
+    assert body["prev"] is not None
+    assert body["long_prev"] is not None
+    # 6 平台摘录都返回(只要窗口内有 subtask)
+    assert len(body["excerpts"]) == len(PLATFORMS)
+
+
+@pytest.mark.asyncio
+async def test_product_analytics_rejects_cross_project_prompt(client, h):
+    pid_a = _bootstrap(seed_window_days=15)
+    from app.models import Customer, Project, ProjectPrompt
+
+    with TestSessionLocal() as db:
+        cust = db.query(Customer).first()
+        other = Project(customer_id=cust.id, name="Other", code="O1", status="active")
+        db.add(other)
+        db.commit()
+        db.refresh(other)
+        other_id = other.id
+        first_prompt_id = (
+            db.query(ProjectPrompt.id).filter_by(project_id=pid_a).first()[0]
+        )
+
+    response = await client.get(
+        f"/api/projects/{other_id}/questions/{first_prompt_id}/product-analytics?days=15",
+        headers=h,
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_product_analytics_stays_within_query_budget(client, h):
+    """product-analytics 核心 SQL ≤ 3(spec §4.2),排除 auth/existence。"""
+    pid = _bootstrap(seed_window_days=15)
+    from app.models import ProjectPrompt
+    from tests._query_counter import QueryCounter
+
+    with TestSessionLocal() as db:
+        first_prompt_id = (
+            db.query(ProjectPrompt.id).filter_by(project_id=pid).first()[0]
+        )
+
+    with QueryCounter(test_engine) as counter:
+        response = await client.get(
+            f"/api/projects/{pid}/questions/{first_prompt_id}/product-analytics?days=15",
+            headers=h,
+        )
+    assert response.status_code == 200
+    # 只统计 geo_brand_mentions / geo_subtasks 上的核心业务 SQL
+    core = [
+        q for q in counter.queries
+        if "geo_brand_mentions" in q or "geo_subtasks" in q
+    ]
+    assert len(core) <= 3, f"core queries exceeded 3: {len(core)}\n" + "\n".join(core)
+
+
+@pytest.mark.asyncio
 async def test_summary_stays_within_query_budget(client, h):
     """summary endpoint 的核心 SQL 必须 ≤ 1 条(spec §4.1)。
 

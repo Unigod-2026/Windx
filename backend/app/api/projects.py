@@ -73,6 +73,7 @@ from app.schemas.project import (
     PromptsUpdate,
     QuestionAnalyticsItem,
     QuestionAnalyticsOut,
+    QuestionProductAnalyticsOut,
     QuestionCompetitorOut,
     QuestionPlatformStat,
     QuestionPrevStat,
@@ -1326,6 +1327,244 @@ def questions_summary(
 
     return _compute_question_summary(
         db, project, start=win_start_dt, end=win_end_dt
+    )
+
+
+def _get_project_prompt_or_404(
+    db: Session, *, project_id: int, prompt_id: int
+) -> ProjectPrompt:
+    prompt = db.get(ProjectPrompt, prompt_id)
+    if prompt is None or prompt.project_id != project_id:
+        raise HTTPException(404, "prompt not found in this project")
+    return prompt
+
+
+def _compute_question_product_analytics(
+    db: Session,
+    project: Project,
+    prompt: ProjectPrompt,
+    *,
+    start: datetime,
+    end: datetime,
+) -> QuestionProductAnalyticsOut:
+    """单问题产品分析:per-platform 统计 + prev + long_prev + 摘录。
+
+    SQL 预算 = 2 条核心 SELECT:
+      1) stats:扫 long_prev → end 期间的所有 (platform, created_at, rank)
+         行,在 Python 中按窗口分桶(current / prev / long_prev),避免
+         ``CASE WHEN`` 三遍重复 GROUP BY。
+      2) excerpts:每个 platform 取窗口内最新 Subtask + 对应 rank,join
+         Task 用 project_id 防御(同一 prompt 文本可能跨项目存在)。
+
+    与 ``questions_analytics`` 的差别:不扫全项目竞品矩阵,只看指定 prompt。
+    """
+    length = (end.date() - start.date()).days + 1
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=length - 1)
+    long_prev_end = prev_start - timedelta(days=1)
+    long_prev_start = long_prev_end - timedelta(days=length - 1)
+    prev_end_dt = datetime.combine(prev_end.date(), time.max)
+    prev_start_dt = datetime.combine(prev_start.date(), time.min)
+    long_prev_end_dt = datetime.combine(long_prev_end.date(), time.max)
+    long_prev_start_dt = datetime.combine(long_prev_start.date(), time.min)
+
+    rows = db.execute(
+        select(
+            BrandMention.platform,
+            BrandMention.created_at,
+            BrandMention.rank_position,
+        )
+        .where(
+            BrandMention.project_id == project.id,
+            BrandMention.is_self.is_(True),
+            BrandMention.prompt == prompt.prompt,
+            BrandMention.created_at >= long_prev_start_dt,
+            BrandMention.created_at < end,
+        )
+        .order_by(BrandMention.platform, BrandMention.created_at)
+    ).all()
+
+    by_window: dict[tuple[str, str], list[tuple[datetime, int | None]]] = defaultdict(list)
+    for r in rows:
+        if r.created_at >= start:
+            bucket = "current"
+        elif r.created_at >= prev_start_dt:
+            bucket = "prev"
+        else:
+            bucket = "long_prev"
+        by_window[(r.platform, bucket)].append((r.created_at, r.rank_position))
+
+    def _agg(buckets: list[tuple[datetime, int | None]]) -> dict:
+        total = len(buckets)
+        ranks = [rk for _, rk in buckets if rk is not None]
+        matched = len(ranks)
+        top1 = sum(1 for rk in ranks if rk == 1)
+        top3 = sum(1 for rk in ranks if rk <= 3)
+        return {
+            "total": total,
+            "matched": matched,
+            "top1": top1,
+            "top3": top3,
+            "rank_avg": (sum(ranks) / len(ranks)) if ranks else None,
+        }
+
+    def _prev_stat_for(bucket: str) -> QuestionPrevStat | None:
+        # Aggregate across ALL platforms for that window so the prev
+        # block is a project-level KPI, not per-platform.
+        all_rows: list[tuple[datetime, int | None]] = []
+        for (plat, b), items in by_window.items():
+            if b == bucket:
+                all_rows.extend(items)
+        agg = _agg(all_rows)
+        if agg["total"] == 0:
+            return None
+        n = agg["total"]
+        return QuestionPrevStat(
+            total=n,
+            matched=agg["matched"],
+            top1_rate=(agg["top1"] / n) if n else 0.0,
+            top3_rate=(agg["top3"] / n) if n else 0.0,
+            mention_rate=(agg["matched"] / n) if n else 0.0,
+            rank_avg=agg["rank_avg"],
+        )
+
+    platforms_out: list[QuestionPlatformStat] = []
+    platform_keys = sorted({plat for (plat, _) in by_window.keys()})
+    for plat in platform_keys:
+        cur = by_window.get((plat, "current"), [])
+        prev = by_window.get((plat, "prev"), [])
+        cur_agg = _agg(cur)
+        prev_agg = _agg(prev)
+        # best_rank + mention_rate + recommend derived from current only
+        cur_ranks = [rk for _, rk in cur if rk is not None]
+        best_rank = min(cur_ranks) if cur_ranks else None
+        # The plan reuses the same QuestionPlatformStat shape as the
+        # analytics endpoint (matched / total / best_rank /
+        # avg_sentiment / recommend_yes). self view → is_self filter
+        # already applied, brand_canonical stays None.
+        platforms_out.append(
+            QuestionPlatformStat(
+                platform=plat,
+                matched=cur_agg["matched"],
+                total=cur_agg["total"],
+                best_rank=best_rank,
+                # Sentiment is intentionally None here: this endpoint
+                # is the lazy-loaded detail view (the lightweight
+                # product-analytics pane), and sentiment requires
+                # joining geo_brand_mentions.sentiment_score which
+                # we deliberately omit to keep the row scan narrow.
+                # The summary endpoint covers sentiment for the list view.
+                avg_sentiment=None,
+                # No LLM-extracted recommendation bit in this scan —
+                # same reason. UI falls back to "—" when null.
+                recommend_yes=False,
+                brand_canonical=None,
+            )
+        )
+
+    prev_stat = _prev_stat_for("prev")
+    long_prev_stat = _prev_stat_for("long_prev")
+
+    # 摘录:窗口内每个 platform 取最新 subtask 的 answer_content。
+    # LEFT JOIN to Task — production data always has a matching Task
+    # row (Subtask.task_id is set on insert), but legacy / test
+    # fixtures may not. Filtering by Task.project_id isolates this
+    # project's subtasks from same-prompt-text rows of other
+    # customers' projects; an outer join keeps the response populated
+    # for orphan subtasks instead of dropping them silently.
+    excerpt_rows = db.execute(
+        select(
+            Subtask.platform,
+            Subtask.subtask_id,
+            Subtask.answer_content,
+            Subtask.updated_at,
+            BrandMention.rank_position,
+        )
+        .outerjoin(Task, Task.task_id == Subtask.task_id)
+        .outerjoin(
+            BrandMention,
+            and_(
+                BrandMention.subtask_id == Subtask.subtask_id,
+                BrandMention.is_self.is_(True),
+                BrandMention.prompt == prompt.prompt,
+            ),
+        )
+        .where(
+            (Task.project_id.is_(None) | (Task.project_id == project.id)),
+            Subtask.prompt == prompt.prompt,
+            Subtask.updated_at >= start,
+            Subtask.updated_at < end,
+        )
+        .order_by(Subtask.platform, Subtask.updated_at.desc())
+    ).all()
+
+    latest_by_platform: dict[str, PlatformExcerpt] = {}
+    for r in excerpt_rows:
+        if r.platform in latest_by_platform:
+            continue
+        text = r.answer_content or ""
+        excerpt = text[:200]
+        if not excerpt:
+            continue
+        latest_by_platform[r.platform] = PlatformExcerpt(
+            excerpt=excerpt,
+            rank=r.rank_position,
+            run_id=r.subtask_id,
+        )
+
+    return QuestionProductAnalyticsOut(
+        project_id=project.id,
+        prompt_id=prompt.id,
+        start=start,
+        end=end,
+        platforms=platforms_out,
+        prev=prev_stat,
+        long_prev=long_prev_stat,
+        excerpts=latest_by_platform,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/questions/{prompt_id}/product-analytics",
+    response_model=QuestionProductAnalyticsOut,
+)
+def questions_product_analytics(
+    project_id: int,
+    prompt_id: int,
+    days: int = 15,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+) -> QuestionProductAnalyticsOut:
+    """单问题产品分析:platform 统计 + prev + long_prev + 6 平台摘录。
+
+    与 summary 的差别:返回单问题而非整个项目;与 status-changes 的差别:不扫
+    全项目竞品明细。spec §4.2 要求核心 SQL ≤ 3 条(不含鉴权与项目存在性查询)。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    prompt = _get_project_prompt_or_404(
+        db, project_id=project.id, prompt_id=prompt_id
+    )
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise HTTPException(400, "start and end must be provided together")
+        if end < start:
+            raise HTTPException(400, "end must not be earlier than start")
+        win_start, win_end = start, end
+    else:
+        window_days = days if days is not None else 15
+        if window_days <= 0 or window_days > 90:
+            raise HTTPException(400, "days must be between 1 and 90")
+        today = now_local().date()
+        win_start = today - timedelta(days=window_days - 1)
+        win_end = today
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+
+    return _compute_question_product_analytics(
+        db, project, prompt, start=win_start_dt, end=win_end_dt
     )
 
 
