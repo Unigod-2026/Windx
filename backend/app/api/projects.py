@@ -144,9 +144,9 @@ def _resolve_window_inline(
     """共用窗口解析:`start`/`end` 优先,否则取最近 N 天(默认 15)。
 
     返回 ``[win_start_dt, win_end_dt]``,起闭是 ``[00:00, 23:59:59]`` —
-    与 ``list_brand_mentions`` / ``questions_analytics`` / 三个 v2 analytics
-    端点保持一致;便于 `BrandMention.created_at``/``Subtask.updated_at`` 用
-    ``>=`` / ``<`` 跨端点统一比对。
+    与 ``list_brand_mentions`` 及三个 v2 analytics 端点保持一致;便于
+    ``BrandMention.created_at``/``Subtask.updated_at`` 用 ``>=`` / ``<`` 跨端点
+    统一比对。
 
     raises:
       400: ``start`` / ``end`` 必须同进同出,且 end ≥ start;``days`` 落在
@@ -1373,7 +1373,8 @@ def _compute_question_product_analytics(
       2) excerpts:每个 platform 取窗口内最新 Subtask + 对应 rank,join
          Task 用 project_id 防御(同一 prompt 文本可能跨项目存在)。
 
-    与 ``questions_analytics`` 的差别:不扫全项目竞品矩阵,只看指定 prompt。
+    与 ``questions_status_changes`` / ``questions_competitor_analytics`` 的差别:
+    本端点不扫全项目竞品矩阵,只看指定 prompt。
     """
     length = (end.date() - start.date()).days + 1
     prev_end = start - timedelta(days=1)
@@ -1749,7 +1750,7 @@ def questions_status_changes(
 ):
     """Classify each question into one of 4 sets for the 稳定与掉落 pane.
 
-    Window handling matches :func:`questions_analytics` (same
+    Window handling matches :func:`_resolve_window_inline` (same
     ``start``/``end``/``days`` semantics). ``is_self=true`` rows are
     the only ones considered — the operator's own brand is what the
     project monitors. Paused prompts (``status != monitoring``) are
@@ -1773,7 +1774,7 @@ def questions_status_changes(
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
 
-    # Window resolution — copy the same shape as questions_analytics.
+    # Window resolution — copy the same shape as `_resolve_window_inline`.
     if start is not None or end is not None:
         if start is None or end is None:
             raise HTTPException(400, "start and end must be provided together")

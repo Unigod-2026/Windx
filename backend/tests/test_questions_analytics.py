@@ -1,12 +1,13 @@
-"""Tests for the 问题提及分析 tab analytics + status-changes endpoints.
+"""Tests for the 问题提及分析 tab ``status-changes`` endpoint.
 
-Covers the v2 schema extensions added in 2026-08-18:
-  * ``QuestionAnalyticsItem.excerpts`` (per-platform 200-char excerpts)
-  * ``QuestionAnalyticsItem.long_prev`` (30-days-back window)
-  * ``QuestionAnalyticsOut.category_summary`` (1-level category roll-up)
-  * ``QuestionPlatformStat.brand_canonical`` (competitor view)
-  * ``view=competitor`` filter
-  * ``GET /projects/{id}/questions/status-changes`` 4-quadrant split
+Covers ``GET /projects/{id}/questions/status-changes`` 4-quadrant split:
+  * ``stable`` — prev window had a mention AND current window has one
+  * ``drops`` — per (prompt, platform) loss-of-mention events with reason
+  * ``never_listed`` — no mention in either window
+  * ``listed`` — at least one mention in current window regardless of prev
+
+Also exercises window-resolution semantics (start/end/days) and the
+paused-prompt filter (paused prompts excluded from all four sets).
 """
 
 from __future__ import annotations
