@@ -538,3 +538,56 @@ async def test_summary_stays_within_query_budget(client, h):
         f"expected exactly 1 scan of geo_brand_mentions, got {len(bm_queries)}:\n"
         + "\n".join(f"  {i + 1}. {q[:200]}" for i, q in enumerate(bm_queries))
     )
+
+
+@pytest.mark.asyncio
+async def test_competitor_analytics_aggregates_by_brand(client, h):
+    pid = _bootstrap(seed_window_days=15)
+    from app.models import ProjectPrompt
+
+    with TestSessionLocal() as db:
+        first_prompt_id = (
+            db.query(ProjectPrompt.id).filter_by(project_id=pid).first()[0]
+        )
+
+    response = await client.get(
+        f"/api/projects/{pid}/questions/{first_prompt_id}/competitor-analytics?days=15",
+        headers=h,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # _bootstrap 种了 1 个竞品 brand_canonical="珂润",每个 prompt × 6 platform × 15 天
+    canonicals = {b["brand_canonical"] for b in body["brands"]}
+    assert canonicals == {"珂润"}
+    # 6 platform 都出现在 model_ranks
+    brand = body["brands"][0]
+    assert len(brand["model_ranks"]) == len(PLATFORMS)
+    # mention_rate 字段存在,数值在 0-1 之间
+    assert 0.0 <= brand["mention_rate"] <= 1.0
+    # 6 平台摘录 key 都在(只要 subtask 存在)
+    assert len(body["excerpts"]) == len(PLATFORMS)
+
+
+@pytest.mark.asyncio
+async def test_competitor_analytics_stays_within_query_budget(client, h):
+    """competitor-analytics 核心 SQL ≤ 2(spec §4.3)。"""
+    pid = _bootstrap(seed_window_days=15)
+    from app.models import ProjectPrompt
+    from tests._query_counter import QueryCounter
+
+    with TestSessionLocal() as db:
+        first_prompt_id = (
+            db.query(ProjectPrompt.id).filter_by(project_id=pid).first()[0]
+        )
+
+    with QueryCounter(test_engine) as counter:
+        response = await client.get(
+            f"/api/projects/{pid}/questions/{first_prompt_id}/competitor-analytics?days=15",
+            headers=h,
+        )
+    assert response.status_code == 200
+    core = [
+        q for q in counter.queries
+        if "geo_brand_mentions" in q or "geo_subtasks" in q
+    ]
+    assert len(core) <= 2, f"core queries exceeded 2: {len(core)}\n" + "\n".join(core)

@@ -74,6 +74,7 @@ from app.schemas.project import (
     QuestionAnalyticsItem,
     QuestionAnalyticsOut,
     QuestionProductAnalyticsOut,
+    QuestionCompetitorAnalyticsOut,
     QuestionCompetitorOut,
     QuestionPlatformStat,
     QuestionPrevStat,
@@ -136,6 +137,40 @@ def _assert_customer_access(user: AdminUser, project: Project) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="project does not belong to your customer",
         )
+
+
+def _resolve_window_inline(
+    days: int | None,
+    start: date | None,
+    end: date | None,
+) -> tuple[datetime, datetime]:
+    """共用窗口解析:`start`/`end` 优先,否则取最近 N 天(默认 15)。
+
+    返回 ``[win_start_dt, win_end_dt]``,起闭是 ``[00:00, 23:59:59]`` —
+    与 ``list_brand_mentions`` / ``questions_analytics`` / 三个 v2 analytics
+    端点保持一致;便于 `BrandMention.created_at``/``Subtask.updated_at`` 用
+    ``>=`` / ``<`` 跨端点统一比对。
+
+    raises:
+      400: ``start`` / ``end`` 必须同进同出,且 end ≥ start;``days`` 落在
+           ``[1, 90]``。
+    """
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise HTTPException(400, "start and end must be provided together")
+        if end < start:
+            raise HTTPException(400, "end must not be earlier than start")
+        win_start, win_end = start, end
+    else:
+        window_days = days if days is not None else 15
+        if window_days <= 0 or window_days > 90:
+            raise HTTPException(400, "days must be between 1 and 90")
+        today = now_local().date()
+        win_start = today - timedelta(days=window_days - 1)
+        win_end = today
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+    return win_start_dt, win_end_dt
 
 
 def _slots_out(p: Project) -> list[SlotOut]:
@@ -1308,22 +1343,7 @@ def questions_summary(
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
-
-    if start is not None or end is not None:
-        if start is None or end is None:
-            raise HTTPException(400, "start and end must be provided together")
-        if end < start:
-            raise HTTPException(400, "end must not be earlier than start")
-        win_start, win_end = start, end
-    else:
-        window_days = days if days is not None else 15
-        if window_days <= 0 or window_days > 90:
-            raise HTTPException(400, "days must be between 1 and 90")
-        today = now_local().date()
-        win_start = today - timedelta(days=window_days - 1)
-        win_end = today
-    win_start_dt = datetime.combine(win_start, time.min)
-    win_end_dt = datetime.combine(win_end, time.max)
+    win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
 
     return _compute_question_summary(
         db, project, start=win_start_dt, end=win_end_dt
@@ -1547,23 +1567,173 @@ def questions_product_analytics(
     prompt = _get_project_prompt_or_404(
         db, project_id=project.id, prompt_id=prompt_id
     )
-    if start is not None or end is not None:
-        if start is None or end is None:
-            raise HTTPException(400, "start and end must be provided together")
-        if end < start:
-            raise HTTPException(400, "end must not be earlier than start")
-        win_start, win_end = start, end
-    else:
-        window_days = days if days is not None else 15
-        if window_days <= 0 or window_days > 90:
-            raise HTTPException(400, "days must be between 1 and 90")
-        today = now_local().date()
-        win_start = today - timedelta(days=window_days - 1)
-        win_end = today
-    win_start_dt = datetime.combine(win_start, time.min)
-    win_end_dt = datetime.combine(win_end, time.max)
+    win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
 
     return _compute_question_product_analytics(
+        db, project, prompt, start=win_start_dt, end=win_end_dt
+    )
+
+
+def _compute_question_competitor_analytics(
+    db: Session,
+    project: Project,
+    prompt: ProjectPrompt,
+    *,
+    start: datetime,
+    end: datetime,
+) -> QuestionCompetitorAnalyticsOut:
+    """单问题竞品分析:按 brand × platform 聚合,SQL 预算 ≤ 2。
+
+    与产品分析的差别:产品分析走 ``is_self=true`` + per-platform stats +
+    prev/long_prev;这里走 ``is_self=false`` + per-brand stats,只取当前
+    窗口(竞品面板不显示 prev delta,UI 在 OverviewTab 已经有 delta 行)。
+
+    SQL 预算 = 2 条核心 SELECT:
+      1) brand aggregation:扫 ``BrandMention``(过滤 ``is_self=false``),
+         在 Python 中按 (brand_canonical, platform) 汇总 ranks。
+      2) excerpts:每个 platform 取窗口内最新 Subtask + 对应
+         (is_self=false) rank,join ``Task`` 用 project_id 防御
+         (同一 prompt 文本可能跨项目存在)。左连接 ``BrandMention`` —
+         生产数据总是有 ``BrandMention`` 行,孤儿 subtask(测试 fixture
+         可能没有)走外连接以避免静默丢失。
+    """
+    rows = db.execute(
+        select(
+            BrandMention.brand_canonical,
+            BrandMention.platform,
+            BrandMention.rank_position,
+        ).where(
+            BrandMention.project_id == project.id,
+            BrandMention.is_self.is_(False),
+            BrandMention.prompt == prompt.prompt,
+            BrandMention.created_at >= start,
+            BrandMention.created_at < end,
+        )
+    ).all()
+
+    grouped: dict[tuple[str, str], list[int | None]] = defaultdict(list)
+    total_per_brand: dict[str, int] = defaultdict(int)
+    for r in rows:
+        grouped[(r.brand_canonical, r.platform)].append(r.rank_position)
+        total_per_brand[r.brand_canonical] += 1
+
+    by_brand: dict[str, dict[str, list[int | None]]] = defaultdict(dict)
+    for (brand, platform), ranks in grouped.items():
+        by_brand[brand][platform] = ranks
+
+    # Fixed palette for the competitor panel — same slot cycle as the
+    # analytics endpoint's competitor matrix so the visual layout is
+    # stable across windows. Self brand color is reserved (not used
+    # here since the competitor endpoint never returns self rows).
+    _COMP_COLORS = ("#ff6b1a", "#52c41a", "#722ed1", "#13c2c2")
+
+    brands_out: list[CompetitorBrandStat] = []
+    # Sort by mention_rate desc so the highest-traffic competitor
+    # always lands on the first palette slot; ties broken by
+    # brand_canonical so the order is deterministic across windows.
+    sorted_brands = sorted(
+        by_brand.keys(),
+        key=lambda b: (
+            -(total_per_brand[b]),
+            b,
+        ),
+    )
+    for slot, brand_canonical in enumerate(sorted_brands):
+        platforms = by_brand[brand_canonical]
+        all_ranks = [r for rs in platforms.values() for r in rs if r is not None]
+        matched = len(all_ranks)
+        total = total_per_brand[brand_canonical]
+        brands_out.append(
+            CompetitorBrandStat(
+                brand_canonical=brand_canonical,
+                is_self=False,
+                color=_COMP_COLORS[slot % len(_COMP_COLORS)],
+                mention_rate=(matched / total) if total else 0.0,
+                top1_rate=(sum(1 for r in all_ranks if r == 1) / total) if total else 0.0,
+                top3_rate=(sum(1 for r in all_ranks if r <= 3) / total) if total else 0.0,
+                avg_rank=(sum(all_ranks) / len(all_ranks)) if all_ranks else None,
+                model_ranks={
+                    platform: min((r for r in ranks if r is not None), default=None)
+                    for platform, ranks in platforms.items()
+                },
+            )
+        )
+
+    # 摘录:竞品面板也展示 6 平台原文,SQL 一次 join Task 限定项目
+    excerpt_rows = db.execute(
+        select(
+            Subtask.platform,
+            Subtask.answer_content,
+            Subtask.subtask_id,
+            BrandMention.rank_position,
+        )
+        .outerjoin(Task, Task.task_id == Subtask.task_id)
+        .outerjoin(
+            BrandMention,
+            and_(
+                BrandMention.subtask_id == Subtask.subtask_id,
+                BrandMention.is_self.is_(False),
+                BrandMention.prompt == prompt.prompt,
+            ),
+        )
+        .where(
+            (Task.project_id.is_(None) | (Task.project_id == project.id)),
+            Subtask.prompt == prompt.prompt,
+            Subtask.updated_at >= start,
+            Subtask.updated_at < end,
+        )
+        .order_by(Subtask.platform, Subtask.updated_at.desc())
+    ).all()
+
+    latest_by_platform: dict[str, PlatformExcerpt] = {}
+    for r in excerpt_rows:
+        if r.platform in latest_by_platform:
+            continue
+        excerpt = (r.answer_content or "")[:200]
+        if not excerpt:
+            continue
+        latest_by_platform[r.platform] = PlatformExcerpt(
+            excerpt=excerpt,
+            rank=r.rank_position,
+            run_id=r.subtask_id,
+        )
+
+    return QuestionCompetitorAnalyticsOut(
+        project_id=project.id,
+        prompt_id=prompt.id,
+        start=start,
+        end=end,
+        brands=brands_out,
+        excerpts=latest_by_platform,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/questions/{prompt_id}/competitor-analytics",
+    response_model=QuestionCompetitorAnalyticsOut,
+)
+def questions_competitor_analytics(
+    project_id: int,
+    prompt_id: int,
+    days: int = 15,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+) -> QuestionCompetitorAnalyticsOut:
+    """单问题竞品分析:按 brand × platform 聚合,SQL 预算 ≤ 2。
+
+    旧 ``/questions/analytics?view=competitor`` 路径已删除(见 Task 13)。
+    本端点只服务「竞品分析」子面板,不返回 self-brand 行。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    prompt = _get_project_prompt_or_404(
+        db, project_id=project.id, prompt_id=prompt_id
+    )
+    win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
+
+    return _compute_question_competitor_analytics(
         db, project, prompt, start=win_start_dt, end=win_end_dt
     )
 
