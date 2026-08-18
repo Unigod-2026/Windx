@@ -181,12 +181,29 @@ def test_question_analytics_indexes_upgrade_and_downgrade(sqlite_db: Path):
     ``20260818_0001`` and ``upgrade`` only the new revision. The MySQL
     ``mysql_length`` parameter is dialect-gated inside the migration, so
     SQLite still picks up the same two index names.
+
+    ``Base.metadata.create_all`` will now also emit the two indexes (because
+    the SQLAlchemy ``Subtask`` / ``BrandMention`` models declare them), so
+    we drop them after ``create_all`` and let the alembic upgrade recreate
+    them — that's the path this test is exercising.
     """
     import app.models  # noqa: F401  registers every model on Base.metadata
     from app.db import Base
+    from sqlalchemy import text
 
     engine_url = f"sqlite+pysqlite:///{sqlite_db}"
-    Base.metadata.create_all(create_engine(engine_url))
+    setup_engine = create_engine(engine_url)
+    Base.metadata.create_all(setup_engine)
+    # Drop the indexes the model layer just created so the alembic upgrade
+    # below has work to do (and so we exercise the upgrade/downgrade path).
+    with setup_engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS ix_subtasks_prompt_updated"))
+        conn.execute(
+            text(
+                "DROP INDEX IF EXISTS ix_brand_mentions_proj_self_prompt_created"
+            )
+        )
+    setup_engine.dispose()
 
     cfg = make_config(sqlite_db)
     command.stamp(cfg, "20260818_0001")

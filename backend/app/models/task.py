@@ -128,7 +128,20 @@ class Task(Base):
 
 class Subtask(Base):
     __tablename__ = "geo_subtasks"
-    __table_args__ = (Index("ix_subtasks_task_id", "task_id"),)
+    __table_args__ = (
+        Index("ix_subtasks_task_id", "task_id"),
+        # Covers the 问题提及分析 lazy-load path:
+        #   WHERE prompt = ? ORDER BY updated_at DESC LIMIT N
+        # The MySQL prefix-191 on ``prompt`` keeps the key under the 3072-byte
+        # InnoDB limit; SQLite ignores ``mysql_length`` and still picks up the
+        # same index name from ``Base.metadata.create_all``.
+        Index(
+            "ix_subtasks_prompt_updated",
+            "prompt",
+            "updated_at",
+            mysql_length={"prompt": 191},
+        ),
+    )
 
     # Remote subTaskId (32-char hex) is the PK — see docs/api/submit-task.md.
     subtask_id: Mapped[str] = mapped_column(String(64), primary_key=True)

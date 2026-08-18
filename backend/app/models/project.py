@@ -373,11 +373,15 @@ class BrandMention(Base):
     Produced by ``app.services.extraction.extract_brand_mentions`` after
     a ``Subtask`` row is upserted. Drives every analysis KPI:
 
-    - ``mention_count`` is the regex pass output (cheap, always present).
+    - ``mention_count`` is binary (0/1) from the API pass; cheap, always
+      present after the row is upserted.
     - ``rank_position`` / ``sentiment_score`` / ``is_recommended`` /
-      ``concern_hits_json`` are the LLM pass output; may be NULL when
-      the LLM call fails — ``extract_status`` tells the UI whether the
-      gap is "still pending" or "gave up".
+      ``concern_hits_json`` are filled by the extraction pipeline from
+      ``Subtask.raw_result_json`` (the Molizhishu ``/task/result``
+      payload); they may be NULL when the answer body is missing —
+      ``extract_status`` tells the UI whether the gap is "still
+      pending", "skipped because the brand wasn't mentioned", or
+      "gave up".
 
     ``brand_canonical`` distinguishes *which* brand is being mentioned
     so the same answer talking about both the self brand ("雅培") and a
@@ -425,6 +429,20 @@ class BrandMention(Base):
             "brand_canonical",
             "id",
         ),
+        # Covers the 问题提及分析 lazy-load path:
+        #   WHERE project_id = ? AND is_self = ? AND prompt = ?
+        #   ORDER BY created_at DESC LIMIT N
+        # The MySQL prefix-191 on ``prompt`` keeps the key under the 3072-byte
+        # InnoDB limit; SQLite ignores ``mysql_length`` and still picks up the
+        # same index name from ``Base.metadata.create_all``.
+        Index(
+            "ix_brand_mentions_proj_self_prompt_created",
+            "project_id",
+            "is_self",
+            "prompt",
+            "created_at",
+            mysql_length={"prompt": 191},
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -440,11 +458,18 @@ class BrandMention(Base):
     mention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 0.0-1.0; Float (not DECIMAL) because we never aggregate over it
     rank_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Float (not DECIMAL) because we never aggregate over it
-    # arithmetically — only bucket it (>=0.5 vs <0.5) in the UI.
-    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Discrete label from the Molizhishu /task/result endpoint — one of
+    # ``positive`` / ``neutral`` / ``negative``. The aggregation layer
+    # translates these to numeric averages for the dashboard's color
+    # buckets (>=0.7 green / >=0.5 orange / else red), so the column
+    # itself doesn't need a float type.
+    sentiment_score: Mapped[str | None] = mapped_column(String(16), nullable=True)
     is_recommended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    concern_hits_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # For the SELF brand row only, the Molizhishu API's ``mentionContext``
+    # is wrapped as ``[{"text": mentionContext}]`` so the operator can see
+    # the exact snippet where their brand was mentioned. Competitor rows
+    # stay NULL (the API doesn't give per-competitor context).
+    concern_hits_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     extract_status: Mapped[ExtractStatus] = mapped_column(
         Enum(
             ExtractStatus,
