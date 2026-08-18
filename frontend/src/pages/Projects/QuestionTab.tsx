@@ -6,7 +6,6 @@ import { LinkOutlined, SearchOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useSearchParams } from "react-router-dom";
 import {
-  getProject,
   getQuestionCompetitorAnalytics,
   getQuestionProductAnalytics,
   getQuestionStatusChanges,
@@ -33,6 +32,7 @@ import { platformColor, platformLabel } from "./platforms";
 
 interface Props {
   projectId: number;
+  detail: ProjectDetailOut;
 }
 
 type RankFilter = "all" | "top1" | "top3" | "top10";
@@ -296,7 +296,7 @@ function rankClass(rank: number | null): string {
  *        (跨模型 — 不是只列单模型)
  *   右侧卡片自带内部滚动条,页面整体不会滚动
  */
-export default function QuestionTab({ projectId }: Props) {
+export default function QuestionTab({ projectId, detail }: Props) {
   const [platforms, setPlatforms] = useState<ProjectPlatform[]>([]);
   // Layered analytics loads — replaced the single ``analytics`` blob in
   // 2026-08-18 so the left list shows instantly and each pane fetches its
@@ -314,7 +314,6 @@ export default function QuestionTab({ projectId }: Props) {
   const [stableChanges, setStableChanges] = useState<QuestionStatusChangesOut | null>(
     null,
   );
-  const [projectDetail, setProjectDetail] = useState<ProjectDetailOut | null>(null);
   const [competitors, setCompetitors] = useState<CompetitorOut[]>([]);
   // True while project + summary are both in flight for the first time —
   // gates the full-screen skeleton so the UI doesn't flash an empty
@@ -424,30 +423,28 @@ export default function QuestionTab({ projectId }: Props) {
   // render). Used by every effect that depends on the window.
   const dateQueryKey = useMemo(() => JSON.stringify(dateQuery), [dateQuery]);
 
-  // Project + competitor list — independent of the analytics endpoints.
-  // Powers brand alias / keyword highlighting and the per-platform
-  // model chooser. Re-fetched only when projectId changes.
+  // Competitor list — independent of the analytics endpoints. The project
+  // detail itself is provided as a prop by Detail.tsx (which already
+  // fetched it), so we only need to populate platforms (sync, from the
+  // prop) and the competitor list (async, re-fetched when projectId
+  // changes).
+  useEffect(() => {
+    setPlatforms(detail.platforms ?? []);
+  }, [detail]);
+
   useEffect(() => {
     const ac = new AbortController();
-    const tasks = [
-      cachedFetch<ProjectDetailOut>(cacheKey(["project", projectId]), () =>
-        getProject(projectId),
-      ),
-      cachedFetch<{ items: CompetitorOut[] }>(
-        cacheKey(["competitors", projectId]),
-        () => listCompetitors(projectId),
-      ),
-    ] as const;
-    Promise.all(tasks)
-      .then(([project, competitorsRes]) => {
+    cachedFetch<{ items: CompetitorOut[] }>(
+      cacheKey(["competitors", projectId]),
+      () => listCompetitors(projectId),
+    )
+      .then((competitorsRes) => {
         if (ac.signal.aborted) return;
-        setPlatforms(project.platforms ?? []);
-        setProjectDetail(project);
         setCompetitors(competitorsRes.items);
       })
       .catch((err: Error) => {
         if (ac.signal.aborted) return;
-        message.error(err.message || "项目配置加载失败");
+        message.error(err.message || "竞品加载失败");
       })
       .finally(() => {
         if (!ac.signal.aborted) setLoading(false);
@@ -690,8 +687,8 @@ export default function QuestionTab({ projectId }: Props) {
     };
     const groups: HighlightGroup[] = [];
     const selfTokens = cleanTokens([
-      projectDetail?.brand ?? null,
-      ...(projectDetail?.aliases ?? []),
+      detail?.brand ?? null,
+      ...(detail?.aliases ?? []),
     ]);
     if (selfTokens.length > 0) {
       groups.push({ tokens: selfTokens, cls: "hl-self" });
@@ -705,12 +702,12 @@ export default function QuestionTab({ projectId }: Props) {
     if (compClean.length > 0) {
       groups.push({ tokens: compClean, cls: "hl-competitor" });
     }
-    const kwClean = cleanTokens(projectDetail?.keywords ?? []);
+    const kwClean = cleanTokens(detail?.keywords ?? []);
     if (kwClean.length > 0) {
       groups.push({ tokens: kwClean, cls: "hl-keyword" });
     }
     return groups;
-  }, [projectDetail, competitors]);
+  }, [detail, competitors]);
 
   // Answers modal — opened from each model row's "查看原文" link. The modal
   // fetches on demand (not preloaded) so the listing isn't held open while

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Skeleton, message } from "antd";
+import { Alert, Skeleton, Spin, message } from "antd";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useSetCurrentProject } from "../../auth/ProjectContext";
 import { getProject, type ProjectDetailOut } from "../../api/projects";
@@ -104,7 +104,11 @@ export default function ProjectDetail() {
       case "competitors":
         return <CompetitorsTab projectId={projectId} />;
       case "question":
-        return <QuestionTab projectId={projectId} />;
+        return detail ? (
+          <QuestionTab projectId={projectId} detail={detail} />
+        ) : (
+          <Spin />
+        );
       case "competitor":
         return <CompetitorAnalysisTab projectId={projectId} />;
       case "source":
@@ -133,5 +137,5 @@ export default function ProjectDetail() {
     }
   })();
 
-  return <div className="project-detail-page">{activePanel}</div>;
+  return <div className="project-detail-page" style={{ height: "100%" }}>{activePanel}</div>;
 }
