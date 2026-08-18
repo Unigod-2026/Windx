@@ -289,9 +289,13 @@ export interface BrandMentionOut {
   is_self: boolean;
   mention_count: number;
   rank_position: number | null;
-  sentiment_score: number | null;
+  // "positive" / "neutral" / "negative" — the API-pass refactor writes
+  // the Molizhishu label directly; the dashboard KPI layer translates
+  // to a float average for the color buckets.
+  sentiment_score: string | null;
   is_recommended: boolean | null;
-  concern_hits_json: string[] | null;
+  // Self rows carry a single snippet from the API's mentionContext.
+  concern_hits_json: Array<{ text: string }> | null;
   extract_status: ExtractStatus;
   extract_error: string | null;
   created_at: string;
@@ -484,6 +488,9 @@ export interface QuestionPlatformStat {
   best_rank: number | null;
   avg_sentiment: number | null;
   recommend_yes: boolean;
+  // Populated when ``view=competitor`` — the dominant competitor
+  // brand that drove the aggregation for this (prompt, platform).
+  brand_canonical?: string | null;
 }
 
 export interface QuestionPrevStat {
@@ -493,6 +500,12 @@ export interface QuestionPrevStat {
   top3_rate: number;
   mention_rate: number;
   rank_avg: number | null;
+}
+
+export interface PlatformExcerpt {
+  excerpt: string | null;
+  rank: number | null;
+  run_id: string | null;
 }
 
 export interface QuestionAnalyticsItem {
@@ -509,6 +522,34 @@ export interface QuestionAnalyticsItem {
   coverage: number;
   platforms: QuestionPlatformStat[];
   prev: QuestionPrevStat | null;
+  // 30-days-back prev window driving the 「本月 vs 上月」 card.
+  long_prev: QuestionPrevStat | null;
+  // Latest AI answer excerpt per platform (truncated to 200 chars).
+  excerpts: Record<string, PlatformExcerpt | null>;
+}
+
+export interface CategoryStat {
+  category: string | null;
+  prompt_count: number;
+  mention_rate: number;
+  top1_rate: number;
+  top3_rate: number;
+}
+
+export interface CompetitorBrandStat {
+  brand_canonical: string;
+  is_self: boolean;
+  color: string;
+  mention_rate: number;
+  top1_rate: number;
+  top3_rate: number;
+  avg_rank: number | null;
+  model_ranks: Record<string, number | null>;
+}
+
+export interface QuestionCompetitorOut {
+  prompt_id: number;
+  brands: CompetitorBrandStat[];
 }
 
 export interface QuestionAnalyticsOut {
@@ -516,7 +557,59 @@ export interface QuestionAnalyticsOut {
   start: string;
   end: string;
   items: QuestionAnalyticsItem[];
+  category_summary: CategoryStat[];
+  competitor: QuestionCompetitorOut[];
 }
+
+export interface QuestionSummaryItem {
+  prompt_id: number;
+  prompt: string;
+  category: string | null;
+  status: string;
+  total: number;
+  matched: number;
+  mention_rate: number;
+  top1_rate: number;
+  top3_rate: number;
+  rank_avg: number | null;
+  coverage: number;
+}
+
+export interface QuestionSummaryOut {
+  project_id: number;
+  start: string;
+  end: string;
+  items: QuestionSummaryItem[];
+  category_summary: CategoryStat[];
+}
+
+export interface QuestionProductAnalyticsOut {
+  project_id: number;
+  prompt_id: number;
+  start: string;
+  end: string;
+  platforms: QuestionPlatformStat[];
+  prev: QuestionPrevStat | null;
+  long_prev: QuestionPrevStat | null;
+  excerpts: Partial<Record<string, PlatformExcerpt | null>>;
+}
+
+export interface QuestionCompetitorAnalyticsOut {
+  project_id: number;
+  prompt_id: number;
+  start: string;
+  end: string;
+  brands: CompetitorBrandStat[];
+  excerpts: Partial<Record<string, PlatformExcerpt | null>>;
+}
+
+export interface QuestionWindowParams {
+  days?: number;
+  start?: string;
+  end?: string;
+}
+
+export type QuestionView = "self" | "competitor";
 
 /**
  * 问题提及分析 — 服务端聚合,前端只渲染。
@@ -525,14 +618,103 @@ export interface QuestionAnalyticsOut {
  * 但明细接口 size 上限 100,15 天窗口下常常拿不到完整数据,
  * 导致提及率 / 提及次数 / 模型覆盖 等 KPI 飘。新接口直接走
  * ``GROUP BY (prompt[, platform])`` 算出准确值。
+ *
+ * ``view=competitor`` 切换到 ``is_self=false`` 聚合,4 张 KPI 卡和
+ * 模型对比表按竞品 brand 重排。
  */
 export const getQuestionsAnalytics = (
   projectId: number,
-  params: { days?: number; start?: string; end?: string } = {},
+  params: { days?: number; start?: string; end?: string; view?: QuestionView } = {},
 ) =>
   client
     .get<QuestionAnalyticsOut>(
       `/projects/${projectId}/questions/analytics`,
+      { params },
+    )
+    .then((r) => r.data);
+
+export interface QuestionStableItem {
+  prompt_id: number;
+  prompt: string;
+  category: string | null;
+  platforms: string[];
+}
+
+export interface DropEvent {
+  prompt_id: number;
+  prompt: string;
+  category: string | null;
+  platform: string;
+  dropped_day: string;
+  from_rank: number | null;
+  to_rank: number | null;
+  reason: string | null;
+}
+
+export interface QuestionStatusChangesOut {
+  project_id: number;
+  start: string;
+  end: string;
+  stable: QuestionStableItem[];
+  drops: DropEvent[];
+  never_listed: QuestionStableItem[];
+  listed: QuestionStableItem[];
+}
+
+/**
+ * 稳定与掉落面板 — 服务端把每个 (prompt, platform) 划入 4 个独立集合:
+ *   - ``stable``: 上一窗口 + 当前窗口都有提及
+ *   - ``drops``: 上一窗口有,当前窗口掉出 Top-3 或消失(per 事件)
+ *   - ``never_listed``: 双窗口都没出现过
+ *   - ``listed``: 当前窗口至少被一个模型提过
+ */
+export const getQuestionStatusChanges = (
+  projectId: number,
+  params: { days?: number; start?: string; end?: string } = {},
+) =>
+  client
+    .get<QuestionStatusChangesOut>(
+      `/projects/${projectId}/questions/status-changes`,
+      { params },
+    )
+    .then((r) => r.data);
+
+/** 问题列表摘要 — 轻量聚合(每个 prompt 一行 + 分类汇总)。
+ *  用作「问题表格」首屏渲染,避免一次性加载完整 analytics。 */
+export const getQuestionSummary = (
+  projectId: number,
+  params: QuestionWindowParams = {},
+) =>
+  client
+    .get<QuestionSummaryOut>(
+      `/projects/${projectId}/questions/summary`,
+      { params },
+    )
+    .then((r) => r.data);
+
+/** 单问题产品视角 — 4 张 KPI 卡 + 模型对比表 + excerpt。
+ *  替代之前在 QuestionTab 内的 client-side useMemo 重算。 */
+export const getQuestionProductAnalytics = (
+  projectId: number,
+  promptId: number,
+  params: QuestionWindowParams = {},
+) =>
+  client
+    .get<QuestionProductAnalyticsOut>(
+      `/projects/${projectId}/questions/${promptId}/product-analytics`,
+      { params },
+    )
+    .then((r) => r.data);
+
+/** 单问题竞品视角 — 各竞品 brand 在该问题的提及率 / 排名分布 + excerpt。 */
+export const getQuestionCompetitorAnalytics = (
+  projectId: number,
+  promptId: number,
+  params: QuestionWindowParams = {},
+) =>
+  client
+    .get<QuestionCompetitorAnalyticsOut>(
+      `/projects/${projectId}/questions/${promptId}/competitor-analytics`,
       { params },
     )
     .then((r) => r.data);
@@ -555,19 +737,37 @@ export interface OverviewPlatformRank {
   sample: number;
 }
 
+/** Per-platform rollup used by the 模型维度 sub-pane (2×2 grid).
+ *  Mirrors the same shape as CompetitorKpi so the same chart helpers
+ *  can render either dataset later if we want. ``sample`` is the raw
+ *  subtask count for the platform in the window. */
+export interface OverviewModelDimension {
+  platform: string;
+  mention_rate: number;
+  top1_rate: number;
+  top2_rate: number;
+  top3_rate: number;
+  sample: number;
+}
+
 export interface ProjectOverview {
   project_id: number;
   start: string;
   end: string;
   days: number;
   labels: string[];
-  total_mentions: OverviewKpi;
+  // 4 KPI cards (mirrors docs/更新版UI #tab-overview)
+  mention_rate: OverviewKpi;
   top1_rate: OverviewKpi;
   top3_rate: OverviewKpi;
+  correct_rate: OverviewKpi;
+  // Detail numbers fed into each card's KPI-meta block
+  total_mentions: OverviewKpi;
   question_count: OverviewKpi;
   answer_count: OverviewKpi;
   trend: OverviewTrendSeries[];
   ranking: OverviewPlatformRank[];
+  model_dimensions: OverviewModelDimension[];
   pending_count: number;
   failed_count: number;
 }
