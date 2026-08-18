@@ -325,6 +325,16 @@ async def test_summary_returns_window_kpis(client, h):
     assert all(item["coverage"] == len(PLATFORMS) for item in body["items"])
     # category_summary 与 taxonomy 长度一致
     assert len(body["category_summary"]) == len(["引流感", "场景类", "体验类"])
+    # top1/top3 是 count/total 的 rate,不是 0/1 binary flag(_bootstrap 的
+    # rank = (p_idx + d_offset) % 5 + 1 → 15 天 × 6 平台 = 90 行,18 行 rank=1,
+    # 54 行 rank≤3 → top1=0.2, top3=0.6)
+    for item in body["items"]:
+        assert 0.0 <= item["top1_rate"] <= 1.0
+        assert 0.0 <= item["top3_rate"] <= 1.0
+        assert item["top1_rate"] <= item["top3_rate"]
+    first = body["items"][0]
+    assert abs(first["top1_rate"] - 18 / 90) < 1e-9
+    assert abs(first["top3_rate"] - 54 / 90) < 1e-9
 
 
 @pytest.mark.asyncio

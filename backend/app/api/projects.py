@@ -1267,9 +1267,9 @@ def _compute_question_summary(
             bucket["rank_sum"] += r.rank_position
             bucket["rank_count"] += 1
             if r.rank_position == 1:
-                bucket["top1"] = 1
+                bucket["top1"] += 1
             if r.rank_position <= 3:
-                bucket["top3"] = 1
+                bucket["top3"] += 1
 
         cat = r.category
         cat_prompts[cat].add(int(r.id))
@@ -1294,8 +1294,8 @@ def _compute_question_summary(
                 total=total,
                 matched=matched,
                 mention_rate=(matched / total) if total else 0.0,
-                top1_rate=b["top1"],
-                top3_rate=b["top3"],
+                top1_rate=(b["top1"] / total) if total else 0.0,
+                top3_rate=(b["top3"] / total) if total else 0.0,
                 rank_avg=(b["rank_sum"] / b["rank_count"]) if b["rank_count"] else None,
                 coverage=len(b["platforms"]),
             )
