@@ -196,3 +196,66 @@ async def test_kpi_cross_platform_url(client, h):
     assert platform_slices["doubao"]["unique_urls"] == 2
     assert platform_slices["kimi"]["total_refs"] == 2
     assert platform_slices["kimi"]["unique_urls"] == 2
+
+
+async def test_top_sources_limit_50(client, h):
+    """seed 60 个不同 URL → top_sources 长度 == 50,按 count desc 排序。"""
+    from app.models import Customer, Project
+    from app.models.common import now_local
+
+    today = now_local().date()
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t-sp-top"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-sp-top", brand="A")
+        db.add(proj); db.flush()
+        pid = proj.id
+        refs = [
+            {"url": f"https://u{i:02d}.com/", "site": f"u{i:02d}.com", "title": f"U{i}"}
+            for i in range(60)
+        ]
+        _seed_subtask(db, pid, cust.id, platform="doubao", day=today, refs=refs)
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/source-preferences?days=15", headers=h)
+    top = r.json()["top_sources"]
+    assert len(top) == 50
+    counts = [it["count"] for it in top]
+    assert counts == sorted(counts, reverse=True)
+
+
+async def test_trend_set_diff(client, h):
+    """day1: {A,B}, day2: {A,B,C}, day3: {A,C} → trend 3 个 day。
+    day1: new=2(A,B 全新)/lost=0(无前日)
+    day2: new=1(C)/lost=0
+    day3: new=0 / lost=1(B 流失)"""
+    from app.models import Customer, Project
+    from app.models.common import now_local
+    from datetime import timedelta
+
+    today = now_local().date()
+    d1 = today - timedelta(days=2)
+    d2 = today - timedelta(days=1)
+    d3 = today
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t-sp-trend"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-sp-trend", brand="A")
+        db.add(proj); db.flush()
+        pid = proj.id
+        for d, urls in [
+            (d1, ["https://a.com/", "https://b.com/"]),
+            (d2, ["https://a.com/", "https://b.com/", "https://c.com/"]),
+            (d3, ["https://a.com/", "https://c.com/"]),
+        ]:
+            _seed_subtask(db, pid, cust.id, platform="doubao", day=d, refs=[
+                {"url": u, "site": u.split("://")[1].rstrip("/"), "title": u} for u in urls
+            ])
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/source-preferences?days=15", headers=h)
+    trend = {t["date"]: t for t in r.json()["trend"]}
+    assert trend[d1.isoformat()]["new_urls"] == 2
+    assert trend[d1.isoformat()]["lost_urls"] == 0
+    assert trend[d2.isoformat()]["new_urls"] == 1
+    assert trend[d2.isoformat()]["lost_urls"] == 0
+    assert trend[d3.isoformat()]["new_urls"] == 0
+    assert trend[d3.isoformat()]["lost_urls"] == 1
