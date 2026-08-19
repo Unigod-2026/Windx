@@ -785,6 +785,20 @@ class ModelDiff(BaseModel):
     competitor_top3_rate: float
 
 
+class DiffCore(BaseModel):
+    """核心指标对比柱状图数据,三个值一一对应 ``labels``,单位 0-100。
+
+    ``self`` 不能直接做字段名(与 ``BaseModel.__init__`` 的位置参数撞名),
+    所以内部叫 ``self_values``,靠 alias 保持 JSON 键仍是 ``self``。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    labels: list[str]
+    self_values: list[float] = Field(alias="self")
+    competitor_avg: list[float]
+
+
 class CompetitorAnalysisOut(BaseModel):
     project_id: int
     start: date
@@ -803,7 +817,7 @@ class CompetitorAnalysisOut(BaseModel):
     competitors: list[CompetitorKpi]
     trend: CompetitorTrendBlock
     # — 新增 — 详见 spec §1.3
-    diff_core: dict                                # {"labels":[...], "self":[...], "competitor_avg":[...]}
+    diff_core: DiffCore
     diff_model: list[ModelDiff]
     diff_quadrant: list[QuadrantPoint]
     previous_window_start: date | None

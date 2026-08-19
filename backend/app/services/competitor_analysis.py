@@ -18,6 +18,7 @@ from app.schemas.project import (
     CompetitorKpi,
     CompetitorTrendBlock,
     CompetitorTrendSeries,
+    DiffCore,
     ModelDiff,
     QuadrantPoint,
 )
@@ -56,31 +57,29 @@ def _resolve_competitor_window(
 def _compute_diff_core(
     self_kpi: CompetitorKpi | None,
     competitor_kpis: list[CompetitorKpi],
-) -> dict:
+) -> DiffCore:
     """核心指标对比 — 3 个指标(mention_rate / top1_rate / top3_rate)的自身 vs 竞品均值,
     单位 0-100(已乘 100),便于 UI 直接画柱状图。spec §2.3。
     """
-    empty = {
-        "labels": ["提及率", "Top1", "Top3"],
-        "self": [0.0, 0.0, 0.0],
-        "competitor_avg": [0.0, 0.0, 0.0],
-    }
+    labels = ["提及率", "Top1", "Top3"]
     if not self_kpi or not competitor_kpis:
-        return empty
+        return DiffCore(
+            labels=labels, self_values=[0.0, 0.0, 0.0], competitor_avg=[0.0, 0.0, 0.0]
+        )
     n = len(competitor_kpis)
-    return {
-        "labels": ["提及率", "Top1", "Top3"],
-        "self": [
+    return DiffCore(
+        labels=labels,
+        self_values=[
             self_kpi.mention_rate * 100,
             self_kpi.top1_rate * 100,
             self_kpi.top3_rate * 100,
         ],
-        "competitor_avg": [
+        competitor_avg=[
             sum(c.mention_rate for c in competitor_kpis) / n * 100,
             sum(c.top1_rate for c in competitor_kpis) / n * 100,
             sum(c.top3_rate for c in competitor_kpis) / n * 100,
         ],
-    }
+    )
 
 
 def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
@@ -162,8 +161,10 @@ def compute_competitor_analysis(
     end: date | None = None,
 ) -> CompetitorAnalysisOut:
     """Drives the 竞品分析 tab. Returns a ``CompetitorAnalysisOut``
-    populated with self + competitors + trend. 暂未含新字段(top1 /
-    情感三档 / 环比 / diff 三件套),后续 task 增量加。
+    populated with self + competitors + trend + diff trio (diff_core /
+    diff_model / diff_quadrant) + previous window dates. The 4 deltas on
+    each KPI and ``previous_window_*`` are None when ``days < 7``
+    (spec §1.3).
     """
     win_start, win_end = _resolve_competitor_window(days, start, end)
     win_start_dt = datetime.combine(win_start, time.min)
@@ -310,69 +311,73 @@ def compute_competitor_analysis(
     # 1b. Previous-window rollup for the 4 deltas.
     # ------------------------------------------------------------
     days_n = (win_end - win_start).days + 1
-    prev_end_dt = win_start_dt - timedelta(seconds=1)
-    prev_start_dt = prev_end_dt - timedelta(days=days_n - 1)
-    prev_brand_rows = db.execute(
-        select(
-            BrandMention.brand_canonical,
-            BrandMention.is_self,
-            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
-            func.avg(
-                case(
-                    (
-                        BrandMention.mention_count > 0,
-                        case(
-                            (BrandMention.sentiment_score == "positive", 1.0),
-                            (BrandMention.sentiment_score == "neutral", 0.5),
-                            (BrandMention.sentiment_score == "negative", 0.0),
-                            else_=None,
-                        ),
-                    ),
-                    else_=None,
-                )
-            ).label("avg_sentiment"),
-            func.sum(
-                case(
-                    (and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1),
-                    else_=0,
-                )
-            ).label("top1_hits"),
-            func.sum(
-                case(
-                    (and_(BrandMention.mention_count > 0, BrandMention.rank_position.is_not(None),
-                          BrandMention.rank_position <= 3), 1),
-                    else_=0,
-                )
-            ).label("top3_hits"),
-        )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= prev_start_dt,
-            BrandMention.created_at <= prev_end_dt,
-        )
-        .group_by(BrandMention.brand_canonical, BrandMention.is_self)
-    ).all()
-
-    prev_total_subtasks = db.scalar(
-        select(func.count(func.distinct(BrandMention.subtask_id))).where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= prev_start_dt,
-            BrandMention.created_at <= prev_end_dt,
-        )
-    ) or 0
-
-    prev_window_start_d: date = prev_start_dt.date()
-    prev_window_end_d: date = prev_end_dt.date()
-
+    # < 7 天的环比无统计意义(spec §1.3):四 delta 置 None,
+    # previous_window_* 留空,跳过整段 SQL。
     prev_by_brand: dict[str, dict[str, float]] = {}
-    for r in prev_brand_rows:
-        matched = int(r.matched or 0)
-        prev_by_brand[r.brand_canonical] = {
-            "mention_rate": matched / prev_total_subtasks if prev_total_subtasks else 0.0,
-            "top1_rate": int(r.top1_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
-            "top3_rate": int(r.top3_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
-            "avg_sentiment": float(r.avg_sentiment) if r.avg_sentiment is not None else None,
-        }
+    prev_window_start_d: date | None = None
+    prev_window_end_d: date | None = None
+    if days_n >= 7:
+        prev_window_end_d = win_start - timedelta(days=1)
+        prev_window_start_d = prev_window_end_d - timedelta(days=days_n - 1)
+        prev_start_dt = datetime.combine(prev_window_start_d, time.min)
+        prev_end_dt = datetime.combine(prev_window_end_d, time.max)
+        prev_brand_rows = db.execute(
+            select(
+                BrandMention.brand_canonical,
+                BrandMention.is_self,
+                func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+                func.avg(
+                    case(
+                        (
+                            BrandMention.mention_count > 0,
+                            case(
+                                (BrandMention.sentiment_score == "positive", 1.0),
+                                (BrandMention.sentiment_score == "neutral", 0.5),
+                                (BrandMention.sentiment_score == "negative", 0.0),
+                                else_=None,
+                            ),
+                        ),
+                        else_=None,
+                    )
+                ).label("avg_sentiment"),
+                func.sum(
+                    case(
+                        (and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1),
+                        else_=0,
+                    )
+                ).label("top1_hits"),
+                func.sum(
+                    case(
+                        (and_(BrandMention.mention_count > 0, BrandMention.rank_position.is_not(None),
+                              BrandMention.rank_position <= 3), 1),
+                        else_=0,
+                    )
+                ).label("top3_hits"),
+            )
+            .where(
+                BrandMention.project_id == project_id,
+                BrandMention.created_at >= prev_start_dt,
+                BrandMention.created_at <= prev_end_dt,
+            )
+            .group_by(BrandMention.brand_canonical, BrandMention.is_self)
+        ).all()
+
+        prev_total_subtasks = db.scalar(
+            select(func.count(func.distinct(BrandMention.subtask_id))).where(
+                BrandMention.project_id == project_id,
+                BrandMention.created_at >= prev_start_dt,
+                BrandMention.created_at <= prev_end_dt,
+            )
+        ) or 0
+
+        for r in prev_brand_rows:
+            matched = int(r.matched or 0)
+            prev_by_brand[r.brand_canonical] = {
+                "mention_rate": matched / prev_total_subtasks if prev_total_subtasks else 0.0,
+                "top1_rate": int(r.top1_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
+                "top3_rate": int(r.top3_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
+                "avg_sentiment": float(r.avg_sentiment) if r.avg_sentiment is not None else None,
+            }
 
     daily_by_brand: dict[str, dict[date, int]] = {}
     daily_rows = db.execute(
@@ -511,6 +516,6 @@ def compute_competitor_analysis(
         diff_core=diff_core,
         diff_model=diff_model,
         diff_quadrant=diff_quadrant,
-        previous_window_start=prev_window_start_d if prev_brand_rows else None,
-        previous_window_end=prev_window_end_d if prev_brand_rows else None,
+        previous_window_start=prev_window_start_d,
+        previous_window_end=prev_window_end_d,
     )

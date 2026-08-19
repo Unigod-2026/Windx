@@ -259,6 +259,78 @@ async def test_kpi_deltas_compare_previous_window(client, h):
     assert body["previous_window_end"] is not None
 
 
+async def test_previous_window_includes_its_first_day(client, h):
+    """The prev window must cover all of ``previous_window_start``.
+
+    Regression guard: the boundary was built by subtracting a timedelta from
+    ``win_start - 1s``, which left the start at 23:59:59 and silently dropped
+    the whole first day. Seeding only on that first day is the only way to
+    catch it — a seed on the last day stays inside the truncated range.
+    """
+    from app.models import Customer, Project
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-prevwin", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+
+        today = now_local().date()
+        cur_sub = _make_subtask_at(db, pid, cust.id, today, platform="doubao")
+        _brandmention_at(db, cur_sub, pid, cust.id, "A", True, today,
+                         mention_count=1, rank=1, sentiment="positive",
+                         extract_status=ExtractStatus.SUCCESS)
+        # days=15 → current [today-14, today], previous [today-29, today-15].
+        # Seed the FIRST day of the previous window at 00:00.
+        first_prev_day = today - timedelta(days=29)
+        prev_sub = _make_subtask_at(db, pid, cust.id, first_prev_day, platform="doubao")
+        _brandmention_at(db, prev_sub, pid, cust.id, "A", True, first_prev_day,
+                         mention_count=0, rank=None, sentiment=None,
+                         extract_status=ExtractStatus.SKIPPED)
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["previous_window_start"] == first_prev_day.isoformat()
+    assert body["previous_window_end"] == (today - timedelta(days=15)).isoformat()
+    # The row on the first prev day must be counted: prev mention_rate=0.0,
+    # current=1.0 → delta=+1.0. If the day is dropped the delta is None.
+    assert body["self_brand"]["mention_rate_delta"] == 1.0
+
+
+async def test_short_window_suppresses_deltas(client, h):
+    """窗口 < 7 天时环比无统计意义,4 个 delta 与 previous_window_* 一律 None。spec §1.3。"""
+    from app.models import Customer, Project
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-short", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+
+        today = now_local().date()
+        cur_sub = _make_subtask_at(db, pid, cust.id, today, platform="doubao")
+        _brandmention_at(db, cur_sub, pid, cust.id, "A", True, today,
+                         mention_count=1, rank=1, sentiment="positive",
+                         extract_status=ExtractStatus.SUCCESS)
+        # days=3 → previous window [today-5, today-3]; seed it so the only
+        # reason the deltas come back None is the short-window guard.
+        prev_day = today - timedelta(days=4)
+        prev_sub = _make_subtask_at(db, pid, cust.id, prev_day, platform="doubao")
+        _brandmention_at(db, prev_sub, pid, cust.id, "A", True, prev_day,
+                         mention_count=1, rank=1, sentiment="positive",
+                         extract_status=ExtractStatus.SUCCESS)
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=3", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["previous_window_start"] is None
+    assert body["previous_window_end"] is None
+    self_kpi = body["self_brand"]
+    for f in ("mention_rate_delta", "top1_rate_delta", "top3_rate_delta", "sentiment_delta"):
+        assert self_kpi[f] is None, f"{f} should be None for a 3-day window"
+
+
 # --------------------------------------------------------------------------
 # diff_core — 3 个指标 self vs competitor avg (Task 7)
 # --------------------------------------------------------------------------
