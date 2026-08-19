@@ -7,16 +7,8 @@ export default function TrendFullPane({ data }: { data: CompetitorAnalysisOut })
     <div className="panel panel-wide">
       <div className="panel-header">
         <div>
-          <h3>完整提及趋势对比(自身 vs 竞品)</h3>
-          <p>{data.start} ~ {data.end} · 共 {data.days} 天</p>
-        </div>
-        <div className="trend-legend">
-          {data.trend.series.map((s) => (
-            <span key={s.brand_canonical} className="legend-item">
-              <span className="legend-swatch" style={{ background: s.color }} />
-              {s.name}
-            </span>
-          ))}
+          <h3>完整提及趋势(自身 vs 竞品)</h3>
+          <p>点击下方品牌名称进行多选切换,未选中的品牌以灰色展示</p>
         </div>
       </div>
       <div className="panel-body">

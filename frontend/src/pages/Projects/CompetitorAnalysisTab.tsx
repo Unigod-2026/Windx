@@ -133,52 +133,82 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
         .delta-down { color: var(--color-danger, #dc2626); font-weight: 600; }
         .delta-neutral { color: var(--text-tertiary); }
 
-        .trend-legend {
+        .cna-root .chart-legend {
           display: flex;
           flex-wrap: wrap;
-          gap: 12px;
-          align-items: center;
+          gap: 8px;
+          padding: 4px 0 14px;
         }
-        .trend-legend .legend-item {
+        .cna-root .legend-chip {
           display: inline-flex;
           align-items: center;
-          gap: 4px;
+          gap: 6px;
+          padding: 5px 12px;
+          border-radius: 999px;
+          background: var(--bg-page);
+          border: 1px solid #e8e9ec;
           font-size: 12px;
           color: var(--text-secondary);
+          cursor: pointer;
+          transition: all 0.15s;
+          user-select: none;
+          font-family: inherit;
         }
-        .trend-legend .legend-swatch {
-          display: inline-block;
+        .cna-root .legend-chip:hover {
+          border-color: var(--brand-blue);
+          color: var(--brand-blue);
+        }
+        .cna-root .legend-chip i {
           width: 10px;
           height: 10px;
-          border-radius: 2px;
+          border-radius: 3px;
+          display: inline-block;
+        }
+        .cna-root .legend-chip.off {
+          background: #fafafa;
+          border-color: #ececec;
+          color: #bbb;
+        }
+        .cna-root .legend-chip-self {
+          margin-left: 2px;
+          padding: 0 6px;
+          font-size: 10px;
+          border-radius: 8px;
+          background: var(--brand-blue);
+          color: #fff;
+          line-height: 16px;
+        }
+        .cna-root .legend-chip.off .legend-chip-self {
+          background: #d9d9d9;
         }
 
-        .trend-chart, .bar-chart, .quadrant-chart {
+        .cna-root .chart-trend-tall {
+          height: min(420px, calc(100vh - 340px));
+          min-height: 280px;
+        }
+        .cna-root .bar-chart,
+        .cna-root .quadrant-chart {
           width: 100%;
           height: 260px;
           display: block;
         }
-        .trend-chart .grid-line,
-        .bar-chart .grid-line { stroke: var(--border-light, #f0f0f0); }
-        .trend-chart .axis-label,
-        .bar-chart .axis-label,
-        .quadrant-chart .axis-label {
+        .cna-root .bar-chart .grid-line { stroke: var(--border-light, #f0f0f0); }
+        .cna-root .bar-chart .axis-label,
+        .cna-root .quadrant-chart .axis-label {
           fill: var(--text-quaternary);
           font-size: 10px;
         }
-        .trend-chart .line { fill: none; stroke-width: 2; }
-        .trend-chart .dot { stroke: #fff; stroke-width: 1; }
-        .quadrant-chart .axis-line { stroke: var(--text-tertiary); stroke-width: 1; }
-        .quadrant-chart .ref-line {
+        .cna-root .quadrant-chart .axis-line { stroke: var(--text-tertiary); stroke-width: 1; }
+        .cna-root .quadrant-chart .ref-line {
           stroke: var(--text-quaternary);
           stroke-dasharray: 4 4;
           stroke-width: 1;
         }
-        .quadrant-chart .quadrant-label {
+        .cna-root .quadrant-chart .quadrant-label {
           fill: var(--text-tertiary);
           font-size: 11px;
         }
-        .quadrant-chart .point-label {
+        .cna-root .quadrant-chart .point-label {
           fill: var(--text-secondary);
           font-size: 11px;
         }
