@@ -51,6 +51,36 @@ def _resolve_competitor_window(
     return today - timedelta(days=days - 1), today
 
 
+def _compute_diff_core(
+    self_kpi: CompetitorKpi | None,
+    competitor_kpis: list[CompetitorKpi],
+) -> dict:
+    """核心指标对比 — 3 个指标(mention_rate / top1_rate / top3_rate)的自身 vs 竞品均值,
+    单位 0-100(已乘 100),便于 UI 直接画柱状图。spec §2.3。
+    """
+    empty = {
+        "labels": ["提及率", "Top1", "Top3"],
+        "self": [0.0, 0.0, 0.0],
+        "competitor_avg": [0.0, 0.0, 0.0],
+    }
+    if not self_kpi or not competitor_kpis:
+        return empty
+    n = len(competitor_kpis)
+    return {
+        "labels": ["提及率", "Top1", "Top3"],
+        "self": [
+            self_kpi.mention_rate * 100,
+            self_kpi.top1_rate * 100,
+            self_kpi.top3_rate * 100,
+        ],
+        "competitor_avg": [
+            sum(c.mention_rate for c in competitor_kpis) / n * 100,
+            sum(c.top1_rate for c in competitor_kpis) / n * 100,
+            sum(c.top3_rate for c in competitor_kpis) / n * 100,
+        ],
+    }
+
+
 def compute_competitor_analysis(
     *,
     db,
@@ -392,6 +422,8 @@ def compute_competitor_analysis(
 
     trend_block = CompetitorTrendBlock(labels=labels, series=series)
 
+    diff_core = _compute_diff_core(self_kpi, competitor_kpis)
+
     return CompetitorAnalysisOut(
         project_id=project_id,
         start=win_start,
@@ -401,7 +433,7 @@ def compute_competitor_analysis(
         self_brand=self_kpi,
         competitors=competitor_kpis,
         trend=trend_block,
-        diff_core={"labels": [], "self": [], "competitor_avg": []},
+        diff_core=diff_core,
         diff_model=[],
         diff_quadrant=[],
         previous_window_start=prev_window_start_d if prev_brand_rows else None,

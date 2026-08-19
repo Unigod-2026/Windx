@@ -257,3 +257,42 @@ async def test_kpi_deltas_compare_previous_window(client, h):
     # previous_window_* should be filled because prev_brand_rows is non-empty
     assert body["previous_window_start"] is not None
     assert body["previous_window_end"] is not None
+
+
+# --------------------------------------------------------------------------
+# diff_core — 3 个指标 self vs competitor avg (Task 7)
+# --------------------------------------------------------------------------
+
+
+async def test_diff_core_self_vs_competitor_avg(client, h):
+    """3 个指标 self vs competitor avg,百分比 0-100。"""
+    from app.models import Customer, Project
+    from app.models.enums import ExtractStatus
+    from app.models.project import BrandMention
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-task7", brand="自身A"); db.add(proj); db.flush()
+        pid = proj.id
+
+        # 1 subtask, 自身 rank=1 mentioned, 2 竞品 各 rank=2 mentioned
+        sub = _make_subtask(db, pid, cust.id)
+        for b, is_self, rank in [("自身A", True, 1), ("竞品B", False, 2), ("竞品C", False, 2)]:
+            db.add(BrandMention(
+                subtask_id=sub.subtask_id, task_id=sub.task_id,
+                project_id=pid, customer_id=cust.id,
+                brand_canonical=b, is_self=is_self,
+                mention_count=1, rank_position=rank,
+                sentiment_score="positive" if is_self else "neutral",
+                extract_status=ExtractStatus.SUCCESS,
+            ))
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    body = r.json()["diff_core"]
+    assert body["labels"] == ["提及率", "Top1", "Top3"]
+    # 自身:mention_rate=1.0, top1=1.0, top3=1.0 → 100,100,100
+    assert body["self"] == [100.0, 100.0, 100.0]
+    # 竞品均值:mention_rate=1.0 each (avg=1.0), top1=0.0 (rank=2 不算 Top1),
+    # top3=1.0 (rank=2 仍算 Top3,定义是 rank<=3) → 100,0,100
+    assert body["competitor_avg"] == [100.0, 0.0, 100.0]
