@@ -26,8 +26,8 @@ from app.schemas.project import (
 
 
 def _resolve_window(days: int) -> tuple[date, date]:
-    """跟 ``app.api.projects._resolve_competitor_window`` 一致:dafault days=15,
-    1-90 区间,否则 raise ValueError。"""
+    """跟 ``app.api.projects._resolve_competitor_window`` 一致:default days=15,
+    1-90 区间,否则 raise ValueError。端点在 Task 4 转 HTTP 400。"""
     if days < 1 or days > 90:
         raise ValueError("days must be between 1 and 90")
     today = now_local().date()
