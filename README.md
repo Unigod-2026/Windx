@@ -9,7 +9,7 @@
 | 后端 | Python 3.11 · FastAPI · SQLAlchemy 2 · Alembic · APScheduler 3 (AsyncIOScheduler) |
 | 前端 | React 18 · Vite 5 · TypeScript 5 · Ant Design 5 · Axios · dayjs |
 | 数据库 | MySQL 8 (Asia/Shanghai) |
-| 容器化 | Docker Compose(mysql + backend + frontend + nginx 反代) |
+| 反代 | nginx(把 `/api` 和 `/static` 反代到后端) |
 
 ## 仓库结构
 
@@ -27,7 +27,6 @@ windx/
 │   ├── alembic/            # 数据库迁移
 │   ├── tests/              # pytest(142 用例)
 │   ├── pyproject.toml
-│   └── Dockerfile
 ├── frontend/               # React + AntD 前端
 │   ├── src/
 │   │   ├── api/            # axios 封装 + 类型
@@ -36,7 +35,6 @@ windx/
 │   │   └── App.tsx         # 路由
 │   ├── nginx.conf          # 反代 /api /static 到后端
 │   ├── vite.config.ts
-│   └── Dockerfile
 ├── docs/
 │   ├── api/                # 模力指数 API 规范(权威)
 │   └── superpowers/
@@ -44,46 +42,56 @@ windx/
 │       └── plans/          # 实施计划
 ├── api调用prompt.md         # 后端接入 prompt(原始规范)
 ├── 需求.md                  # 业务需求
-├── docker-compose.yml      # 一键启动
 ├── CLAUDE.md               # 项目级 Claude 指令
 └── README.md
 ```
 
-## 快速启动(Docker Compose,推荐)
+## 快速启动
 
-### 1. 准备环境变量
+### 1. 准备 MySQL
 
-```bash
-cp backend/.env.example backend/.env
-export MOLIZHISHU_TOKEN=<向模力指数申请的真实 Token>
-export JWT_SECRET=$(openssl rand -hex 32)   # 必须设置,compose 会强制校验
+任意一台 MySQL 8(本机、局域网或云 RDS),建一个空库即可:
+
+```sql
+CREATE DATABASE geo DEFAULT CHARACTER SET utf8mb4;
 ```
 
-可选:`MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` / `MYSQL_ROOT_PASSWORD`(默认 `admin` / `admin123` / `geo` / `root`,**生产前必须修改**)。
+### 2. 配置环境变量
 
-### 2. 启动
+仓库根目录新建 `.env`(已 `.gitignore`,不会进 git):
+
+```ini
+APP_PORT=18083
+TZ=Asia/Shanghai
+DATABASE_URL=mysql+pymysql://USER:PASSWORD@HOST:3306/geo?charset=utf8mb4
+JWT_SECRET=<openssl rand -hex 32 的输出>
+MOLIZHISHU_TOKEN=<向模力指数申请的真实 Token>
+```
+
+`JWT_SECRET` 必须设置且足够随机;`MOLIZHISHU_TOKEN` 仅服务端使用,不写代码 / 日志 / 前端 / commit。
+
+### 3. 装依赖、建表、起后端
 
 ```bash
-docker compose up -d --build
+cd backend
+uv sync                              # 按 uv.lock 装依赖
+uv run alembic upgrade head          # 建表(11 个 alembic revision)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 18083 --reload
 ```
 
 服务端口:
 
 | 服务 | 地址 |
 |---|---|
-| 前端(SPA + 反代) | http://localhost:8080 |
 | 后端 API | http://localhost:18083 |
 | 后端 OpenAPI 文档 | http://localhost:18083/docs |
-| MySQL | `localhost:3306`(用户名 `admin` / 密码 `admin123`,数据库 `geo`) |
+| MySQL | `localhost:3306`(账号 / 密码 / 库名按 `DATABASE_URL` 实际值) |
 
-第一次启动会自动执行 `alembic upgrade head` 建表。
-
-### 3. 初始化超级管理员
-
-登录接口尚未实现,需用一次性的 Python 命令创建管理员并签发 JWT:
+### 4. 初始化超级管理员
 
 ```bash
-docker compose exec backend python - <<'PY'
+cd backend
+uv run python - <<'PY'
 from passlib.hash import bcrypt
 from sqlalchemy import select
 from app.db import SessionLocal
@@ -107,41 +115,9 @@ with SessionLocal() as db:
 PY
 ```
 
-> ⚠️ 生产环境必须修改默认密码并删除该种子脚本的能力。
+> ⚠️ 生产环境必须修改默认密码。
 
-### 4. 登录前端
-
-当前 `/api/auth/login` 未实现,前端通过本地保存的 JWT 字符串访问受保护接口。可以用下面的 Python 命令签发一个 30 天有效的 token,然后在浏览器 DevTools 写入 `localStorage.setItem('token', '<jwt>')` 后刷新:
-
-```bash
-docker compose exec backend python - <<'PY'
-import time
-from jose import jwt
-from app.config import get_settings
-s = get_settings()
-admin_id = 1  # 上一步创建的管理员 id
-print(jwt.encode(
-    {"sub": str(admin_id), "exp": int(time.time()) + 86400 * 30},
-    s.jwt_secret,
-    algorithm="HS256",
-))
-PY
-```
-
-## 本地开发(无 Docker)
-
-### 后端
-
-```bash
-cd backend
-uv sync                                    # 安装依赖(uv.lock 已生成)
-export DATABASE_URL=sqlite+pysqlite:///:memory:    # 或指向本地 MySQL
-export JWT_SECRET=dev-secret
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --port 18083
-```
-
-### 前端
+### 5. 启动前端 + 登录
 
 ```bash
 cd frontend
@@ -149,11 +125,34 @@ npm ci
 npm run dev       # http://localhost:5173,vite proxy 已在 vite.config.ts 配好
 ```
 
+浏览器打开 `http://localhost:5173/login`,用户名 `admin` 密码 `changeme` 登录。
+
+## 本地开发
+
+### 后端
+
+```bash
+cd backend
+uv sync                                    # 按 uv.lock 装依赖
+uv run alembic upgrade head                # 仅首次 / 升级时跑
+uv run uvicorn app.main:app --reload --port 18083
+```
+
+`DATABASE_URL` / `JWT_SECRET` 走根目录 `.env`,同快速启动步骤 2。
+
+### 前端
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
 ### 测试
 
 ```bash
 cd backend
-uv run pytest -v          # 142 用例,约 5 秒
+uv run pytest -v
 uv run ruff check .
 ```
 
@@ -291,7 +290,7 @@ uv run ruff check .
 | 客户详情页(旗下项目列表) | ❌ 未实现 | 仅有客户列表 + 编辑 |
 | 竞品信息抽取(项目详情 Tab5) | ❌ 占位 | 需 NLP / 规则抽取 |
 | 后台轮询(同步最终一致性) | ❌ 未实现 | 当前只走 Callback |
-| Docker compose 健康检查探针 | ⚠️ 后端缺 | MySQL 已配 healthcheck,backend 可加 curl `/healthz` |
+| `/healthz` 健康检查端点 | ⚠️ 后端缺 | 仅 `/health`,建议加 `/healthz` 给上游探针 |
 | 前端单元测试 | ❌ 未配 | 仅手动目检 |
 
 ## 文档索引
