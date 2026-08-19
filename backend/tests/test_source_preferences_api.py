@@ -259,3 +259,42 @@ async def test_trend_set_diff(client, h):
     assert trend[d2.isoformat()]["lost_urls"] == 0
     assert trend[d3.isoformat()]["new_urls"] == 0
     assert trend[d3.isoformat()]["lost_urls"] == 1
+
+
+async def test_window_excludes_out_of_range_subtasks(client, h):
+    """task.created_local_at 在窗口外的 subtask 不计入(等同 citation-analysis)。"""
+    from datetime import timedelta
+    from app.models import Customer, Project
+    from app.models.common import now_local
+
+    today = now_local().date()
+    out_of_range = today - timedelta(days=30)  # days=15 窗口外
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t-sp-win"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-sp-win", brand="A")
+        db.add(proj); db.flush()
+        pid = proj.id
+        _seed_subtask(db, pid, cust.id, platform="doubao", day=out_of_range, refs=[
+            {"url": "https://outside.com/", "site": "outside.com", "title": "Outside"},
+        ])
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/source-preferences?days=15", headers=h)
+    body = r.json()
+    assert body["kpi"]["total_references"] == 0
+    assert body["kpi"]["total_subtasks"] == 0
+
+
+async def test_invalid_days_returns_400(client, h):
+    """days=0 / days=91 → HTTP 400。"""
+    from app.models import Customer, Project
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t-sp-400"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-sp-400", brand="A")
+        db.add(proj); db.flush()
+        pid = proj.id
+        db.commit()
+
+    for bad in (0, 91, -1):
+        r = await client.get(f"/api/projects/{pid}/source-preferences?days={bad}", headers=h)
+        assert r.status_code == 400, f"days={bad} should be 400, got {r.status_code}"

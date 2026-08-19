@@ -41,6 +41,7 @@ from app.services.competitor_analysis import (
     _resolve_competitor_window,
     compute_competitor_analysis,
 )
+from app.services.source_preferences import compute_source_preferences
 from app.schemas.project import (
     BrandMentionListOut,
     BrandMentionOut,
@@ -93,6 +94,12 @@ from app.schemas.project import (
     SubtaskOut,
     TrendSeries,
     TriggerOut,
+    SourcePreferenceItem,
+    SourcePreferenceKpi,
+    SourcePreferenceOut,
+    SourcePlatformSlice,
+    SourceTrendDay,
+    SourceTypeSlice,
     _CITATION_DOMAIN_RULES,
 )
 from app.services.schedule_time import cooldown_key, next_run_at
@@ -2278,6 +2285,45 @@ def citation_analysis(
         unique_urls=len(buckets),
         type_counts=type_counts,
         items=items,
+    )
+
+
+# --------------------------------------------------------------------------
+# Source preferences (data tab → 信源偏好 → 全部信源)
+# --------------------------------------------------------------------------
+
+
+@router.get(
+    "/projects/{project_id}/source-preferences",
+    response_model=SourcePreferenceOut,
+)
+def source_preferences(
+    project_id: int,
+    days: int = 15,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """Per-URL aggregation of ``Subtask.reference_list_json`` in the window.
+
+    跟 :func:`citation_analysis` 共用窗口口径(Task.project_id + Task.created_local_at),
+    但读的是模型完整可用的信源池,而不是回答正文里实际引用的子集。返回 5 块:
+    kpi / type_counts / platform_slices / top_sources(前 50)/ trend(每日 set diff)。
+    spec §后端设计 + docs/superpowers/specs/2026-08-19-source-preferences-tab-design.md。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    try:
+        win_start, win_end = _resolve_competitor_window(days, None, None)
+    except HTTPException:
+        raise
+
+    # 把 HTTP 400 的字符串检查抽到 service 之外(避免 service 层返 HTTPException)。
+    if days < 1 or days > 90:
+        raise HTTPException(400, "days must be between 1 and 90")
+
+    return compute_source_preferences(
+        db=db, project_id=project_id, days=days,
     )
 
 
