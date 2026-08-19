@@ -347,3 +347,52 @@ async def test_diff_model_per_platform_self_vs_competitor(client, h):
     assert diff_model["kimi"]["self_mention_rate"] == 0.0
     assert diff_model["kimi"]["competitor_mention_rate"] == 1.0
     assert diff_model["kimi"]["competitor_top1_rate"] == 1.0
+
+
+# --------------------------------------------------------------------------
+# diff_quadrant — per-platform point + concern_tags removed (Task 9)
+# --------------------------------------------------------------------------
+
+
+async def test_diff_quadrant_per_platform_point(client, h):
+    """每个 platform 一个 QuadrantPoint,字段 self_mention_rate + competitor_avg_mention_rate。"""
+    from app.models import Customer, Project
+    from app.models.enums import ExtractStatus
+    from app.models.project import BrandMention
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-task9", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+        sub = _make_subtask(db, pid, cust.id, platform="doubao")
+        db.add(BrandMention(subtask_id=sub.subtask_id, task_id=sub.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="A", is_self=True,
+            mention_count=1, rank_position=1, sentiment_score="positive",
+            platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        db.add(BrandMention(subtask_id=sub.subtask_id, task_id=sub.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="B", is_self=False,
+            mention_count=1, rank_position=2, sentiment_score="neutral",
+            platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    quad = r.json()["diff_quadrant"]
+    assert len(quad) == 1
+    assert quad[0]["platform"] == "doubao"
+    assert quad[0]["self_mention_rate"] == 1.0
+    assert quad[0]["competitor_avg_mention_rate"] == 1.0
+
+
+async def test_competitor_analysis_no_concern_tags(client, h):
+    """concern_tags 已从 schema 删,响应里不能有这个字段。"""
+    from app.models import Customer, Project
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-task9b", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    assert r.status_code == 200
+    assert "concern_tags" not in r.json()

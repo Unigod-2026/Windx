@@ -19,6 +19,7 @@ from app.schemas.project import (
     CompetitorTrendBlock,
     CompetitorTrendSeries,
     ModelDiff,
+    QuadrantPoint,
 )
 
 
@@ -137,6 +138,18 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
         ))
     out.sort(key=lambda m: m.platform)
     return out
+
+
+def _compute_diff_quadrant(diff_model):
+    """四象限 — 从 per-platform 抽 mention_rate 点。每个 platform 一个点。"""
+    return [
+        QuadrantPoint(
+            platform=m.platform,
+            self_mention_rate=m.self_mention_rate,
+            competitor_avg_mention_rate=m.competitor_mention_rate,
+        )
+        for m in diff_model
+    ]
 
 
 def compute_competitor_analysis(
@@ -484,6 +497,8 @@ def compute_competitor_analysis(
 
     diff_model = _compute_diff_model(db, project_id, win_start_dt, win_end_dt)
 
+    diff_quadrant = _compute_diff_quadrant(diff_model)
+
     return CompetitorAnalysisOut(
         project_id=project_id,
         start=win_start,
@@ -495,7 +510,7 @@ def compute_competitor_analysis(
         trend=trend_block,
         diff_core=diff_core,
         diff_model=diff_model,
-        diff_quadrant=[],
+        diff_quadrant=diff_quadrant,
         previous_window_start=prev_window_start_d if prev_brand_rows else None,
         previous_window_end=prev_window_end_d if prev_brand_rows else None,
     )
