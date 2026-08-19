@@ -37,7 +37,10 @@ from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.services.scheduler import run_project_async
 from app.services.scheduler_runtime import reload_jobs
-from app.services.competitor_analysis import compute_competitor_analysis
+from app.services.competitor_analysis import (
+    _resolve_competitor_window,
+    compute_competitor_analysis,
+)
 from app.schemas.project import (
     BrandMentionListOut,
     BrandMentionOut,
