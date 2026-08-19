@@ -455,6 +455,51 @@ async def test_diff_quadrant_per_platform_point(client, h):
     assert quad[0]["competitor_avg_mention_rate"] == 1.0
 
 
+async def test_diff_model_rates_never_exceed_one(client, h):
+    """Regression: 一行上有多家竞品同时被提到时,competitor_*_rate 不能再 > 1。
+
+    之前的实现用 (platform, is_self) 子集的 distinct subtask 数做分母 ——
+    竞品侧分母远小于真实 subtask 数,把多家 brand 的 matched 直接相加后
+    就会超过 1。修复:分母统一为该 platform 的 distinct subtask 数,竞品侧
+    是各 brand 速率的算术平均。
+    """
+    from app.models import Customer, Project
+    from app.models.enums import ExtractStatus
+    from app.models.project import BrandMention
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-regress", brand="自身A")
+        db.add(proj); db.flush()
+        pid = proj.id
+
+        # 1 个 doubao subtask,自身 + 3 家竞品同时都被提到 —— 旧实现会把
+        # 3 家竞品的 matched(3)/分母(1)算成 3.0。
+        sub = _make_subtask(db, pid, cust.id, platform="doubao")
+        db.add(BrandMention(subtask_id=sub.subtask_id, task_id=sub.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="自身A", is_self=True,
+            mention_count=1, rank_position=1, sentiment_score="positive",
+            platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        for b in ("竞品B", "竞品C", "竞品D"):
+            db.add(BrandMention(subtask_id=sub.subtask_id, task_id=sub.task_id,
+                project_id=pid, customer_id=cust.id, brand_canonical=b, is_self=False,
+                mention_count=1, rank_position=2, sentiment_score="neutral",
+                platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    body = r.json()
+    diff_model = {m["platform"]: m for m in body["diff_model"]}
+    doubao = diff_model["doubao"]
+    # 自身 side:1 brand mentioned in 1/1 subtask → 1.0
+    assert doubao["self_mention_rate"] == 1.0
+    # 竞品 side:3 家 brand 各 1/1,平均 1.0 —— 关键:不能 > 1
+    assert doubao["competitor_mention_rate"] == 1.0
+    for f in ("self_mention_rate", "self_top1_rate", "self_top3_rate",
+              "competitor_mention_rate", "competitor_top1_rate", "competitor_top3_rate"):
+        assert 0.0 <= doubao[f] <= 1.0, f"{f} out of [0,1]: {doubao[f]}"
+
+
 async def test_competitor_analysis_no_concern_tags(client, h):
     """concern_tags 已从 schema 删,响应里不能有这个字段。"""
     from app.models import Customer, Project

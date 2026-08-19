@@ -85,20 +85,20 @@ def _compute_diff_core(
 def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
     """模型维度提及率 — 每个 platform 一行,自身 vs 竞品均值。spec §2.4。
 
-    以 (platform, is_self) 为聚合粒度,按该 platform 在窗口内的
-    distinct subtask 数作为分母,分别计算 mention_rate / top1_rate / top3_rate。
-    竞品侧是同一 platform 下所有竞品 brand 的算术平均。
+    分母统一用「该 platform 在窗口内的 distinct subtask 数」,与 is_self 无关 —
+    同行的两条 bar 必须共用一个分母才能横向比较。竞品侧是「各竞品 brand 在
+    该 platform 上的 rate」的算术平均,所以即一行有多家竞品被同时提到,均值
+    也不会超过 1。
+
+    之前的实现把 (platform, is_self) 子集的 distinct subtask 数作为分母:
+    竞品侧分母 = 该 platform 下「至少被任一竞品提到」的 subtask 数,远小于
+    真实 subtask 数;再把多家竞品的 matched 直接相加,rate 就被放大到 > 1。
     """
-    rows = db.execute(
+    # Per-platform total subtask count — common denominator for both sides.
+    total_rows = db.execute(
         select(
             BrandMention.platform,
-            BrandMention.is_self,
             func.count(func.distinct(BrandMention.subtask_id)).label("total"),
-            func.sum(case((and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
-            func.sum(case((and_(BrandMention.mention_count > 0,
-                                  BrandMention.rank_position.is_not(None),
-                                  BrandMention.rank_position <= 3), 1), else_=0)).label("top3"),
-            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
         )
         .where(
             BrandMention.project_id == project_id,
@@ -106,37 +106,62 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
             BrandMention.created_at <= win_end_dt,
             BrandMention.platform.is_not(None),
         )
-        .group_by(BrandMention.platform, BrandMention.is_self)
+        .group_by(BrandMention.platform)
+    ).all()
+    total_by_plat: dict[str, int] = {r.platform: int(r.total or 0) for r in total_rows}
+
+    # Per-(platform, brand_canonical) rollup. Self side has at most one brand
+    # per platform; comp side may have many — we average their per-brand rates.
+    brand_rows = db.execute(
+        select(
+            BrandMention.platform,
+            BrandMention.brand_canonical,
+            BrandMention.is_self,
+            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+            func.sum(case((and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
+            func.sum(case((and_(BrandMention.mention_count > 0,
+                                  BrandMention.rank_position.is_not(None),
+                                  BrandMention.rank_position <= 3), 1), else_=0)).label("top3"),
+        )
+        .where(
+            BrandMention.project_id == project_id,
+            BrandMention.created_at >= win_start_dt,
+            BrandMention.created_at <= win_end_dt,
+            BrandMention.platform.is_not(None),
+        )
+        .group_by(BrandMention.platform, BrandMention.brand_canonical, BrandMention.is_self)
     ).all()
 
-    by_plat: dict[str, dict[str, dict[str, float]]] = {}
-    for r in rows:
+    by_plat: dict[str, dict[str, list[dict[str, float]]]] = {}
+    for r in brand_rows:
         plat = r.platform
-        total = int(r.total or 0)
-        denom = total if total else 1
-        bucket = by_plat.setdefault(plat, {"self": {}, "comp": {}})
+        denom = total_by_plat.get(plat) or 1
+        by_plat.setdefault(plat, {"self": [], "comp": []})
         side = "self" if r.is_self else "comp"
-        bucket[side] = {
+        by_plat[plat][side].append({
             "mention_rate": int(r.matched or 0) / denom,
             "top1_rate": int(r.top1 or 0) / denom,
             "top3_rate": int(r.top3 or 0) / denom,
-        }
+        })
+
+    def _avg(rows: list[dict[str, float]], key: str) -> float:
+        if not rows:
+            return 0.0
+        n = len(rows)
+        return sum(r[key] for r in rows) / n
 
     out: list[ModelDiff] = []
-    empty_side = {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0}
-    for plat, sides in by_plat.items():
-        s = sides.get("self") or empty_side
-        c = sides.get("comp") or empty_side
+    for plat in sorted(by_plat.keys()):
+        sides = by_plat[plat]
         out.append(ModelDiff(
             platform=plat,
-            self_mention_rate=s["mention_rate"],
-            self_top1_rate=s["top1_rate"],
-            self_top3_rate=s["top3_rate"],
-            competitor_mention_rate=c["mention_rate"],
-            competitor_top1_rate=c["top1_rate"],
-            competitor_top3_rate=c["top3_rate"],
+            self_mention_rate=_avg(sides["self"], "mention_rate"),
+            self_top1_rate=_avg(sides["self"], "top1_rate"),
+            self_top3_rate=_avg(sides["self"], "top3_rate"),
+            competitor_mention_rate=_avg(sides["comp"], "mention_rate"),
+            competitor_top1_rate=_avg(sides["comp"], "top1_rate"),
+            competitor_top3_rate=_avg(sides["comp"], "top3_rate"),
         ))
-    out.sort(key=lambda m: m.platform)
     return out
 
 

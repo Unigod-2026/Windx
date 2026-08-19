@@ -51,9 +51,11 @@ export default function DiffPane({ data }: { data: CompetitorAnalysisOut }) {
             : (
               <BarChartH
                 labels={diff_model.map((m) => m.platform)}
+                // 竞品均值先画,自身后画(SVG 后绘制 = z 序在上),避免自身条较短时
+                // 被竞品均值的橙色条压在底下看不到。
                 series={[
-                  { name: "自身", color: "#1a55e8", data: diff_model.map((m) => m.self_mention_rate * 100) },
                   { name: "竞品均值", color: "#ff6b1a", data: diff_model.map((m) => m.competitor_mention_rate * 100) },
+                  { name: "自身", color: "#1a55e8", data: diff_model.map((m) => m.self_mention_rate * 100) },
                 ]}
               />
             )}
