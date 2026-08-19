@@ -186,31 +186,38 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
           height: min(420px, calc(100vh - 340px));
           min-height: 280px;
         }
-        .cna-root .bar-chart,
-        .cna-root .quadrant-chart {
+        .cna-root .bar-chart {
           width: 100%;
           height: 260px;
           display: block;
         }
+        .cna-root .quadrant-chart {
+          width: 100%;
+          height: 480px;
+          display: block;
+        }
         .cna-root .bar-chart .grid-line { stroke: var(--border-light, #f0f0f0); }
-        .cna-root .bar-chart .axis-label,
-        .cna-root .quadrant-chart .axis-label {
+        .cna-root .bar-chart .axis-label {
           fill: var(--text-quaternary);
           font-size: 10px;
         }
-        .cna-root .quadrant-chart .axis-line { stroke: var(--text-tertiary); stroke-width: 1; }
+        .cna-root .quadrant-chart .axis-label {
+          fill: var(--text-quaternary);
+          font-size: 14px;
+        }
+        .cna-root .quadrant-chart .axis-line { stroke: var(--text-tertiary); stroke-width: 1.5; }
         .cna-root .quadrant-chart .ref-line {
           stroke: var(--text-quaternary);
-          stroke-dasharray: 4 4;
-          stroke-width: 1;
+          stroke-dasharray: 6 6;
+          stroke-width: 1.5;
         }
         .cna-root .quadrant-chart .quadrant-label {
           fill: var(--text-tertiary);
-          font-size: 11px;
+          font-size: 16px;
         }
         .cna-root .quadrant-chart .point-label {
           fill: var(--text-secondary);
-          font-size: 11px;
+          font-size: 14px;
         }
       `}</style>
     </div>
