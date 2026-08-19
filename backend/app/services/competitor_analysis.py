@@ -205,7 +205,74 @@ def compute_competitor_analysis(
         )
     ) or 0
 
+    # ------------------------------------------------------------
+    # 1b. Previous-window rollup for the 4 deltas.
+    # ------------------------------------------------------------
     days_n = (win_end - win_start).days + 1
+    prev_end_dt = win_start_dt - timedelta(seconds=1)
+    prev_start_dt = prev_end_dt - timedelta(days=days_n - 1)
+    prev_brand_rows = db.execute(
+        select(
+            BrandMention.brand_canonical,
+            BrandMention.is_self,
+            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+            func.avg(
+                case(
+                    (
+                        BrandMention.mention_count > 0,
+                        case(
+                            (BrandMention.sentiment_score == "positive", 1.0),
+                            (BrandMention.sentiment_score == "neutral", 0.5),
+                            (BrandMention.sentiment_score == "negative", 0.0),
+                            else_=None,
+                        ),
+                    ),
+                    else_=None,
+                )
+            ).label("avg_sentiment"),
+            func.sum(
+                case(
+                    (and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1),
+                    else_=0,
+                )
+            ).label("top1_hits"),
+            func.sum(
+                case(
+                    (and_(BrandMention.mention_count > 0, BrandMention.rank_position.is_not(None),
+                          BrandMention.rank_position <= 3), 1),
+                    else_=0,
+                )
+            ).label("top3_hits"),
+        )
+        .where(
+            BrandMention.project_id == project_id,
+            BrandMention.created_at >= prev_start_dt,
+            BrandMention.created_at <= prev_end_dt,
+        )
+        .group_by(BrandMention.brand_canonical, BrandMention.is_self)
+    ).all()
+
+    prev_total_subtasks = db.scalar(
+        select(func.count(func.distinct(BrandMention.subtask_id))).where(
+            BrandMention.project_id == project_id,
+            BrandMention.created_at >= prev_start_dt,
+            BrandMention.created_at <= prev_end_dt,
+        )
+    ) or 0
+
+    prev_window_start_d: date = prev_start_dt.date()
+    prev_window_end_d: date = prev_end_dt.date()
+
+    prev_by_brand: dict[str, dict[str, float]] = {}
+    for r in prev_brand_rows:
+        matched = int(r.matched or 0)
+        prev_by_brand[r.brand_canonical] = {
+            "mention_rate": matched / prev_total_subtasks if prev_total_subtasks else 0.0,
+            "top1_rate": int(r.top1_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
+            "top3_rate": int(r.top3_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
+            "avg_sentiment": float(r.avg_sentiment) if r.avg_sentiment is not None else None,
+        }
+
     daily_by_brand: dict[str, dict[date, int]] = {}
     daily_rows = db.execute(
         select(
@@ -248,6 +315,24 @@ def compute_competitor_analysis(
                 spark.append(0)
             else:
                 spark.append(daily_by_brand.get(brand, {}).get(d, 0))
+        prev = prev_by_brand.get(brand, {})
+        mention_rate_delta = (
+            (matched / total_subtasks) - prev.get("mention_rate")
+            if prev and total_subtasks else None
+        )
+        top1_rate_delta = (
+            (top1 / total_subtasks) - prev.get("top1_rate")
+            if prev and total_subtasks else None
+        )
+        top3_rate_delta = (
+            (top3 / total_subtasks) - prev.get("top3_rate")
+            if prev and total_subtasks else None
+        )
+        sentiment_delta = (
+            avg_sent - prev.get("avg_sentiment")
+            if prev and avg_sent is not None and prev.get("avg_sentiment") is not None
+            else None
+        )
         return CompetitorKpi(
             brand_canonical=brand,
             name=display_name,
@@ -264,10 +349,10 @@ def compute_competitor_analysis(
             sentiment_positive=sent_pos / sent_denom,
             sentiment_neutral=sent_neu / sent_denom,
             sentiment_negative=sent_neg / sent_denom,
-            mention_rate_delta=None,  # Task 6 填
-            top1_rate_delta=None,
-            top3_rate_delta=None,
-            sentiment_delta=None,
+            mention_rate_delta=mention_rate_delta,
+            top1_rate_delta=top1_rate_delta,
+            top3_rate_delta=top3_rate_delta,
+            sentiment_delta=sentiment_delta,
         )
 
     self_kpi: CompetitorKpi | None = None
@@ -319,6 +404,6 @@ def compute_competitor_analysis(
         diff_core={"labels": [], "self": [], "competitor_avg": []},
         diff_model=[],
         diff_quadrant=[],
-        previous_window_start=None,
-        previous_window_end=None,
+        previous_window_start=prev_window_start_d if prev_brand_rows else None,
+        previous_window_end=prev_window_end_d if prev_brand_rows else None,
     )

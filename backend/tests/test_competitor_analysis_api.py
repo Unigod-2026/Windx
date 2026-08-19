@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -173,3 +173,87 @@ async def test_kpi_top1_and_sentiment_computed(client, h):
     comp = next(c for c in body["competitors"] if c["brand_canonical"] == "竞品B")
     assert comp["top1_rate"] == 0.0  # rank=2,不是 Top1
     assert comp["sentiment_negative"] == 1.0
+
+
+# --------------------------------------------------------------------------
+# Helper + real test for 4 deltas comparing current vs previous window (Task 6)
+# --------------------------------------------------------------------------
+
+
+def _make_subtask_at(db, project_id, customer_id, day, platform="doubao"):
+    """Seed a task+subtask pair at a specific calendar day. Caller should also
+    backdate the BrandMention rows that reference this subtask (BrandMention
+    has its own server-default created_at, so without backdating the
+    BrandMention stays in the current window).
+    """
+    from app.models.task import Subtask as TSubtask, Task as TTask
+    task = TTask(
+        project_id=project_id, customer_id=customer_id,
+        task_id=f"task-{platform}-{day}", status="success",
+    )
+    db.add(task); db.flush()
+    sub = TSubtask(
+        task_id=task.task_id, subtask_id=f"sub-{platform}-{day}",
+        platform=platform, status="success",
+    )
+    db.add(sub); db.flush()
+    sub.created_at = datetime.combine(day, time.min)
+    return sub
+
+
+def _brandmention_at(db, sub, project_id, customer_id, brand, is_self, day,
+                     mention_count, rank, sentiment, extract_status):
+    """BrandMention with explicit created_at so window placement is deterministic."""
+    from app.models.project import BrandMention as BM
+    bm = BM(
+        subtask_id=sub.subtask_id, task_id=sub.task_id,
+        project_id=project_id, customer_id=customer_id,
+        brand_canonical=brand, is_self=is_self,
+        mention_count=mention_count, rank_position=rank,
+        sentiment_score=sentiment, extract_status=extract_status,
+    )
+    bm.created_at = datetime.combine(day, time.min)
+    db.add(bm)
+    return bm
+
+
+async def test_kpi_deltas_compare_previous_window(client, h):
+    """Seeds current window with mention_rate=1.0, prev window with 0.0 → delta=+1.0"""
+    from app.models import Customer, Project
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-task6", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+
+        today = now_local().date()
+        # Current window: today (1 subtask mentioned)
+        cur_sub = _make_subtask_at(db, pid, cust.id, today, platform="doubao")
+        _brandmention_at(db, cur_sub, pid, cust.id, "A", True, today,
+                         mention_count=1, rank=1, sentiment="positive",
+                         extract_status=ExtractStatus.SUCCESS)
+        # Prev window: 15 days ago (1 subtask, NOT mentioned). Must land in
+        # prev window = [today-29d, today-15d] for days=15. Note: a naive
+        # "yesterday" seed would actually be in the CURRENT window (15d
+        # window spans both today and yesterday), so prev_by_brand would
+        # be empty and the deltas would all be None.
+        prev_day = today - timedelta(days=15)
+        prev_sub = _make_subtask_at(db, pid, cust.id, prev_day, platform="doubao")
+        _brandmention_at(db, prev_sub, pid, cust.id, "A", True, prev_day,
+                         mention_count=0, rank=None, sentiment=None,
+                         extract_status=ExtractStatus.SKIPPED)
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    self_kpi = body["self_brand"]
+    # current mention_rate=1.0, prev=0.0 → delta=1.0
+    assert self_kpi["mention_rate_delta"] == 1.0
+    assert self_kpi["top1_rate_delta"] == 1.0
+    assert self_kpi["top3_rate_delta"] == 1.0
+    # prev brand was SKIPPED (no sentiment) → sentiment_delta is None
+    assert self_kpi["sentiment_delta"] is None
+    # previous_window_* should be filled because prev_brand_rows is non-empty
+    assert body["previous_window_start"] is not None
+    assert body["previous_window_end"] is not None
