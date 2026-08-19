@@ -30,3 +30,32 @@ backend/data/
 # Local DB files (sqlite dev db)
 *.db
 *.sqlite
+
+# ---------------------------------------------------------------------------
+# Production deployment exclusions
+# ---------------------------------------------------------------------------
+# 本节下的内容是开发期产物,不带去服务器:
+#   - 内部规划 / spec / 参考文档
+#   - Claude Code session 元数据
+#   - 一次性测试脚本 / mock 文件
+#   - 后端测试套件(服务器不跑 pytest)
+# 部署时若用 `git archive` / `rsync`,配合这些 pattern 即可。
+
+# Dev-only docs
+/CLAUDE.md
+/api调用prompt.md
+/需求.md
+/test.md
+/docs/
+
+# Claude Code session state
+/.claude/
+
+# Frontend probe / verification scripts (committed or not)
+/probe.mjs
+/test_modal.mjs
+/verify-question-tab.mjs
+/frontend/test_question_page_perf.mjs
+
+# Backend test suite
+/backend/tests/
