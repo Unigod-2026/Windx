@@ -12,7 +12,7 @@ swallowed by the int path converter.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -51,7 +51,6 @@ from app.schemas.project import (
     CompetitorOut,
     CompetitorTrendBlock,
     CompetitorTrendSeries,
-    ConcernTag,
     PromptAnswerListOut,
     PromptAnswerOut,
     PromptAnswerDetailOut,
@@ -2138,12 +2137,6 @@ def competitor_analysis(
     - ``trend`` — daily mention counts per brand for the whole window;
       the frontend draws one line per brand with ``color`` so the
       legend matches the line.
-    - ``concern_tags`` — aggregated ``concern_hits_json`` tokens
-      (which the LLM extraction writes as "the project's keywords
-      that co-occurred with this brand in the AI's reply"). Rendered
-      as the 差异化标签云 — until a dedicated NLP keyword-extraction
-      step lands, this is the best structured signal for "what
-      attributes does the AI associate with this brand?".
     """
     win_start, win_end = _resolve_competitor_window(days, start, end)
     win_start_dt = datetime.combine(win_start, time.min)
@@ -2371,57 +2364,6 @@ def competitor_analysis(
 
     trend_block = CompetitorTrendBlock(labels=labels, series=series)
 
-    # ------------------------------------------------------------
-    # 3. Concern tag cloud — flatten concern_hits_json from
-    #    non-self rows. Each occurrence counts once per (subtask,
-    #    brand) row, so a brand mentioned 5 times with the same
-    #    keyword contributes 5 to that keyword's weight.
-    # ------------------------------------------------------------
-    tag_counter: Counter[str] = Counter()
-    tag_rows = db.execute(
-        select(
-            BrandMention.concern_hits_json,
-            BrandMention.sentiment_score,
-        )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.is_self.is_(False),
-            BrandMention.mention_count > 0,
-            BrandMention.concern_hits_json.is_not(None),
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-        )
-    ).all()
-    for hits, _sent in tag_rows:
-        if not hits:
-            continue
-        for h in hits:
-            if isinstance(h, str) and h.strip():
-                tag_counter[h.strip()] += 1
-    top_tags = tag_counter.most_common(20)
-    if not top_tags:
-        concern_tags: list[ConcernTag] = []
-    else:
-        # Distribute the four ui-sample tag classes by quartile of the
-        # weights so the cloud looks visually varied (top = brand, then
-        # positive, default, warn, negative).
-        max_w = top_tags[0][1]
-        concern_tags = []
-        n = len(top_tags)
-        for i, (text, w) in enumerate(top_tags):
-            ratio = i / max(n - 1, 1)
-            if ratio < 0.15:
-                cls = "brand"
-            elif ratio < 0.45:
-                cls = "positive"
-            elif ratio < 0.75:
-                cls = "default"
-            elif ratio < 0.92:
-                cls = "warn"
-            else:
-                cls = "negative"
-            concern_tags.append(ConcernTag(text=text, weight=w, cls=cls))
-
     return CompetitorAnalysisOut(
         project_id=project_id,
         start=win_start,
@@ -2431,7 +2373,6 @@ def competitor_analysis(
         self_brand=self_kpi,
         competitors=competitor_kpis,
         trend=trend_block,
-        concern_tags=concern_tags,
     )
 
 
