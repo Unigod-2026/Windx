@@ -741,6 +741,15 @@ class CompetitorKpi(BaseModel):
     # a given day, capped at the window length). The UI renders this as
     # a sparkline in the 竞品概览 table.
     spark: list[int]
+    # — 新增 — 详见 docs/superpowers/specs/2026-08-19-competitor-analysis-remove-advantages-matrix.md §1.1
+    top1_rate: float
+    sentiment_positive: float
+    sentiment_neutral: float
+    sentiment_negative: float
+    mention_rate_delta: float | None
+    top1_rate_delta: float | None
+    top3_rate_delta: float | None
+    sentiment_delta: float | None
 
 
 class CompetitorTrendSeries(BaseModel):
