@@ -10,6 +10,7 @@ import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
 import CompetitorsTab from "./CompetitorsTab";
 import PlaceholderTab from "./PlaceholderTab";
+import SourcePreferencesTab from "./SourcePreferencesTab";
 
 const VALID_TABS = [
   "overview",
@@ -112,12 +113,7 @@ export default function ProjectDetail() {
       case "competitor":
         return <CompetitorAnalysisTab projectId={projectId} />;
       case "source":
-        return (
-          <PlaceholderTab
-            title="信源偏好"
-            hint="每个大模型引用最多的信源类型 TOP3 + 信源异动"
-          />
-        );
+        return <SourcePreferencesTab projectId={projectId} />;
       case "citation":
         return <CitationAnalysisTab projectId={projectId} />;
       case "answer":
