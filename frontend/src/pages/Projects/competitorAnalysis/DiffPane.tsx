@@ -1,6 +1,7 @@
 import { Empty } from "antd";
 import type { CompetitorAnalysisOut } from "../../../api/projects";
 import BarChart from "./BarChart";
+import BarChartH from "./BarChartH";
 import QuadrantChart from "./QuadrantChart";
 
 export default function DiffPane({ data }: { data: CompetitorAnalysisOut }) {
@@ -48,13 +49,12 @@ export default function DiffPane({ data }: { data: CompetitorAnalysisOut }) {
           {diff_model.length === 0
             ? <Empty description="窗口内尚无模型维度数据" style={{ padding: 32 }} />
             : (
-              <BarChart
+              <BarChartH
                 labels={diff_model.map((m) => m.platform)}
                 series={[
                   { name: "自身", color: "#1a55e8", data: diff_model.map((m) => m.self_mention_rate * 100) },
                   { name: "竞品均值", color: "#ff6b1a", data: diff_model.map((m) => m.competitor_mention_rate * 100) },
                 ]}
-                unit="%"
               />
             )}
         </div>
