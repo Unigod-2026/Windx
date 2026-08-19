@@ -18,6 +18,7 @@ from app.schemas.project import (
     CompetitorKpi,
     CompetitorTrendBlock,
     CompetitorTrendSeries,
+    ModelDiff,
 )
 
 
@@ -79,6 +80,63 @@ def _compute_diff_core(
             sum(c.top3_rate for c in competitor_kpis) / n * 100,
         ],
     }
+
+
+def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
+    """模型维度提及率 — 每个 platform 一行,自身 vs 竞品均值。spec §2.4。
+
+    以 (platform, is_self) 为聚合粒度,按该 platform 在窗口内的
+    distinct subtask 数作为分母,分别计算 mention_rate / top1_rate / top3_rate。
+    竞品侧是同一 platform 下所有竞品 brand 的算术平均。
+    """
+    rows = db.execute(
+        select(
+            BrandMention.platform,
+            BrandMention.is_self,
+            func.count(func.distinct(BrandMention.subtask_id)).label("total"),
+            func.sum(case((and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
+            func.sum(case((and_(BrandMention.mention_count > 0,
+                                  BrandMention.rank_position.is_not(None),
+                                  BrandMention.rank_position <= 3), 1), else_=0)).label("top3"),
+            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+        )
+        .where(
+            BrandMention.project_id == project_id,
+            BrandMention.created_at >= win_start_dt,
+            BrandMention.created_at <= win_end_dt,
+            BrandMention.platform.is_not(None),
+        )
+        .group_by(BrandMention.platform, BrandMention.is_self)
+    ).all()
+
+    by_plat: dict[str, dict[str, dict[str, float]]] = {}
+    for r in rows:
+        plat = r.platform
+        total = int(r.total or 0)
+        denom = total if total else 1
+        bucket = by_plat.setdefault(plat, {"self": {}, "comp": {}})
+        side = "self" if r.is_self else "comp"
+        bucket[side] = {
+            "mention_rate": int(r.matched or 0) / denom,
+            "top1_rate": int(r.top1 or 0) / denom,
+            "top3_rate": int(r.top3 or 0) / denom,
+        }
+
+    out: list[ModelDiff] = []
+    for plat, sides in by_plat.items():
+        s = sides.get("self", {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0})
+        c = sides.get("comp", {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0})
+        out.append(ModelDiff(
+            platform=plat,
+            self_mention_rate=s["mention_rate"],
+            self_top1_rate=s["top1_rate"],
+            self_top3_rate=s["top3_rate"],
+            competitor_mention_rate=c["mention_rate"],
+            competitor_top1_rate=c["top1_rate"],
+            competitor_top3_rate=c["top3_rate"],
+        ))
+    out.sort(key=lambda m: m.platform)
+    return out
 
 
 def compute_competitor_analysis(
@@ -424,6 +482,8 @@ def compute_competitor_analysis(
 
     diff_core = _compute_diff_core(self_kpi, competitor_kpis)
 
+    diff_model = _compute_diff_model(db, project_id, win_start_dt, win_end_dt)
+
     return CompetitorAnalysisOut(
         project_id=project_id,
         start=win_start,
@@ -434,7 +494,7 @@ def compute_competitor_analysis(
         competitors=competitor_kpis,
         trend=trend_block,
         diff_core=diff_core,
-        diff_model=[],
+        diff_model=diff_model,
         diff_quadrant=[],
         previous_window_start=prev_window_start_d if prev_brand_rows else None,
         previous_window_end=prev_window_end_d if prev_brand_rows else None,

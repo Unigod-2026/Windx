@@ -296,3 +296,54 @@ async def test_diff_core_self_vs_competitor_avg(client, h):
     # 竞品均值:mention_rate=1.0 each (avg=1.0), top1=0.0 (rank=2 不算 Top1),
     # top3=1.0 (rank=2 仍算 Top3,定义是 rank<=3) → 100,0,100
     assert body["competitor_avg"] == [100.0, 0.0, 100.0]
+
+
+# --------------------------------------------------------------------------
+# diff_model — 每个 platform 一行,自身 vs 竞品均值 (Task 8)
+# --------------------------------------------------------------------------
+
+
+async def test_diff_model_per_platform_self_vs_competitor(client, h):
+    """每个 platform 一行,自身/竞品均值 in 提及率/Top1/Top3。"""
+    from app.models import Customer, Project
+    from app.models.enums import ExtractStatus
+    from app.models.project import BrandMention
+
+    with TestSessionLocal() as db:
+        cust = Customer(name="t", code="t"); db.add(cust); db.flush()
+        proj = Project(customer_id=cust.id, name="p", code="p-task8", brand="A"); db.add(proj); db.flush()
+        pid = proj.id
+
+        # doubao: 自身 rank=1 + 1 竞品 rank=2 (1 subtask)
+        sub1 = _make_subtask(db, pid, cust.id, platform="doubao")
+        db.add(BrandMention(subtask_id=sub1.subtask_id, task_id=sub1.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="A", is_self=True,
+            mention_count=1, rank_position=1, sentiment_score="positive",
+            platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        db.add(BrandMention(subtask_id=sub1.subtask_id, task_id=sub1.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="B", is_self=False,
+            mention_count=1, rank_position=2, sentiment_score="neutral",
+            platform="doubao", extract_status=ExtractStatus.SUCCESS))
+        # kimi: 自身 未提及 + 1 竞品 rank=1
+        sub2 = _make_subtask(db, pid, cust.id, platform="kimi")
+        db.add(BrandMention(subtask_id=sub2.subtask_id, task_id=sub2.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="A", is_self=True,
+            mention_count=0, platform="kimi", extract_status=ExtractStatus.SKIPPED))
+        db.add(BrandMention(subtask_id=sub2.subtask_id, task_id=sub2.task_id,
+            project_id=pid, customer_id=cust.id, brand_canonical="B", is_self=False,
+            mention_count=1, rank_position=1, sentiment_score="positive",
+            platform="kimi", extract_status=ExtractStatus.SUCCESS))
+        db.commit()
+
+    r = await client.get(f"/api/projects/{pid}/competitor-analysis?days=15", headers=h)
+    diff_model = {m["platform"]: m for m in r.json()["diff_model"]}
+    assert "doubao" in diff_model
+    assert "kimi" in diff_model
+    # doubao: self mention_rate=1.0, top1=1.0, top3=1.0; comp avg mention=1.0, top1=0.0, top3=0.0
+    assert diff_model["doubao"]["self_mention_rate"] == 1.0
+    assert diff_model["doubao"]["self_top1_rate"] == 1.0
+    assert diff_model["doubao"]["competitor_top1_rate"] == 0.0
+    # kimi: self mention_rate=0.0, comp avg mention=1.0, top1=1.0
+    assert diff_model["kimi"]["self_mention_rate"] == 0.0
+    assert diff_model["kimi"]["competitor_mention_rate"] == 1.0
+    assert diff_model["kimi"]["competitor_top1_rate"] == 1.0
