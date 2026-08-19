@@ -93,3 +93,20 @@ def test_competitor_kpi_has_new_fields():
                  "sentiment_negative", "mention_rate_delta", "top1_rate_delta",
                  "top3_rate_delta", "sentiment_delta"):
         assert name in fields, f"missing field {name}"
+
+
+def test_competitor_analysis_out_has_new_fields():
+    from app.schemas.project import CompetitorAnalysisOut, ModelDiff, QuadrantPoint
+    fields = CompetitorAnalysisOut.model_fields
+    for name in ("diff_core", "diff_model", "diff_quadrant",
+                 "previous_window_start", "previous_window_end"):
+        assert name in fields, f"missing field {name}"
+    assert "concern_tags" not in fields, "concern_tags should be removed"
+    # Verify the new types are importable
+    assert ModelDiff.model_fields.keys() >= {
+        "platform", "self_mention_rate", "self_top1_rate", "self_top3_rate",
+        "competitor_mention_rate", "competitor_top1_rate", "competitor_top3_rate"
+    }
+    assert QuadrantPoint.model_fields.keys() >= {
+        "platform", "self_mention_rate", "competitor_avg_mention_rate"
+    }

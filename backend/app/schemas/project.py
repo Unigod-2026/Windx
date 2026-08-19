@@ -769,14 +769,20 @@ class CompetitorTrendBlock(BaseModel):
     series: list[CompetitorTrendSeries]
 
 
-class ConcernTag(BaseModel):
-    """One tag in the 差异化标签云. ``cls`` mirrors the ui-sample css:
-    "brand" / "positive" / "negative" / "warn" / "default". The
-    frontend maps each ``cls`` to a color from ``.tag-cloud .tag.*``."""
+class QuadrantPoint(BaseModel):
+    platform: str
+    self_mention_rate: float
+    competitor_avg_mention_rate: float
 
-    text: str
-    weight: int
-    cls: str
+
+class ModelDiff(BaseModel):
+    platform: str
+    self_mention_rate: float
+    self_top1_rate: float
+    self_top3_rate: float
+    competitor_mention_rate: float
+    competitor_top1_rate: float
+    competitor_top3_rate: float
 
 
 class CompetitorAnalysisOut(BaseModel):
@@ -796,13 +802,12 @@ class CompetitorAnalysisOut(BaseModel):
     # been picked up yet.
     competitors: list[CompetitorKpi]
     trend: CompetitorTrendBlock
-    # Aggregated ``concern_hits_json`` tokens (per the LLM extraction
-    # schema these are the project ``keywords`` that co-occurred with
-    # the brand in the AI's reply). The frontend renders this as the
-    # 差异化标签云 — until a dedicated NLP keyword-extraction step
-    # lands, the concern-hits JSON is the best structured signal we
-    # have for "what does the AI associate this brand with?".
-    concern_tags: list[ConcernTag]
+    # — 新增 — 详见 spec §1.3
+    diff_core: dict                                # {"labels":[...], "self":[...], "competitor_avg":[...]}
+    diff_model: list[ModelDiff]
+    diff_quadrant: list[QuadrantPoint]
+    previous_window_start: date | None
+    previous_window_end: date | None
 
 
 # --------------------------------------------------------------------------
