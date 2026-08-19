@@ -57,26 +57,6 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
           { key: "diff", label: "差异化分析", children: <DiffPane data={data} /> },
         ]}
       />
-    </div>
-  );
-}
-
-function AllPane({ data, rows }: { data: CompetitorAnalysisOut; rows: CompetitorKpi[] }) {
-  return (
-    <div className="cna-grid">
-      <OverviewTable rows={rows} />
-      <div className="panel panel-wide">
-        <div className="panel-header"><h3>提及趋势对比(自身 vs 竞品)</h3></div>
-        <div className="panel-body">
-          {data.trend.series.length === 0
-            ? <Empty description="窗口内尚无每日提及数据" style={{ padding: 32 }} />
-            : <TrendChart labels={data.trend.labels} series={data.trend.series} />}
-        </div>
-      </div>
-    </div>
-  );
-}
-
       <style>{`
         .cna-root {
           display: flex;
@@ -203,4 +183,22 @@ function AllPane({ data, rows }: { data: CompetitorAnalysisOut; rows: Competitor
           font-size: 11px;
         }
       `}</style>
+    </div>
+  );
+}
 
+function AllPane({ data, rows }: { data: CompetitorAnalysisOut; rows: CompetitorKpi[] }) {
+  return (
+    <div className="cna-grid">
+      <OverviewTable rows={rows} />
+      <div className="panel panel-wide">
+        <div className="panel-header"><h3>提及趋势对比(自身 vs 竞品)</h3></div>
+        <div className="panel-body">
+          {data.trend.series.length === 0
+            ? <Empty description="窗口内尚无每日提及数据" style={{ padding: 32 }} />
+            : <TrendChart labels={data.trend.labels} series={data.trend.series} />}
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -123,9 +123,10 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
         }
 
     out: list[ModelDiff] = []
+    empty_side = {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0}
     for plat, sides in by_plat.items():
-        s = sides.get("self", {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0})
-        c = sides.get("comp", {"mention_rate": 0.0, "top1_rate": 0.0, "top3_rate": 0.0})
+        s = sides.get("self") or empty_side
+        c = sides.get("comp") or empty_side
         out.append(ModelDiff(
             platform=plat,
             self_mention_rate=s["mention_rate"],
