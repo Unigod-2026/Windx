@@ -864,3 +864,63 @@ export const getCitationAnalysis = (
       { params },
     )
     .then((r) => r.data);
+
+export interface SourcePreferenceKpi {
+  total_references: number;
+  unique_urls: number;
+  cross_platform_urls: number;
+  avg_refs_per_subtask: number;
+  total_subtasks: number;
+}
+
+export interface SourceTypeSlice {
+  type: string;
+  count: number;
+}
+
+export interface SourcePlatformSlice {
+  platform: string;
+  total_refs: number;
+  unique_urls: number;
+}
+
+export interface SourceTrendDay {
+  date: string;
+  new_urls: number;
+  lost_urls: number;
+}
+
+export interface SourcePreferenceItem {
+  url: string;
+  site: string;
+  title: string | null;
+  type: string;
+  count: number;
+  platforms: string[];
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface SourcePreferenceOut {
+  project_id: number;
+  start: string;
+  end: string;
+  days: number;
+  kpi: SourcePreferenceKpi;
+  type_counts: SourceTypeSlice[];
+  platform_slices: SourcePlatformSlice[];
+  top_sources: SourcePreferenceItem[];
+  trend: SourceTrendDay[];
+}
+
+export function getSourcePreferences(
+  projectId: number,
+  days = 15,
+): Promise<SourcePreferenceOut> {
+  return client
+    .get<SourcePreferenceOut>(
+      `/projects/${projectId}/source-preferences`,
+      { params: { days } },
+    )
+    .then((r) => r.data);
+}
