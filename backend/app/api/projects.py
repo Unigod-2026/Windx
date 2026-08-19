@@ -37,6 +37,10 @@ from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.services.scheduler import run_project_async
 from app.services.scheduler_runtime import reload_jobs
+from app.services.competitor_analysis import (  # TODO(Task 4): drop these re-exports once the endpoint body moves into services/competitor_analysis.py
+    _COMPETITOR_LINE_COLORS,
+    _resolve_competitor_window,
+)
 from app.schemas.project import (
     BrandMentionListOut,
     BrandMentionOut,
@@ -2078,36 +2082,6 @@ def brand_mentions_summary(
 # Colors mirror ``frontend/src/pages/Projects/platforms.ts::PLATFORM_CATALOG``
 # but we hardcode just the slots we need (self + 5 competitor slots) so the
 # chart legend stays stable even when the project only has 2 platforms.
-_COMPETITOR_LINE_COLORS = [
-    "#1a55e8",  # self — brand blue
-    "#ff6b1a",  # 元宝
-    "#13c2c2",  # DeepSeek
-    "#52c41a",  # 通义
-    "#722ed1",  # Kimi
-    "#eb2f96",  # 文心
-]
-
-
-def _resolve_competitor_window(
-    days: int, start: date | None, end: date | None
-) -> tuple[date, date]:
-    """Same shape as :func:`_overview_window` but accepts a wider range
-    because the 竞品分析 tab doesn't need to compare against a baseline —
-    the chart just shows the window directly."""
-    if start is not None or end is not None:
-        if start is None or end is None:
-            raise HTTPException(400, "start and end must be provided together")
-        if end < start:
-            raise HTTPException(400, "end must not be earlier than start")
-        if (end - start).days + 1 > 90:
-            raise HTTPException(400, "range must not exceed 90 days")
-        return start, end
-    if days < 1 or days > 90:
-        raise HTTPException(400, "days must be between 1 and 90")
-    today = now_local().date()
-    return today - timedelta(days=days - 1), today
-
-
 @router.get(
     "/projects/{project_id}/competitor-analysis",
     response_model=CompetitorAnalysisOut,
