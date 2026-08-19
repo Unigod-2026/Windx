@@ -37,10 +37,7 @@ from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.services.scheduler import run_project_async
 from app.services.scheduler_runtime import reload_jobs
-from app.services.competitor_analysis import (  # TODO(Task 4): drop these re-exports once the endpoint body moves into services/competitor_analysis.py
-    _COMPETITOR_LINE_COLORS,
-    _resolve_competitor_window,
-)
+from app.services.competitor_analysis import compute_competitor_analysis
 from app.schemas.project import (
     BrandMentionListOut,
     BrandMentionOut,
@@ -50,11 +47,8 @@ from app.schemas.project import (
     CompetitorAnalysisOut,
     CompetitorBrandStat,
     CompetitorIn,
-    CompetitorKpi,
     CompetitorListOut,
     CompetitorOut,
-    CompetitorTrendBlock,
-    CompetitorTrendSeries,
     PromptAnswerListOut,
     PromptAnswerOut,
     PromptAnswerDetailOut,
@@ -2079,9 +2073,8 @@ def brand_mentions_summary(
 # --------------------------------------------------------------------------
 
 
-# Colors mirror ``frontend/src/pages/Projects/platforms.ts::PLATFORM_CATALOG``
-# but we hardcode just the slots we need (self + 5 competitor slots) so the
-# chart legend stays stable even when the project only has 2 platforms.
+# Thin shell — actual computation lives in
+# ``app.services.competitor_analysis.compute_competitor_analysis``.
 @router.get(
     "/projects/{project_id}/competitor-analysis",
     response_model=CompetitorAnalysisOut,
@@ -2094,259 +2087,15 @@ def competitor_analysis(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """Drives the 竞品分析 tab (data tab → 竞品分析).
-
-    Returns a single bundle the frontend renders as the 2×2 grid
-    (概览表 / 趋势对比 / 差异化标签云 / 竞争优势矩阵):
-
-    - ``total_subtasks`` — window-wide denominator for every
-      ``mention_rate``; same value for every brand so the bars are
-      apples-to-apples.
-    - ``self_brand`` — monitored brand's KPIs, or ``None`` when the
-      project hasn't picked a brand yet.
-    - ``competitors`` — every non-self brand that appeared at least
-      once in the window, sorted by ``mention_count`` DESC. The KPI
-      shape mirrors ``self_brand`` so the table and the chart can mix
-      them without special-casing.
-    - ``trend`` — daily mention counts per brand for the whole window;
-      the frontend draws one line per brand with ``color`` so the
-      legend matches the line.
-    """
-    win_start, win_end = _resolve_competitor_window(days, start, end)
-    win_start_dt = datetime.combine(win_start, time.min)
-    win_end_dt = datetime.combine(win_end, time.max)
-
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
-
-    # Resolve the brand → name/aliases lookup so the chart legend and
-    # the 概览 table show the human-readable display name rather than
-    # the canonical string. Self brand falls back to
-    # ``project.brand`` / ``project.aliases`` because that path is
-    # authoritative — there's no competitor row for it.
-    competitor_rows = db.scalars(
-        select(ProjectCompetitor).where(ProjectCompetitor.project_id == project_id)
-    ).all()
-    name_by_brand: dict[str, tuple[str, list[str] | None, bool]] = {}
-    for c in competitor_rows:
-        name_by_brand[c.name] = (c.name, c.aliases, False)
-    self_brand_name = project.brand
-    self_brand_aliases = project.aliases
-    if self_brand_name:
-        name_by_brand[self_brand_name] = (
-            self_brand_name,
-            self_brand_aliases,
-            True,
-        )
-
-    # ------------------------------------------------------------
-    # 1. Per-brand rollup (KPI rows for the 概览 table)
-    # ------------------------------------------------------------
-    # ``mention_count`` on BrandMention is 0/1 (regex pass), so the
-    # matched-subtask count is just rows where mention_count > 0.
-    # MySQL doesn't support PostgreSQL's FILTER clause, so we use
-    # SUM(CASE WHEN ...) which both engines accept.
-    brand_rows = db.execute(
-        select(
-            BrandMention.brand_canonical,
-            BrandMention.is_self,
-            func.sum(
-                case((BrandMention.mention_count > 0, 1), else_=0)
-            ).label("matched"),
-            func.count().label("rows_total"),
-            func.avg(
-                case(
-                    (
-                        BrandMention.mention_count > 0,
-                        case(
-                            (BrandMention.sentiment_score == "positive", 1.0),
-                            (BrandMention.sentiment_score == "neutral", 0.5),
-                            (BrandMention.sentiment_score == "negative", 0.0),
-                            else_=None,
-                        ),
-                    ),
-                    else_=None,
-                )
-            ).label("avg_sentiment"),
-            func.avg(
-                case(
-                    (
-                        and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.rank_position.is_not(None),
-                        ),
-                        BrandMention.rank_position,
-                    ),
-                    else_=None,
-                )
-            ).label("avg_rank"),
-            func.sum(
-                case(
-                    (
-                        and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.rank_position.is_not(None),
-                            BrandMention.rank_position <= 3,
-                        ),
-                        1,
-                    ),
-                    else_=0,
-                )
-            ).label("top3_hits"),
-            func.sum(
-                case(
-                    (
-                        and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.is_recommended.is_(True),
-                        ),
-                        1,
-                    ),
-                    else_=0,
-                )
-            ).label("rec_hits"),
-        )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-        )
-        .group_by(BrandMention.brand_canonical, BrandMention.is_self)
-    ).all()
-
-    # Window-wide denominator — total distinct subtasks seen in the
-    # window. We use COUNT(DISTINCT subtask_id) of the whole window
-    # (any brand) so every brand's mention_rate uses the same base.
-    total_subtasks = db.scalar(
-        select(func.count(func.distinct(BrandMention.subtask_id))).where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-        )
-    ) or 0
-
-    # Daily series for the trend chart. Build a 0-filled (date × brand)
-    # matrix so missing days render as 0 instead of a gap.
-    days_n = (win_end - win_start).days + 1
-    daily_by_brand: dict[str, dict[date, int]] = {}
-    daily_rows = db.execute(
-        select(
-            BrandMention.brand_canonical,
-            func.date(BrandMention.created_at).label("day"),
-            func.count(func.distinct(BrandMention.subtask_id)).label("c"),
-        )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.mention_count > 0,
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-        )
-        .group_by(BrandMention.brand_canonical, func.date(BrandMention.created_at))
-    ).all()
-    for r in daily_rows:
-        daily_by_brand.setdefault(r.brand_canonical, {})[r.day] = r.c
-
-    # 15-day sparkline (matches the fixed window). For shorter windows we
-    # zero-fill trailing days so the chip stays a constant width.
-    spark_len = min(15, days_n)
-    spark_start = win_end - timedelta(days=spark_len - 1)
-
-    def _kpi_for(brand: str, is_self: bool, r) -> CompetitorKpi:
-        matched = int(r.matched or 0)
-        top3 = int(r.top3_hits or 0)
-        rec = int(r.rec_hits or 0)
-        avg_sent = float(r.avg_sentiment) if r.avg_sentiment is not None else None
-        avg_rk = float(r.avg_rank) if r.avg_rank is not None else None
-        display_name, aliases, _is_self_lookup = name_by_brand.get(
-            brand, (brand, None, is_self)
-        )
-        # Spark = daily mention counts in the trailing 15 days, zero-filled.
-        spark: list[int] = []
-        for i in range(spark_len):
-            d = spark_start + timedelta(days=i)
-            if d < win_start:
-                spark.append(0)
-            else:
-                spark.append(daily_by_brand.get(brand, {}).get(d, 0))
-        return CompetitorKpi(
-            brand_canonical=brand,
-            name=display_name,
-            aliases=aliases,
-            is_self=is_self,
-            mention_count=matched,
-            mention_rate=matched / total_subtasks if total_subtasks else 0.0,
-            # Top3 / 推荐度 跟 mention_rate 共用同一个分母(total_subtasks),
-            # 这样三个率都是"所有 subtask 中发生 X 的比例",可以直接对比。
-            # 之前用 matched 当分母会让"被提到的 100% 都是 Top3"这种 case
-            # 退化成 100%,变成不携带信息的常数。/Q: 这个在 8/18 看截图确认的
-            top3_rate=top3 / total_subtasks if total_subtasks else 0.0,
-            recommend_rate=rec / total_subtasks if total_subtasks else 0.0,
-            avg_sentiment=avg_sent,
-            avg_rank=avg_rk,
-            spark=spark,
-        )
-
-    self_kpi: CompetitorKpi | None = None
-    competitor_kpis: list[CompetitorKpi] = []
-    for r in brand_rows:
-        kpi = _kpi_for(r.brand_canonical, bool(r.is_self), r)
-        if r.is_self:
-            self_kpi = kpi
-        else:
-            competitor_kpis.append(kpi)
-    competitor_kpis.sort(key=lambda k: k.mention_count, reverse=True)
-
-    # ------------------------------------------------------------
-    # 2. Trend chart series — one line per brand (self + top N
-    #    competitors) with a stable color so the legend reads well.
-    # ------------------------------------------------------------
-    labels: list[str] = []
-    for i in range(days_n):
-        d = win_start + timedelta(days=i)
-        labels.append(d.isoformat())
-
-    def _series_for(brand: str, name: str, is_self: bool, color: str) -> CompetitorTrendSeries:
-        per_day = daily_by_brand.get(brand, {})
-        data = [per_day.get(win_start + timedelta(days=i), 0) for i in range(days_n)]
-        return CompetitorTrendSeries(
-            brand_canonical=brand,
-            name=name,
-            is_self=is_self,
-            color=color,
-            data=data,
-        )
-
-    series: list[CompetitorTrendSeries] = []
-    if self_kpi is not None:
-        series.append(
-            _series_for(
-                self_kpi.brand_canonical,
-                self_kpi.name,
-                True,
-                _COMPETITOR_LINE_COLORS[0],
-            )
-        )
-    for i, kpi in enumerate(competitor_kpis[:5], start=1):
-        series.append(
-            _series_for(
-                kpi.brand_canonical,
-                kpi.name,
-                False,
-                _COMPETITOR_LINE_COLORS[i % len(_COMPETITOR_LINE_COLORS)],
-            )
-        )
-
-    trend_block = CompetitorTrendBlock(labels=labels, series=series)
-
-    return CompetitorAnalysisOut(
+    return compute_competitor_analysis(
+        db=db,
         project_id=project_id,
-        start=win_start,
-        end=win_end,
-        days=days_n,
-        total_subtasks=int(total_subtasks),
-        self_brand=self_kpi,
-        competitors=competitor_kpis,
-        trend=trend_block,
+        project=project,
+        days=days,
+        start=start,
+        end=end,
     )
 
 
