@@ -743,8 +743,19 @@ export interface CompetitorKpi {
   recommend_rate: number;
   avg_sentiment: number | null;
   avg_rank: number | null;
-  /** 7-day sparkline, zero-filled, ordered oldest → newest. */
+  /** 15-day sparkline, zero-filled, ordered oldest → newest. */
   spark: number[];
+  /** Top1 提及率(= rank_position=1 且 mention_count>0 的次数 / total_subtasks) */
+  top1_rate: number;
+  /** 情感三档占比(分母 = mention_count>0 的样本数) */
+  sentiment_positive: number;
+  sentiment_neutral: number;
+  sentiment_negative: number;
+  /** 环比 vs 同长度上一窗口;窗口太短或无数据为 null */
+  mention_rate_delta: number | null;
+  top1_rate_delta: number | null;
+  top3_rate_delta: number | null;
+  sentiment_delta: number | null;
 }
 
 export interface CompetitorTrendSeries {
@@ -760,17 +771,26 @@ export interface CompetitorTrendBlock {
   series: CompetitorTrendSeries[];
 }
 
-export type ConcernTagCls =
-  | "brand"
-  | "positive"
-  | "negative"
-  | "warn"
-  | "default";
+export interface QuadrantPoint {
+  platform: string;
+  self_mention_rate: number;
+  competitor_avg_mention_rate: number;
+}
 
-export interface ConcernTag {
-  text: string;
-  weight: number;
-  cls: ConcernTagCls;
+export interface ModelDiff {
+  platform: string;
+  self_mention_rate: number;
+  self_top1_rate: number;
+  self_top3_rate: number;
+  competitor_mention_rate: number;
+  competitor_top1_rate: number;
+  competitor_top3_rate: number;
+}
+
+export interface DiffCore {
+  labels: string[];
+  self: number[];
+  competitor_avg: number[];
 }
 
 export interface CompetitorAnalysisOut {
@@ -782,7 +802,11 @@ export interface CompetitorAnalysisOut {
   self_brand: CompetitorKpi | null;
   competitors: CompetitorKpi[];
   trend: CompetitorTrendBlock;
-  concern_tags: ConcernTag[];
+  diff_core: DiffCore;
+  diff_model: ModelDiff[];
+  diff_quadrant: QuadrantPoint[];
+  previous_window_start: string | null;
+  previous_window_end: string | null;
 }
 
 /** 竞品分析 — 近 15 天默认。``start``/``end`` (inclusive ``YYYY-MM-DD``) win over ``days``. */
