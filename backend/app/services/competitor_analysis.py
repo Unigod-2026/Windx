@@ -140,6 +140,54 @@ def compute_competitor_analysis(
                     else_=0,
                 )
             ).label("rec_hits"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.mention_count > 0,
+                            BrandMention.rank_position == 1,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("top1_hits"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.mention_count > 0,
+                            BrandMention.sentiment_score == "positive",
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("sent_pos"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.mention_count > 0,
+                            BrandMention.sentiment_score == "neutral",
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("sent_neu"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.mention_count > 0,
+                            BrandMention.sentiment_score == "negative",
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("sent_neg"),
         )
         .where(
             BrandMention.project_id == project_id,
@@ -183,6 +231,11 @@ def compute_competitor_analysis(
         matched = int(r.matched or 0)
         top3 = int(r.top3_hits or 0)
         rec = int(r.rec_hits or 0)
+        top1 = int(r.top1_hits or 0)
+        sent_pos = int(r.sent_pos or 0)
+        sent_neu = int(r.sent_neu or 0)
+        sent_neg = int(r.sent_neg or 0)
+        sent_denom = matched if matched else 1
         avg_sent = float(r.avg_sentiment) if r.avg_sentiment is not None else None
         avg_rk = float(r.avg_rank) if r.avg_rank is not None else None
         display_name, aliases, _is_self_lookup = name_by_brand.get(
@@ -207,11 +260,11 @@ def compute_competitor_analysis(
             avg_sentiment=avg_sent,
             avg_rank=avg_rk,
             spark=spark,
-            top1_rate=0.0,  # Task 5 填
-            sentiment_positive=0.0,
-            sentiment_neutral=0.0,
-            sentiment_negative=0.0,
-            mention_rate_delta=None,
+            top1_rate=top1 / total_subtasks if total_subtasks else 0.0,
+            sentiment_positive=sent_pos / sent_denom,
+            sentiment_neutral=sent_neu / sent_denom,
+            sentiment_negative=sent_neg / sent_denom,
+            mention_rate_delta=None,  # Task 6 填
             top1_rate_delta=None,
             top3_rate_delta=None,
             sentiment_delta=None,
