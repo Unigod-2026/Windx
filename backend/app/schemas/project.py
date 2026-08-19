@@ -991,3 +991,52 @@ class CitationAnalysisOut(BaseModel):
     # "其他" bucket without re-aggregating.
     type_counts: dict[str, int]
     items: list[CitationOut]
+
+
+class SourcePreferenceKpi(BaseModel):
+    """窗口聚合 KPI — 4 个 + 1 个分母。"""
+    total_references: int
+    unique_urls: int
+    cross_platform_urls: int
+    avg_refs_per_subtask: float
+    total_subtasks: int
+
+
+class SourceTypeSlice(BaseModel):
+    type: str
+    count: int
+
+
+class SourcePlatformSlice(BaseModel):
+    platform: str
+    total_refs: int
+    unique_urls: int
+
+
+class SourceTrendDay(BaseModel):
+    date: date
+    new_urls: int
+    lost_urls: int
+
+
+class SourcePreferenceItem(BaseModel):
+    url: str
+    site: str
+    title: str | None
+    type: str
+    count: int
+    platforms: list[str]
+    first_seen: datetime
+    last_seen: datetime
+
+
+class SourcePreferenceOut(BaseModel):
+    project_id: int
+    start: date
+    end: date
+    days: int
+    kpi: SourcePreferenceKpi
+    type_counts: list[SourceTypeSlice]
+    platform_slices: list[SourcePlatformSlice]
+    top_sources: list[SourcePreferenceItem]
+    trend: list[SourceTrendDay]
