@@ -2377,14 +2377,23 @@ class _OverviewWindow:
         lo = datetime.combine(start, time.min)
         hi = datetime.combine(end, time.max)
 
-        self.mentions = db.scalars(
-            select(BrandMention).where(
+        # Window + bucket key use ``Task.created_local_at`` (when the
+        # question was asked), not ``BrandMention.created_at`` (when the
+        # extraction pipeline wrote the row). ``Task`` is outer-joined so
+        # orphan mention rows (no live Task) drop out via the NULL
+        # range check rather than crashing on a NULL date.
+        rows = db.execute(
+            select(BrandMention, Task.created_local_at)
+            .outerjoin(Task, Task.task_id == BrandMention.task_id)
+            .where(
                 BrandMention.project_id == project_id,
                 BrandMention.is_self.is_(True),
-                BrandMention.created_at >= lo,
-                BrandMention.created_at <= hi,
+                Task.created_local_at >= lo,
+                Task.created_local_at <= hi,
             )
         ).all()
+        self.mentions = [m for m, _ in rows]
+        self.task_dates: dict[int, datetime] = {m.id: ts for m, ts in rows}
 
         # Subtasks carry no timestamp of their own, so they inherit the day
         # of the run that produced them. ``answer_content`` is measured in
@@ -2445,7 +2454,7 @@ class _OverviewWindow:
         """Window totals plus the per-day sparkline for each KPI card."""
         by_day_mentions: dict[date, list[BrandMention]] = {d: [] for d in self.days}
         for m in self.mentions:
-            bucket = by_day_mentions.get(m.created_at.date())
+            bucket = by_day_mentions.get(self.task_dates[m.id].date())
             if bucket is not None:
                 bucket.append(m)
 
@@ -2621,7 +2630,7 @@ def project_overview(
         rows = [m for m in cur.mentions if m.platform == platform]
         per_day = {d: 0 for d in cur.days}
         for m in rows:
-            day = m.created_at.date()
+            day = cur.task_dates[m.id].date()
             if day in per_day:
                 per_day[day] += m.mention_count
         trend.append(
