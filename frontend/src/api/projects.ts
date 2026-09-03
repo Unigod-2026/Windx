@@ -21,6 +21,11 @@ export interface ProjectOut {
   status: "active" | "disabled";
   description: string | null;
   schedule_enabled: boolean;
+  // v2 weekly schedule: monitor_freq is a UI hint ("w1"/"w2"/"wn"),
+  // monitor_days is the actual schedule ("1".."7"). Both come from
+  // backend ProjectOut and may be null/empty for projects without one.
+  monitor_freq: "w1" | "w2" | "wn" | null;
+  monitor_days: string[] | null;
   slots: SlotOut[];
   next_run_at: string | null;
   brand: string | null;
@@ -350,6 +355,20 @@ export const updateSchedule = (id: number, data: ScheduleUpdatePayload) =>
     schedule_enabled: data.schedule_enabled ?? false,
     slots: data.slots,
   }).then((r) => r.data);
+
+// v2 weekly schedule shape — separate from `updateSchedule` because the
+// slot-based `ScheduleUpdatePayload` is still used by BatchQuestionModal
+// and the two wire shapes are not interchangeable on the backend.
+export interface WeeklyScheduleUpdate {
+  schedule_enabled: boolean;
+  monitor_freq: "w1" | "w2" | "wn";
+  monitor_days: string[];
+}
+
+export const putWeeklySchedule = (id: number, data: WeeklyScheduleUpdate) =>
+  client
+    .put<ScheduleOut>(`/projects/${id}/schedule`, data)
+    .then((r) => r.data);
 
 export const toggleSchedule = (id: number, scheduleEnabled: boolean) =>
   client

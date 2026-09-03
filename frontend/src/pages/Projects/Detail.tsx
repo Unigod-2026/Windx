@@ -4,13 +4,12 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useSetCurrentProject } from "../../auth/ProjectContext";
 import { getProject, type ProjectDetailOut } from "../../api/projects";
 import OverviewTab from "./OverviewTab";
-import PromptsTab from "./PromptsTab";
 import QuestionTab from "./QuestionTab";
 import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
-import CompetitorsTab from "./CompetitorsTab";
 import PlaceholderTab from "./PlaceholderTab";
 import SourcePreferencesTab from "./SourcePreferencesTab";
+import EditProjectTab from "./EditProjectTab";
 
 const VALID_TABS = [
   "overview",
@@ -19,8 +18,7 @@ const VALID_TABS = [
   "source",
   "citation",
   "answer",
-  "prompts",
-  "competitors",
+  "edit",
   "settings",
 ] as const;
 type ProjectTabKey = (typeof VALID_TABS)[number];
@@ -100,10 +98,6 @@ export default function ProjectDetail() {
     switch (activeKey) {
       case "overview":
         return <OverviewTab projectId={projectId} />;
-      case "prompts":
-        return <PromptsTab projectId={projectId} />;
-      case "competitors":
-        return <CompetitorsTab projectId={projectId} />;
       case "question":
         return detail ? (
           <QuestionTab projectId={projectId} detail={detail} />
@@ -123,6 +117,8 @@ export default function ProjectDetail() {
             hint="按 (问题, 模型) 维度查看 AI 原始回答内容"
           />
         );
+      case "edit":
+        return <EditProjectTab projectId={projectId} />;
       case "settings":
         return (
           <PlaceholderTab
