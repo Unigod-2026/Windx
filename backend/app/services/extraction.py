@@ -75,7 +75,7 @@ from app.models.project import (
     ProjectKeyword,
 )
 from app.models.task import Subtask, Task
-from app.services.llm_client import LLMClient, LLMError
+from app.services.llm_client import LLMClient, LLMError, build_client_from_settings
 from app.services.llm_prompts import PROMPT_EXTRACT_BRAND_MENTION
 
 logger = logging.getLogger("app.extraction")
@@ -189,16 +189,28 @@ async def extract_brand_mentions_async(subtask_id: str) -> ExtractionResult:
         upserted = _regex_pass(db, ctx)
         if upserted == 0:
             logger.debug("extract %s: no brand hits, skipping LLM pass", subtask_id)
-            return ExtractionResult(subtask_id, 0, 0, 0)
+            # Still run correctness pass: it may need to short-circuit
+            # is_correct=True across zero rows, but the call is cheap.
+            judged, judged_skipped = _populate_correctness_pass(db, ctx)
+            db.commit()
+            return ExtractionResult(subtask_id, 0, judged, 0)
 
         succeeded, failed = await _llm_pass(db, ctx)
+        # Correctness pass runs after the heavy LLM pass so we don't
+        # double-bill on an LLM outage (the correctness call has its
+        # own 5s/10s retry). Failures here are isolated — they write
+        # ``is_correct=None`` but don't touch ``extract_status``, so a
+        # SUCCESS rank/sentiment row stays SUCCESS.
+        judged, judged_failed = _populate_correctness_pass(db, ctx)
         db.commit()
         logger.info(
-            "extract %s: upserted=%s succeeded=%s failed=%s",
+            "extract %s: upserted=%s succeeded=%s failed=%s judged=%s judged_failed=%s",
             subtask_id,
             upserted,
             succeeded,
             failed,
+            judged,
+            judged_failed,
         )
         return ExtractionResult(subtask_id, upserted, succeeded, failed)
     except Exception as exc:  # noqa: BLE001 - last-resort guard
@@ -246,6 +258,14 @@ class _ExtractionContext:
     # Active 核心词 list — passed verbatim to the LLM so it can match
     # concern_hits against the project's vocabulary.
     keywords: list[str]
+    # User-declared selling points from
+    # ``Project.semantic_json["selling_points"]`` (max 10 items, no
+    # empty strings). Empty list means the project didn't fill in
+    # wizard step 6 — the correctness pass short-circuits to
+    # ``is_correct=True`` and skips the LLM call entirely (per the
+    # user spec "核心卖点如果用户没填,那就是都正确,不需要通过
+    # 大模型判断").
+    selling_points: list[str]
 
 
 def _load_context(db: Session, subtask_id: str) -> _ExtractionContext | None:
@@ -286,6 +306,26 @@ def _load_context(db: Session, subtask_id: str) -> _ExtractionContext | None:
         ).all()
     ]
 
+    # Wizard step 6 selling points live in the project's semantic_json
+    # blob. Schema (owned by the frontend) is a free-form dict; we read
+    # ``selling_points`` defensively — missing key, wrong type, or empty
+    # list all collapse to ``[]`` so the correctness pass short-circuits.
+    semantic = project.semantic_json or {}
+    raw_points = semantic.get("selling_points") if isinstance(semantic, dict) else None
+    selling_points: list[str] = []
+    if isinstance(raw_points, list):
+        seen: set[str] = set()
+        for pt in raw_points:
+            if not isinstance(pt, str):
+                continue
+            cleaned = pt.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            selling_points.append(cleaned)
+            if len(selling_points) >= 10:
+                break
+
     return _ExtractionContext(
         subtask_id=subtask_id,
         task_id=task.task_id,
@@ -297,6 +337,7 @@ def _load_context(db: Session, subtask_id: str) -> _ExtractionContext | None:
         subtask_status=subtask.status,
         brand_targets=brand_targets,
         keywords=keywords,
+        selling_points=selling_points,
     )
 
 
@@ -475,6 +516,85 @@ def _failed_subtask_pass(db: Session, ctx: _ExtractionContext) -> int:
         upserted += 1
     db.flush()
     return upserted
+
+
+# --------------------------------------------------------------------------
+# Stage 1.5: brand-answer correctness pass
+# --------------------------------------------------------------------------
+
+
+def _populate_correctness_pass(
+    db: Session, ctx: _ExtractionContext
+) -> tuple[int, int]:
+    """Judge whether each ``is_self`` row's answer matches selling_points.
+
+    Three rules (per the user spec "仅 self 行,其他行没有意义"):
+    1. No ``selling_points`` → all rows get ``is_correct=True`` without
+       an LLM call. The user explicitly said "核心卖点如果用户没填,
+       那就是都正确,不需要通过大模型判断".
+    2. Project has selling_points → exactly ONE LLM call per subtask,
+       the verdict is broadcast to every ``is_self=true`` row for that
+       subtask. Competitor (``is_self=false``) rows keep
+       ``is_correct=None`` — the question doesn't apply to them.
+    3. LLM call unavailable / fails all retries → every self row gets
+       ``is_correct=None``. Heavy fields (rank / sentiment /
+       is_recommended) are untouched, so a transient outage doesn't
+       downgrade a SUCCESS row.
+
+    Returns ``(judged, judged_failed)``. ``judged`` counts the rows
+    that got a True / False verdict (both successful outcomes);
+    ``judged_failed`` counts the rows that ended up ``None`` because
+    the LLM call could not be made.
+    """
+    all_rows = db.scalars(
+        select(BrandMention).where(BrandMention.subtask_id == ctx.subtask_id)
+    ).all()
+    if not all_rows:
+        return 0, 0
+
+    # Short-circuit: no selling points → every row True, no LLM.
+    if not ctx.selling_points:
+        for row in all_rows:
+            row.is_correct = True
+        return len(all_rows), 0
+
+    self_rows = [r for r in all_rows if r.is_self]
+    if not self_rows:
+        # No self rows (e.g. a failed subtask on a project with no
+        # brand configured). Competitor rows stay NULL by definition.
+        return 0, 0
+
+    # All self rows for a single subtask share the same brand_canonical,
+    # so one verdict covers them all. The first self row is the canonical
+    # source of truth — pick it.
+    brand = self_rows[0].brand_canonical or ""
+    try:
+        client = build_client_from_settings()
+    except Exception as exc:  # noqa: BLE001 - LLM mis-config
+        logger.warning(
+            "correctness %s: client build failed: %s",
+            ctx.subtask_id, exc,
+        )
+        for row in self_rows:
+            row.is_correct = None
+        return 0, len(self_rows)
+
+    verdict, _reason = client.judge_brand_correctness_sync(
+        selling_points=ctx.selling_points,
+        brand=brand,
+        answer=ctx.answer_content or "",
+    )
+    if verdict is None:
+        # 3 attempts × (LLM call + 5s/10s sleep) exhausted without a
+        # parseable verdict. Per user spec: is_correct=None, do not
+        # retry / escalate further.
+        for row in self_rows:
+            row.is_correct = None
+        return 0, len(self_rows)
+
+    for row in self_rows:
+        row.is_correct = verdict
+    return len(self_rows), 0
 
 
 # --------------------------------------------------------------------------

@@ -50,20 +50,36 @@ html, body, #root {
   font-family: var(--font-family);
 }
 
-/* ---- Sidebar ---- */
+/* ---- Sidebar ----
+   参考 docs/风球GEO监控平台UI/index.html:白底、深色文字、蓝底白字选中态、
+   橙色左边条作 active 强调线。 */
 .app-sider {
-  background: linear-gradient(180deg, #0a2a78 0%, #001a4d 100%) !important;
-  border-right: 0 !important;
+  background: #fff !important;
+  border-right: 1px solid var(--border-light) !important;
   height: 100vh !important;
-  /* The scroll container below uses ``flex: 1; overflow-y: auto`` — that
-     only constrains the menu to the remaining viewport space when the
-     parent is a flex column. Without this, .app-sider-scroll expands to
-     its natural content height, the menu overflows 100vh, and the
-     entire body gets a vertical scrollbar. ``overflow: hidden`` plus
-     ``flex: 1`` on the child keeps the menu internally scrollable. */
+  /* The whole sider scrolls when the menu stack (plus logo / project
+     switcher / user chip) outgrows 100vh — without this the user info
+     at the bottom gets clipped when there are many nav groups. The
+     internal .app-sider-scroll keeps the menu groups scrollable too,
+     so this is the last-resort scroll container. */
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+}
+
+/* Visible scrollbar — the default can be near-invisible on macOS
+   overlay-scrollbar mode, which left users unable to discover the scroll. */
+.app-sider::-webkit-scrollbar {
+  width: 6px;
+}
+
+.app-sider::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+.app-sider::-webkit-scrollbar-thumb:hover {
+  background: var(--text-quaternary);
 }
 
 /* Right-side Layout (under the Sider) must also be locked to viewport so
@@ -79,35 +95,189 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--border-light);
 }
 
-.app-sider .logo-mark {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 16px;
-  letter-spacing: 0.5px;
+.app-sider .logo-svg {
+  flex-shrink: 0;
 }
 
 .app-sider .logo-text strong {
   display: block;
-  color: #fff;
+  color: var(--brand-blue);
   font-size: 18px;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   line-height: 1.2;
+  font-weight: 700;
 }
 
 .app-sider .logo-text span {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-tertiary);
   line-height: 1.2;
+}
+
+/* ---- Sidebar project selector (moved from header) ---- */
+.app-sider .sidebar-project {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.app-sider .project-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.app-sider .project-selector {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  background: var(--brand-blue-50);
+  border: 1px solid #d1e0fc;
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.app-sider .project-selector:hover {
+  border-color: var(--brand-blue);
+}
+
+.app-sider .project-selector .project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sider .project-selector .project-arrow {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ---- Sidebar: 新建项目主操作入口 ----
+   参照 index.html .sidebar-create / .btn-create-project:蓝底白字全宽按钮,
+   放在登录信息上方。 */
+.app-sider .sidebar-create {
+  padding: 10px 12px 12px;
+  flex-shrink: 0;
+  /* Pin to the bottom of the flex column: the user-info block sits
+     below this, so both end up stacked at the very bottom of the
+     sidebar regardless of how tall the menu groups above are. */
+  margin-top: auto;
+  border-top: 1px solid var(--border-light);
+}
+
+.app-sider .btn-create-project {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--brand-blue);
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(26, 85, 232, 0.18);
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.app-sider .btn-create-project:hover {
+  background: var(--brand-blue-dark);
+  box-shadow: 0 2px 6px rgba(26, 85, 232, 0.28);
+}
+
+.app-sider .btn-create-project:active {
+  background: var(--brand-blue-dark);
+}
+
+.app-sider .btn-create-project .create-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: #fff;
+}
+
+/* Collapsed state: text is hidden by the JSX (we render only the icon),
+   so we just center the icon and lose the padding for a tighter fit. */
+.app-sider.ant-layout-sider-collapsed .sidebar-create {
+  padding: 10px 8px 12px;
+}
+
+
+.app-sider .sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-light);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.app-sider .sidebar-user:hover {
+  background: var(--bg-hover);
+}
+
+.app-sider .user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.app-sider .user-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-sider .user-info strong {
+  display: block;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sider .user-info span {
+  display: block;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sider .user-arrow {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
 }
 
 .app-sider .app-menu {
@@ -144,11 +314,12 @@ html, body, #root {
 }
 
 /* ---- Sidebar nav-group blocks (replaces antd Menu so multiple groups can
-       coexist in a single dark sider; 管理组 always on top, project groups
-       appear below when on /admin/projects/:id). ---- */
+       coexist in a single light sider; 管理组 always on top, project groups
+       appear below when on /admin/projects/:id). ----
+       The parent .app-sider already scrolls, so this just lays out
+       naturally — no inner overflow container (which would double-scroll). */
 .app-sider .app-sider-scroll {
-  flex: 1;
-  overflow-y: auto;
+  flex: 0 0 auto;
   padding: 8px 0 16px;
 }
 
@@ -159,9 +330,9 @@ html, body, #root {
 .app-sider .nav-group-title {
   font-size: 11px;
   letter-spacing: 1px;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--text-tertiary);
   text-transform: uppercase;
-  padding: 8px 20px 6px;
+  padding: 12px 20px 6px;
   font-weight: 500;
 }
 
@@ -175,7 +346,7 @@ html, body, #root {
   background: transparent;
   border: 0;
   border-left: 3px solid transparent;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
   text-align: left;
@@ -183,14 +354,18 @@ html, body, #root {
 }
 
 .app-sider .nav-leaf:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .app-sider .nav-leaf.active {
-  background: rgba(26, 85, 232, 0.22);
+  background: var(--brand-blue);
   color: #fff;
   border-left-color: var(--brand-orange);
+}
+
+.app-sider .nav-leaf.active .nav-leaf-icon {
+  color: #fff;
 }
 
 .app-sider .nav-leaf-icon {
@@ -200,6 +375,7 @@ html, body, #root {
   font-size: 15px;
   width: 18px;
   flex-shrink: 0;
+  color: var(--text-tertiary);
 }
 
 .app-sider .nav-leaf-text {
@@ -211,8 +387,8 @@ html, body, #root {
 }
 
 .app-sider .nav-leaf-badge {
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
   font-size: 11px;
   padding: 1px 7px;
   border-radius: 10px;
@@ -222,19 +398,93 @@ html, body, #root {
 }
 
 .app-sider .nav-leaf.active .nav-leaf-badge {
-  background: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+/* 待审核数量 —— 红色 badge,和普通问题数 badge 区分。 */
+.app-sider .nav-leaf-badge-pending {
+  background: #fee2e2;
+  color: #dc2626;
+}
+.app-sider .nav-leaf.active .nav-leaf-badge-pending {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+/* ---- Sider collapsed state: hide text/badge/group-title, center icon ---- */
+.app-sider.ant-layout-sider-collapsed .logo-text {
+  display: none;
+}
+
+.app-sider.ant-layout-sider-collapsed .logo {
+  padding: 0;
+  justify-content: center;
+}
+
+.app-sider.ant-layout-sider-collapsed .sidebar-project {
+  display: none;
+}
+
+.app-sider.ant-layout-sider-collapsed .nav-group-title {
+  opacity: 0;
+  height: 8px;
+  padding: 0;
+  pointer-events: none;
+}
+
+.app-sider.ant-layout-sider-collapsed .nav-leaf {
+  padding: 0;
+  justify-content: center;
+}
+
+.app-sider.ant-layout-sider-collapsed .nav-leaf-text,
+.app-sider.ant-layout-sider-collapsed .nav-leaf-badge {
+  display: none;
+}
+
+.app-sider.ant-layout-sider-collapsed .sidebar-user {
+  padding: 14px 0;
+  justify-content: center;
+}
+
+.app-sider.ant-layout-sider-collapsed .user-info,
+.app-sider.ant-layout-sider-collapsed .user-arrow {
+  display: none;
 }
 
 /* ---- Header ---- */
 .app-header {
   height: var(--header-height) !important;
-  padding: 0 24px !important;
+  padding: 0 16px 0 0 !important;
   background: #fff !important;
   border-bottom: 1px solid var(--border-light);
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 16px;
   line-height: normal !important;
+}
+
+.app-header .header-collapse-btn {
+  width: var(--header-height);
+  height: var(--header-height);
+  border-radius: 0;
+  border: 0;
+  border-right: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.app-header .header-collapse-btn:hover {
+  background: var(--bg-hover);
+  color: var(--brand-blue);
 }
 
 .app-header .breadcrumb {
@@ -251,6 +501,31 @@ html, body, #root {
 .app-header .breadcrumb .sep {
   margin: 0 12px;
   color: var(--text-quaternary);
+}
+
+/* header 内的「页面标题 + 副标题」块 —— 用于 /admin/new-project 这类
+   自有标题的页面。位置在 .header-collapse-btn 右侧,语义上取代面包屑。
+   字号/字重/颜色对齐参考 wizard-head(20px/600,14px/secondary)。 */
+.app-header .header-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.2;
+}
+
+.app-header .header-title h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+}
+
+.app-header .header-title .header-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
 }
 
 .app-header .header-right {
@@ -355,6 +630,39 @@ html, body, #root {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* 引流/向导类页面(目前 /admin/new-project)滚动条默认透明轨道,
+     hover 时淡入。scrollbar-color / webkit 双通道都覆盖到。 */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.app-content::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+.app-content::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.18s ease;
+}
+.app-content:hover {
+  scrollbar-color: var(--text-quaternary, #bfbfbf) transparent;
+}
+.app-content:hover::-webkit-scrollbar-thumb {
+  background: var(--text-quaternary, #bfbfbf);
+}
+.app-content::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary, #8c8c8c);
+}
+
+/* 「新建项目」路由下,吃掉 .app-content 的内距 + 背景,让 wizard 直接
+   贴满侧栏右侧,不再有「卡片套卡片」的层叠。挂载时由 NewProject.tsx
+   给 <body> 加 ``windx-new-project``,离开路由时清除。
+   背景显式设为白(不能用 transparent,否则会透出 AntD Layout
+   默认的浅灰色,在 wizard 卡片周围形成一圈灰边)。 */
+body.windx-new-project .app-content {
+  padding: 0;
+  background: #fff;
 }
 
 /* ---- Login page ---- */
@@ -404,3 +712,316 @@ html, body, #root {
   font-size: 12px;
   color: var(--text-tertiary);
 }
+
+/* ==========================================================================
+   全局工具栏 —— 参照 docs/风球GEO监控平台UI/index.html 的 #global-toolbar
+   ========================================================================== */
+
+.gt {
+  position: sticky;
+  top: var(--header-height, 64px);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  min-height: 52px;
+  background: #fff;
+  border-bottom: 1px solid var(--border-light, #e5e7eb);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.gt-filters,
+.gt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.gt-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 筛选类按钮(模型 / 问题 / 日期) */
+.gt-btn.ant-btn {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px !important;
+  height: 32px !important;
+  border: 1px solid var(--border-light, #e5e7eb) !important;
+  border-radius: 6px !important;
+  background: #fff !important;
+  font-size: 13px !important;
+  color: var(--text-secondary, #4b5563) !important;
+}
+
+.gt-btn.ant-btn .anticon {
+  font-size: 14px;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.gt-btn.ant-btn:hover {
+  border-color: var(--brand-blue, #1a55e8) !important;
+  color: var(--brand-blue, #1a55e8) !important;
+  background: var(--brand-blue-light, #eff6ff) !important;
+}
+
+.gt-btn.ant-btn:hover .anticon {
+  color: var(--brand-blue, #1a55e8);
+}
+
+.gt-btn-label {
+  color: var(--text-tertiary, #6b7280);
+}
+
+.gt-btn:hover .gt-btn-label {
+  color: var(--brand-blue, #1a55e8);
+}
+
+.gt-btn-value {
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+}
+
+.gt-btn:hover .gt-btn-value {
+  color: var(--brand-blue, #1a55e8);
+}
+
+/* 模式 / 终端 —— 双选胶囊组,带 icon,激活态实色 */
+.gt-seg {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.gt-seg-label {
+  padding: 0 10px 0 8px;
+  font-size: 13px;
+  color: var(--text-tertiary, #6b7280);
+  font-weight: 500;
+  border-right: 1px solid var(--border-light, #e5e7eb);
+  margin-right: 4px;
+  line-height: 28px;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+}
+
+.gt-seg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-secondary, #4b5563);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.gt-seg-item .anticon {
+  font-size: 13px;
+}
+
+.gt-seg-item:hover:not(.is-active) {
+  background: var(--bg-hover, #f3f4f6);
+  color: var(--brand-blue, #1a55e8);
+}
+
+.gt-seg-item.is-active {
+  background: var(--brand-blue, #1a55e8);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(26, 85, 232, 0.2);
+}
+
+/* 「思考」没有合适的内置图标,用一个圆点 + 标题语义代替 */
+.gt-seg-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
+}
+
+/* 右侧操作按钮(导入 / 导出 / 下载 / 消息) */
+.gt-icon-btn.ant-btn {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 5px;
+  height: 32px !important;
+  padding: 0 12px !important;
+  border: 1px solid var(--border-light, #e5e7eb) !important;
+  border-radius: 6px !important;
+  background: #fff !important;
+  font-size: 13px !important;
+  color: var(--text-secondary, #4b5563) !important;
+}
+
+.gt-icon-btn.ant-btn .anticon {
+  font-size: 14px;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.gt-icon-btn.ant-btn:hover {
+  border-color: var(--brand-blue, #1a55e8) !important;
+  color: var(--brand-blue, #1a55e8) !important;
+  background: var(--brand-blue-light, #eff6ff) !important;
+}
+
+.gt-icon-btn.ant-btn:hover .anticon {
+  color: var(--brand-blue, #1a55e8);
+}
+
+/* Badge 角标贴近按钮文字,避免被裁 */
+.gt-actions .ant-badge {
+  display: inline-flex;
+}
+
+/* 模型下拉菜单 —— 用 AntD Dropdown(overlayClassName="gt-model-dropdown"),
+   样式与 问题 / 日期 下拉一致。宽度收紧到「应用」按钮同款 200px,
+   防止 Dropdown 默认宽度把一行 checkbox 拉得过宽。 */
+.gt-model-dropdown .ant-dropdown-menu {
+  width: 200px;
+  padding: 8px 4px;
+}
+/* 问题下拉 —— 同样的多选结构,但需要更宽以容纳 prompt 文本(超 50 字省略)。 */
+.gt-prompt-dropdown .ant-dropdown-menu {
+  width: 360px;
+  padding: 8px 4px;
+}
+.gt-model-dropdown .gt-model-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gt-model-dropdown .gt-model-menu .ant-checkbox-wrapper {
+  width: 100%;
+  padding: 4px 4px;
+}
+.gt-prompt-dropdown .ant-dropdown-menu-item .ant-checkbox-wrapper {
+  width: 100%;
+  padding: 4px 8px;
+}
+/* 日期下拉 —— 4 个预设 + 自定义 RangePicker。RangePicker 需要更宽。 */
+.gt-date-dropdown .ant-dropdown-menu {
+  width: 260px;
+  padding: 8px 4px;
+}
+.gt-date-dropdown .ant-dropdown-menu-item {
+  padding: 4px 8px;
+}
+.gt-date-dropdown .ant-dropdown-menu-item-divider {
+  margin: 4px 0;
+}
+.gt-date-dropdown .ant-picker-range {
+  width: 100%;
+}
+.gt-prompt-text {
+  display: inline-block;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.gt-model-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 8px;
+}
+
+.gt-model-menu-count {
+  font-size: 12px;
+  color: var(--text-tertiary, #6b7280);
+  font-weight: 500;
+}
+
+.gt-model-menu-unknown {
+  font-size: 12px;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.gt-model-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* 模型下拉里的「网页版 / 移动版」徽标 —— 让 (model, device) 两维度
+   在同一行清晰可见,避免用户以为「勾了 qianwen 就只跑 web」。颜色沿用
+   工具栏已有 web=蓝 / mobile=橙 的语义,与 「终端」分段控件一致。 */
+.gt-model-delivery {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+.gt-model-delivery[data-delivery="web"] {
+  color: var(--brand-blue, #1a55e8);
+  border: 1px solid var(--brand-blue, #1a55e8);
+}
+.gt-model-delivery[data-delivery="mobile"] {
+  color: var(--brand-orange, #ff6b1a);
+  border: 1px solid var(--brand-orange, #ff6b1a);
+}
+
+.gt-model-menu-foot {
+  width: 100%;
+  padding: 4px 8px 0;
+}
+.gt-model-menu-foot .ant-btn {
+  width: 100%;
+}
+
+/* 窄屏(<1280px):筛选组保留 label,按钮字压缩;控件溢出时横向滚动,
+   不换行 —— 保证「单行」形态。 */
+@media (max-width: 1280px) {
+  .gt {
+    padding: 8px 16px;
+    gap: 6px;
+  }
+  .gt-filters,
+  .gt-actions {
+    gap: 6px;
+  }
+  .gt-btn.ant-btn,
+  .gt-icon-btn.ant-btn {
+    padding: 0 10px !important;
+    font-size: 12px !important;
+  }
+  .gt-seg-label {
+    padding: 0 8px 0 6px;
+    font-size: 12px;
+  }
+  .gt-seg-item {
+    padding: 0 8px;
+    font-size: 12px;
+  }
+}
+
+
