@@ -7,7 +7,7 @@ Run with::
 Destructive. Wipes every row in ``geo_brand_mentions`` and re-creates them
 by iterating every ``geo_subtasks`` row for every project, running the
 same regex pass the production pipeline uses. The new invariant — every
-(subtask × brand_target) gets a row, with ``mention_count=1`` or ``0``
+(subtask × brand_target) gets a row, with ``is_mention=1`` or ``0``
 — holds end-to-end after this script runs.
 
 Why destructive: the previous pipeline only wrote a row when the brand
@@ -19,7 +19,7 @@ zero-rows honestly.
 
 Tradeoffs the script does NOT undo:
 
-- ``rank_position`` / ``sentiment_score`` / ``is_recommended`` /
+- ``rank_position`` / ``sentiment`` / ``is_recommended`` /
   ``concern_hits_json`` stay NULL on the backfilled rows. Filling them
   needs the LLM pass, which is deliberately skipped here (would cost
   real tokens and the historical answer content may not match what the
@@ -187,9 +187,9 @@ def backfill(*, dry_run: bool = False, batch: int = 5000) -> None:
                         customer_id=project.customer_id,
                         prompt=prompt,
                         platform=platform,
-                        brand_canonical=canonical,
+                        brand=canonical,
                         is_self=is_self,
-                        mention_count=1 if matched else 0,
+                        is_mention=1 if matched else 0,
                         extract_status=(
                             ExtractStatus.PENDING
                             if matched

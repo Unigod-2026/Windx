@@ -2,7 +2,7 @@
 
 The molizhishu API accepts a batch submission and returns
 ``status=pending`` immediately; the actual subtask execution takes
-5–60 minutes (per ``docs/api/get-task-status.md``). Without Callback,
+5–60 minutes (per ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-task-status.md``). Without Callback,
 this polling loop is the only path that advances the row from
 ``pending`` → ``completed`` / ``partial_completed`` and pulls the
 heavy ``answerContent`` payload.
@@ -18,14 +18,14 @@ Implementation notes:
   so the APScheduler tick never collides with a callback or manual
   sync (``api调用prompt.md`` §六 "同一个 taskId 必须避免并发同步").
 - ``_backoff_until`` / ``_backoff_count`` apply per-task exponential
-  backoff on transport failures — ``docs/api/errors.md`` §处理建议
+  backoff on transport failures — ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md`` §处理建议
   says "不要快速无限重试".
 - Every poll writes a ``geo_compensation_events`` row with
   ``source='background-sync:poll'`` and per-task failures write
   ``source='background-sync:refresh'`` (matches the convention in
-  ``docs/api/callback.md``).
+  ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/callback.md``).
 - Each remote call emits a ``[molizhishu]`` log line in the shape
-  required by ``docs/api/errors.md`` §日志建议 so the operator can
+  required by ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md`` §日志建议 so the operator can
   grep the log without consulting the DB. Token never reaches the log.
 """
 
@@ -55,12 +55,12 @@ SOURCE_POLL = "background-sync:poll"
 SOURCE_REFRESH = "background-sync:refresh"
 SOURCE_RESULT = "background-sync:result"
 _TERMINAL_LOCAL = (RunStatus.SUCCESS, RunStatus.FAILED)
-# ``docs/api/get-task-status.md`` line 42 — any of these subtask
+# ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-task-status.md`` line 42 — any of these subtask
 # statuses means the remote has produced a final payload worth pulling
 # via ``GET /task/result`` even if the main task is still in flight.
 _SUBTASK_TERMINAL = frozenset({"completed", "failed", "error", "stopped"})
 # Backoff ladder (seconds) applied after successive transport-level
-# failures for the same ``task_id``. ``docs/api/errors.md`` §处理建议
+# failures for the same ``task_id``. ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md`` §处理建议
 # says HTTP 502/503/504 retries 3× exponential — we cap at 5 min so a
 # bad token doesn't lock the row out forever.
 _BACKOFF_LADDER = (60, 120, 300)
@@ -138,7 +138,7 @@ def sync_pending_tasks(*, limit: int | None = None) -> SyncResult:
     # In-flight pass — these are the rows that may call the remote.
     for task_id in in_flight:
         if _is_in_backoff(task_id):
-            # Per ``docs/api/errors.md`` §处理建议 — don't fast-retry
+            # Per ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md`` §处理建议 — don't fast-retry
             # a remote that just failed; wait the ladder out.
             continue
         if task_id in _in_flight:
@@ -174,7 +174,7 @@ def _is_in_backoff(task_id: str) -> bool:
 def _select_in_flight_task_ids(db, limit: int) -> list[str]:
     """Return ``task_id``s that need a remote call.
 
-    Per ``docs/api/get-task-status.md`` §调用约定 only the in-flight
+    Per ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-task-status.md`` §调用约定 only the in-flight
     rows need ``GET /task/status``. Sorted by ``created_local_at``
     ASC so the oldest rows (most likely to be done) are processed
     first.
@@ -250,7 +250,7 @@ def _refresh_task(task_id: str) -> tuple[str, int]:
     2. Task is in flight locally — we ``GET /task/status`` first; the
        result pull only fires once ``completedItems > 0`` or any
        subtask has reached a terminal status, per
-       ``docs/api/get-task-status.md`` §调用约定 line 42.
+       ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-task-status.md`` §调用约定 line 42.
     """
     _in_flight.add(task_id)
     factory = get_session_factory()
@@ -458,7 +458,7 @@ def _log_molizhishu(
 def _handle_remote_error(task_id: str, exc: Exception, *, action: str) -> None:
     """Record the failure + schedule exponential backoff.
 
-    Per ``docs/api/errors.md`` §处理建议:
+    Per ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md`` §处理建议:
     - ``code=500`` (Token invalid) → no backoff (operator must fix
       the token; retrying just spams the remote).
     - ``code=403`` / ``code=404`` → no backoff (the task is gone or
@@ -514,7 +514,7 @@ def _schedule_backoff(task_id: str) -> None:
 
 
 def _should_fetch_result(db, task_id: str, status_payload: dict[str, Any]) -> bool:
-    """Per ``docs/api/get-task-status.md`` line 42 — fetch the heavy
+    """Per ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-task-status.md`` line 42 — fetch the heavy
     payload when ``completedItems > 0`` or any subtask in
     ``subTaskList`` has reached a terminal status.
     """
@@ -625,9 +625,20 @@ def _apply_full_subtask_payload(
             ("mediaContent", "media_content_json"),
             ("errorMessage", "error_message"),
             ("proxyIp", "proxy_ip"),
+            # 模力 2026-09 API 升级后新增的 subTaskList[] 字段,见
+            # alembic 20260910_0001。amount 用 float() 把 BigDecimal 转
+            # Python Decimal-friendly,避免某些版本下 Numeric 列接 int 报错。
+            ("shareUrl", "share_url"),
+            ("searchKeywords", "search_keywords_json"),
+            ("videoList", "video_list_json"),
+            ("goods", "goods_json"),
+            ("amount", "amount"),
         ):
             if src in item and item[src] is not None:
-                setattr(row, attr, item[src])
+                value = item[src]
+                if attr == "amount":
+                    value = float(value)
+                setattr(row, attr, value)
         if item.get("time") is not None:
             row.time = str(item["time"])
         row.raw_result_json = item

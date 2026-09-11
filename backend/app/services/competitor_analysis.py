@@ -110,16 +110,16 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
     ).all()
     total_by_plat: dict[str, int] = {r.platform: int(r.total or 0) for r in total_rows}
 
-    # Per-(platform, brand_canonical) rollup. Self side has at most one brand
+    # Per-(platform, brand) rollup. Self side has at most one brand
     # per platform; comp side may have many — we average their per-brand rates.
     brand_rows = db.execute(
         select(
             BrandMention.platform,
-            BrandMention.brand_canonical,
+            BrandMention.brand,
             BrandMention.is_self,
-            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
-            func.sum(case((and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
-            func.sum(case((and_(BrandMention.mention_count > 0,
+            func.sum(case((BrandMention.is_mention > 0, 1), else_=0)).label("matched"),
+            func.sum(case((and_(BrandMention.is_mention > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
+            func.sum(case((and_(BrandMention.is_mention > 0,
                                   BrandMention.rank_position.is_not(None),
                                   BrandMention.rank_position <= 3), 1), else_=0)).label("top3"),
         )
@@ -129,7 +129,7 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
             BrandMention.created_at <= win_end_dt,
             BrandMention.platform.is_not(None),
         )
-        .group_by(BrandMention.platform, BrandMention.brand_canonical, BrandMention.is_self)
+        .group_by(BrandMention.platform, BrandMention.brand, BrandMention.is_self)
     ).all()
 
     by_plat: dict[str, dict[str, list[dict[str, float]]]] = {}
@@ -213,18 +213,18 @@ def compute_competitor_analysis(
 
     brand_rows = db.execute(
         select(
-            BrandMention.brand_canonical,
+            BrandMention.brand,
             BrandMention.is_self,
-            func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+            func.sum(case((BrandMention.is_mention > 0, 1), else_=0)).label("matched"),
             func.count().label("rows_total"),
             func.avg(
                 case(
                     (
-                        BrandMention.mention_count > 0,
+                        BrandMention.is_mention > 0,
                         case(
-                            (BrandMention.sentiment_score == "positive", 1.0),
-                            (BrandMention.sentiment_score == "neutral", 0.5),
-                            (BrandMention.sentiment_score == "negative", 0.0),
+                            (BrandMention.sentiment == "positive", 1.0),
+                            (BrandMention.sentiment == "neutral", 0.5),
+                            (BrandMention.sentiment == "negative", 0.0),
                             else_=None,
                         ),
                     ),
@@ -235,7 +235,7 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
+                            BrandMention.is_mention > 0,
                             BrandMention.rank_position.is_not(None),
                         ),
                         BrandMention.rank_position,
@@ -247,7 +247,7 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
+                            BrandMention.is_mention > 0,
                             BrandMention.rank_position.is_not(None),
                             BrandMention.rank_position <= 3,
                         ),
@@ -260,7 +260,7 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
+                            BrandMention.is_mention > 0,
                             BrandMention.is_recommended.is_(True),
                         ),
                         1,
@@ -272,7 +272,7 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
+                            BrandMention.is_mention > 0,
                             BrandMention.rank_position == 1,
                         ),
                         1,
@@ -284,8 +284,8 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.sentiment_score == "positive",
+                            BrandMention.is_mention > 0,
+                            BrandMention.sentiment == "positive",
                         ),
                         1,
                     ),
@@ -296,8 +296,8 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.sentiment_score == "neutral",
+                            BrandMention.is_mention > 0,
+                            BrandMention.sentiment == "neutral",
                         ),
                         1,
                     ),
@@ -308,8 +308,8 @@ def compute_competitor_analysis(
                 case(
                     (
                         and_(
-                            BrandMention.mention_count > 0,
-                            BrandMention.sentiment_score == "negative",
+                            BrandMention.is_mention > 0,
+                            BrandMention.sentiment == "negative",
                         ),
                         1,
                     ),
@@ -322,7 +322,7 @@ def compute_competitor_analysis(
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
         )
-        .group_by(BrandMention.brand_canonical, BrandMention.is_self)
+        .group_by(BrandMention.brand, BrandMention.is_self)
     ).all()
 
     total_subtasks = db.scalar(
@@ -349,17 +349,17 @@ def compute_competitor_analysis(
         prev_end_dt = datetime.combine(prev_window_end_d, time.max)
         prev_brand_rows = db.execute(
             select(
-                BrandMention.brand_canonical,
+                BrandMention.brand,
                 BrandMention.is_self,
-                func.sum(case((BrandMention.mention_count > 0, 1), else_=0)).label("matched"),
+                func.sum(case((BrandMention.is_mention > 0, 1), else_=0)).label("matched"),
                 func.avg(
                     case(
                         (
-                            BrandMention.mention_count > 0,
+                            BrandMention.is_mention > 0,
                             case(
-                                (BrandMention.sentiment_score == "positive", 1.0),
-                                (BrandMention.sentiment_score == "neutral", 0.5),
-                                (BrandMention.sentiment_score == "negative", 0.0),
+                                (BrandMention.sentiment == "positive", 1.0),
+                                (BrandMention.sentiment == "neutral", 0.5),
+                                (BrandMention.sentiment == "negative", 0.0),
                                 else_=None,
                             ),
                         ),
@@ -368,13 +368,13 @@ def compute_competitor_analysis(
                 ).label("avg_sentiment"),
                 func.sum(
                     case(
-                        (and_(BrandMention.mention_count > 0, BrandMention.rank_position == 1), 1),
+                        (and_(BrandMention.is_mention > 0, BrandMention.rank_position == 1), 1),
                         else_=0,
                     )
                 ).label("top1_hits"),
                 func.sum(
                     case(
-                        (and_(BrandMention.mention_count > 0, BrandMention.rank_position.is_not(None),
+                        (and_(BrandMention.is_mention > 0, BrandMention.rank_position.is_not(None),
                               BrandMention.rank_position <= 3), 1),
                         else_=0,
                     )
@@ -385,7 +385,7 @@ def compute_competitor_analysis(
                 BrandMention.created_at >= prev_start_dt,
                 BrandMention.created_at <= prev_end_dt,
             )
-            .group_by(BrandMention.brand_canonical, BrandMention.is_self)
+            .group_by(BrandMention.brand, BrandMention.is_self)
         ).all()
 
         prev_total_subtasks = db.scalar(
@@ -398,7 +398,7 @@ def compute_competitor_analysis(
 
         for r in prev_brand_rows:
             matched = int(r.matched or 0)
-            prev_by_brand[r.brand_canonical] = {
+            prev_by_brand[r.brand] = {
                 "mention_rate": matched / prev_total_subtasks if prev_total_subtasks else 0.0,
                 "top1_rate": int(r.top1_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
                 "top3_rate": int(r.top3_hits or 0) / prev_total_subtasks if prev_total_subtasks else 0.0,
@@ -408,20 +408,20 @@ def compute_competitor_analysis(
     daily_by_brand: dict[str, dict[date, int]] = {}
     daily_rows = db.execute(
         select(
-            BrandMention.brand_canonical,
+            BrandMention.brand,
             func.date(BrandMention.created_at).label("day"),
             func.count(func.distinct(BrandMention.subtask_id)).label("c"),
         )
         .where(
             BrandMention.project_id == project_id,
-            BrandMention.mention_count > 0,
+            BrandMention.is_mention > 0,
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
         )
-        .group_by(BrandMention.brand_canonical, func.date(BrandMention.created_at))
+        .group_by(BrandMention.brand, func.date(BrandMention.created_at))
     ).all()
     for r in daily_rows:
-        daily_by_brand.setdefault(r.brand_canonical, {})[r.day] = r.c
+        daily_by_brand.setdefault(r.brand, {})[r.day] = r.c
 
     spark_len = min(15, days_n)
     spark_start = win_end - timedelta(days=spark_len - 1)
@@ -466,11 +466,11 @@ def compute_competitor_analysis(
             else None
         )
         return CompetitorKpi(
-            brand_canonical=brand,
+            brand=brand,
             name=display_name,
             aliases=aliases,
             is_self=is_self,
-            mention_count=matched,
+            is_mention=matched,
             mention_rate=matched / total_subtasks if total_subtasks else 0.0,
             top3_rate=top3 / total_subtasks if total_subtasks else 0.0,
             recommend_rate=rec / total_subtasks if total_subtasks else 0.0,
@@ -490,12 +490,12 @@ def compute_competitor_analysis(
     self_kpi: CompetitorKpi | None = None
     competitor_kpis: list[CompetitorKpi] = []
     for r in brand_rows:
-        kpi = _kpi_for(r.brand_canonical, bool(r.is_self), r)
+        kpi = _kpi_for(r.brand, bool(r.is_self), r)
         if r.is_self:
             self_kpi = kpi
         else:
             competitor_kpis.append(kpi)
-    competitor_kpis.sort(key=lambda k: k.mention_count, reverse=True)
+    competitor_kpis.sort(key=lambda k: k.is_mention, reverse=True)
 
     labels: list[str] = []
     for i in range(days_n):
@@ -506,18 +506,18 @@ def compute_competitor_analysis(
         per_day = daily_by_brand.get(brand, {})
         data = [per_day.get(win_start + timedelta(days=i), 0) for i in range(days_n)]
         return CompetitorTrendSeries(
-            brand_canonical=brand, name=name, is_self=is_self, color=color, data=data,
+            brand=brand, name=name, is_self=is_self, color=color, data=data,
         )
 
     series: list[CompetitorTrendSeries] = []
     if self_kpi is not None:
         series.append(
-            _series_for(self_kpi.brand_canonical, self_kpi.name, True, _COMPETITOR_LINE_COLORS[0])
+            _series_for(self_kpi.brand, self_kpi.name, True, _COMPETITOR_LINE_COLORS[0])
         )
     for i, kpi in enumerate(competitor_kpis[:5], start=1):
         series.append(
             _series_for(
-                kpi.brand_canonical, kpi.name, False,
+                kpi.brand, kpi.name, False,
                 _COMPETITOR_LINE_COLORS[i % len(_COMPETITOR_LINE_COLORS)],
             )
         )

@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_user
 from app.models.common import now_local
@@ -33,7 +34,7 @@ from app.models.customer import AdminUser, Customer
 from app.models.enums import AdminRole, RunStatus
 from app.models.project import Project, ProjectPlatform, ProjectPrompt
 from app.models.schedule import ScheduleRun
-from app.services.schedule_time import next_run_at
+from app.services.schedule_time import next_run_per_mode
 
 router = APIRouter(tags=["dashboard"])
 
@@ -62,6 +63,11 @@ class DashboardUpcomingItem(BaseModel):
     customer_id: int
     customer_name: str
     next_run_at: datetime
+    # Which schedule mode this fire represents — ``"fast"`` /
+    # ``"think"``. A project with both modes enabled can have two
+    # upcoming entries on the same day (one per mode); the UI uses the
+    # tag to render 「下次快速」 / 「下次思考」 chips.
+    mode: str
     platforms: list[str]
 
 
@@ -227,21 +233,36 @@ def get_dashboard(
             upcoming_platforms[pf.project_id].append(pf.platform)
 
     upcoming_items: list[DashboardUpcomingItem] = []
+    settings = get_settings()
     for p in upcoming_projects:
-        nra = next_run_at(p.schedule_slots, now=now)
-        if nra is None:
-            continue
-        customer = customers_by_id.get(p.customer_id)
-        upcoming_items.append(
-            DashboardUpcomingItem(
-                project_id=p.id,
-                project_name=p.name,
-                customer_id=p.customer_id,
-                customer_name=customer.name if customer else "",
-                next_run_at=nra,
-                platforms=upcoming_platforms.get(p.id, []),
-            )
+        # Per-mode: each enabled mode produces its own upcoming row so the
+        # UI can split "next fast fire" and "next think fire". Modes with
+        # no upcoming fire are dropped; modes with a None ``days`` are
+        # skipped entirely (the schedule layer already filtered those
+        # out at registration time but we re-check defensively in case
+        # the data was edited after ``reload_jobs``).
+        per_mode = next_run_per_mode(
+            p.monitor_schedule,
+            hour=settings.monitor_default_hour,
+            minute=settings.monitor_default_minute,
+            now=now,
         )
+        customer = customers_by_id.get(p.customer_id)
+        for mode in ("fast", "think"):
+            nra = per_mode.get(mode)
+            if nra is None:
+                continue
+            upcoming_items.append(
+                DashboardUpcomingItem(
+                    project_id=p.id,
+                    project_name=p.name,
+                    customer_id=p.customer_id,
+                    customer_name=customer.name if customer else "",
+                    next_run_at=nra,
+                    mode=mode,
+                    platforms=upcoming_platforms.get(p.id, []),
+                )
+            )
     upcoming_items.sort(key=lambda x: x.next_run_at)
     upcoming = upcoming_items[:10]
 

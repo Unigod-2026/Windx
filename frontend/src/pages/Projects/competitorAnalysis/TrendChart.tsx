@@ -10,7 +10,7 @@ interface Props {
 
 export default function TrendChart({ labels, series }: Props) {
   const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(series.map((s) => s.brand_canonical)),
+    () => new Set(series.map((s) => s.brand)),
   );
 
   const toggle = (key: string) => {
@@ -26,7 +26,7 @@ export default function TrendChart({ labels, series }: Props) {
   // 用灰色虚线绘制,让"被过滤掉"和"被保留"的视觉对比明显。
   const option = useMemo<echarts.EChartsOption>(() => {
     const eseries: echarts.EChartsOption["series"] = series.map((s) => {
-      const isOn = selected.has(s.brand_canonical);
+      const isOn = selected.has(s.brand);
       return {
         name: s.name,
         type: "line" as const,
@@ -69,13 +69,13 @@ export default function TrendChart({ labels, series }: Props) {
     <>
       <div className="chart-legend">
         {series.map((s) => {
-          const isOn = selected.has(s.brand_canonical);
+          const isOn = selected.has(s.brand);
           return (
             <button
-              key={s.brand_canonical}
+              key={s.brand}
               type="button"
               className={`legend-chip${isOn ? "" : " off"}`}
-              onClick={() => toggle(s.brand_canonical)}
+              onClick={() => toggle(s.brand)}
             >
               <i style={{ background: s.color }} />
               {s.name}

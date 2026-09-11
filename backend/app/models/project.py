@@ -1,16 +1,10 @@
 """Project configuration ORM models.
 
 A project belongs to one customer and carries the full set of inputs that
-``MolizhishuClient.submit_task`` consumes: prompts, keywords, platforms.
-
-Schedule state (``schedule_enabled``) is still on the project row, but the
-per-day slot columns (``slot1_hour`` / ``slot1_minute`` / ``slot2_hour`` /
-``slot2_minute``) were dropped in migration ``20260903_0003`` and replaced
-by a per-mode ``monitor_schedule`` JSON column. That new column lives in
-the DB but isn't declared on the ORM yet; the corresponding read/write
-helpers will land in a follow-up. Until then, ``scheduler_runtime`` is a
-no-op and the legacy ``schedule_slots`` / ``set_schedule_slots`` helpers
-are gone.
+``MolizhishuClient.submit_task`` consumes: prompts, keywords, platforms. In
+v2 the per-day schedule (0, 1 or 2 slots) is embedded directly on the project
+row instead of living in separate ``geo_schedules`` / ``geo_schedule_slots``
+tables.
 """
 
 from __future__ import annotations
@@ -21,6 +15,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     Boolean,
+    DateTime,
     Enum,
     Float,
     Index,
@@ -58,6 +53,7 @@ class Project(Base):
         UniqueConstraint("customer_id", "code", name="uq_project_customer_code"),
         Index("ix_projects_customer_id", "customer_id"),
         Index("ix_projects_schedule_enabled", "schedule_enabled"),
+        Index("ix_projects_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -77,10 +73,20 @@ class Project(Base):
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Embedded schedule (v2): 1:1 with the project, 1-2 daily slots.
+    # Embedded schedule (v4): weekly runs, **per-mode**.
+    # ``monitor_schedule`` 是 ``{mode: {freq, days}}`` 字典:
+    #   - key 限定 ``fast`` / ``think`` —— 与 wizard 的 mode 二选一对应
+    #   - value.freq:w1 / w2 / wn
+    #   - value.days:1~7 个 weekday key("1"=周一 … "7"=周日),以 string 存
+    #     JSON list,方便跨版本读
+    # 实际几点发任务不在 project 行里 —— 走 env 的
+    # MONITOR_DEFAULT_HOUR / MONITOR_DEFAULT_MINUTE,运维改一次全平台生效。
+    # schedule_enabled 仍是 master 开关;开关 + 任意 mode 配置非空时才
+    # 真正注册 cron 任务。
     schedule_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    monitor_schedule: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Monitoring extensions (需求文档 §3 / §4): sentiment + region strategy.
     sentiment_enabled: Mapped[bool] = mapped_column(
@@ -96,6 +102,13 @@ class Project(Base):
         default=RegionStrategy.FIXED,
     )
     region_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Free-form semantic monitoring payload from the wizard's step 6
+    # (selling_points / website / phone / social handles / ...).
+    # Nullable so legacy rows that predate the wizard stay valid; the
+    # approval flow strips empty fields before storing so the JSON never
+    # contains a sea of explicit ``null``s. Consumers should treat
+    # ``semantic_json=None`` and ``semantic_json={}`` the same way.
+    semantic_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Monitor brand — exactly one per project. Was previously stuffed
     # into ``geo_project_keywords`` at ``sort=0`` by convention; split
     # out into its own column so the edit UI can no longer silently
@@ -107,18 +120,28 @@ class Project(Base):
     # nullable JSON list so the API can return ``null`` (never populated)
     # distinct from ``[]`` (explicitly empty).
     aliases: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    # Wizard step 6 payload — operator-declared brand identity
-    # (website / phone / social handles / selling points / ...). Shape is
-    # owned by the frontend; read-side code should treat ``NULL`` and
-    # ``{}`` identically. See ``alembic/versions/20260908_0001_project_semantic_json.py``
-    # for the migration that introduced the column.
-    semantic_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Project-scoped taxonomy for prompt categories. Order in this list is
     # the order shown on 问题提及分析's subtabs and the order prompts can
     # pick from in 问题管理. ``NULL`` means "no taxonomy configured yet"
     # — the UI falls back to deriving categories from existing prompt
     # rows so the page still renders meaningfully for legacy projects.
     category_taxonomy: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+
+    # ===== Review / approval workflow =====
+    # All nullable: pre-20260908 rows are ACTIVE / DISABLED without this
+    # metadata, and that has to keep working.
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Original wizard submission JSON — kept on PENDING / ACTIVE / REJECTED
+    # rows so the 待审核 page can render the submitter's exact wording
+    # even after fields get pruned/reformatted by the editor. Nullable on
+    # legacy projects that predate the wizard.
+    wizard_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
@@ -167,22 +190,15 @@ class Project(Base):
         viewonly=True,
     )
 
+    # ------------------------------------------------------------------
+    # Schedule helpers (weekly freq/days + env-driven time-of-day)
+    # ------------------------------------------------------------------
+
     def __repr__(self) -> str:
         return (
             f"<Project id={self.id} code={self.code!r} "
             f"customer_id={self.customer_id} status={self.status!r}>"
         )
-
-    # Stub for the old per-day ``slot1_hour`` / ``slot2_hour`` API surface
-    # (``api/projects.py`` / ``api/dashboard.py`` still call this). Real
-    # scheduling now lives on the ``monitor_schedule`` JSON column added
-    # by migration ``20260911_0001``; the ORM hasn't been wired up to it
-    # yet, so we return ``[]`` and let ``next_run_at`` produce ``None`` —
-    # callers already skip nulls. Delete this once ``monitor_schedule``
-    # lands on the model.
-    @property
-    def schedule_slots(self) -> list[dict]:
-        return []
 
 
 class ProjectPrompt(Base):
@@ -266,6 +282,13 @@ class ProjectPlatform(Base):
     thinking_mode: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    # Resolved API platform string for BOTH web and mobile rows. The mobile
+    # suffix isn't uniform (baiduai → baidu_mobile, douyinai → douyin_mobile),
+    # so the mapping must be resolved at approval time and persisted here;
+    # scheduler forwards this verbatim regardless of delivery_mode.
+    #   web  row: platform_code == platform (``doubao``)
+    #   mobile: platform_code == mapped mobile variant (``doubao_mobile``)
+    platform_code: Mapped[str] = mapped_column(String(32), nullable=False)
     screenshot: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -350,14 +373,14 @@ class ProjectCompetitor(Base):
 
 
 class BrandMention(Base):
-    """One row per (subtask, brand_canonical) the answer mentions.
+    """One row per (subtask, brand) the answer mentions.
 
     Produced by ``app.services.extraction.extract_brand_mentions`` after
     a ``Subtask`` row is upserted. Drives every analysis KPI:
 
-    - ``mention_count`` is binary (0/1) from the API pass; cheap, always
+    - ``is_mention`` is binary (0/1) from the API pass; cheap, always
       present after the row is upserted.
-    - ``rank_position`` / ``sentiment_score`` / ``is_recommended`` /
+    - ``rank_position`` / ``sentiment`` / ``is_recommended`` /
       ``concern_hits_json`` are filled by the extraction pipeline from
       ``Subtask.raw_result_json`` (the Molizhishu ``/task/result``
       payload); they may be NULL when the answer body is missing —
@@ -365,7 +388,7 @@ class BrandMention(Base):
       pending", "skipped because the brand wasn't mentioned", or
       "gave up".
 
-    ``brand_canonical`` distinguishes *which* brand is being mentioned
+    ``brand`` distinguishes *which* brand is being mentioned
     so the same answer talking about both the self brand ("雅培") and a
     competitor ("珂润") lands as two rows. The literal needle the regex
     matched (alias vs canonical) was historically tracked in a
@@ -374,7 +397,7 @@ class BrandMention(Base):
     got dropped in 20260815_0002 — the canonical+alias lists on the
     parent tables are authoritative.
 
-    ``is_self`` is denormalised off ``brand_canonical`` for the common
+    ``is_self`` is denormalised off ``brand`` for the common
     query path ("KPI for the monitored brand only") so the dashboard
     doesn't have to JOIN against ``Project``/``ProjectCompetitor`` for
     every read.
@@ -384,7 +407,7 @@ class BrandMention(Base):
     __table_args__ = (
         UniqueConstraint(
             "subtask_id",
-            "brand_canonical",
+            "brand",
             name="uq_brand_mention_subtask_brand",
         ),
         # Project-wide queries that don't filter on ``is_self`` (admin
@@ -404,11 +427,11 @@ class BrandMention(Base):
         # key also satisfies ``ORDER BY id DESC LIMIT N`` without a sort.
         Index("ix_brand_mentions_proj_self_id", "project_id", "is_self", "id"),
         # Covers the brand-mention list endpoint filtered by a single
-        # ``brand_canonical`` (competitor-analysis tab).
+        # ``brand`` (competitor-analysis tab).
         Index(
             "ix_brand_mentions_proj_brand_id",
             "project_id",
-            "brand_canonical",
+            "brand",
             "id",
         ),
         # Covers the 问题提及分析 lazy-load path:
@@ -435,9 +458,17 @@ class BrandMention(Base):
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    brand_canonical: Mapped[str] = mapped_column(String(255), nullable=False)
+    brand: Mapped[str] = mapped_column(String(255), nullable=False)
     is_self: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    mention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_mention: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 模式分桶,供「全局工具栏 → 模式」筛选;True = 思考模式
+    # (Subtask.mode IN 'reasoning' / 'reasoning_search'),False = 快速
+    # (standard / search / legacy 'web')。Nullable 仅为兼容历史行,稳态
+    # 下不会 NULL —— 抽取流水线写新行时同步落,见 extraction._load_context。
+    thinking_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 终端分桶,供「全局工具栏 → 终端」筛选;'web' / 'mobile',
+    # 来自 Subtask.platform 是否含 '_mobile' 后缀。
+    delivery_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # 0.0-1.0; Float (not DECIMAL) because we never aggregate over it
     rank_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Discrete label from the Molizhishu /task/result endpoint — one of
@@ -445,7 +476,7 @@ class BrandMention(Base):
     # translates these to numeric averages for the dashboard's color
     # buckets (>=0.7 green / >=0.5 orange / else red), so the column
     # itself doesn't need a float type.
-    sentiment_score: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)
     is_recommended: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # For the SELF brand row only, the Molizhishu API's ``mentionContext``
     # is wrapped as ``[{"text": mentionContext}]`` so the operator can see
@@ -464,13 +495,12 @@ class BrandMention(Base):
     extract_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_extraction: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # LLM-judged 「该回答是否与项目核心卖点一致」。三态:
-    #   None = 未判断 / 不适用(竞品行 / 历史未回填行 / LLM 三次失败)
-    #   True = 评判通过(回答与卖点相符,或项目未填卖点)
-    #   False = 评判不通过(回答与卖点不符,例如卖点说眼霜而答非眼霜)
+    #   None = 未判断 / 不适用(竞品行、历史未回填行、LLM 三次失败)
+    #   True = 评判通过
+    #   False = 评判不通过(回答与卖点不符)
     # 仅对 ``is_self=true`` 行做判断;``is_self=false`` 始终保持 None。
-    # 由 ``extraction._populate_correctness_pass`` 在 LLM pass 之后写入,
-    # 独立于 ``extract_status`` —— 即使 LLM 失败也不影响
-    # rank/sentiment/is_recommended 的 SUCCESS 状态。
+    # 项目无 ``semantic_json["selling_points"]`` 时短路为 True(用户没
+    # 填卖点,谈不上"答错")。
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     created_at: Mapped[datetime] = created_at_column()
@@ -479,7 +509,7 @@ class BrandMention(Base):
     def __repr__(self) -> str:
         return (
             f"<BrandMention id={self.id} subtask_id={self.subtask_id!r} "
-            f"brand={self.brand_canonical!r} status={self.extract_status!r}>"
+            f"brand={self.brand!r} status={self.extract_status!r}>"
         )
 
 

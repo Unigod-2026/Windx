@@ -13,19 +13,40 @@ export interface RunSummary {
   finished_at: string | null;
 }
 
+/** 项目「形态信息」(与 wizard 提交流程的 WizardSemantic 同形,
+ *  active/disabled 行的 modal 也读这个字段反推 wizard state)。 */
+export interface SemanticInfo {
+  selling_points: string[];
+  website: string | null;
+  phone: string | null;
+  address: string | null;
+  email: string | null;
+  wechat_service: string | null;
+  wechat_official: string | null;
+  xiaohongshu: string | null;
+  douyin: string | null;
+  weibo: string | null;
+  custom: string | null;
+}
+
 export interface ProjectOut {
   id: number;
   customer_id: number;
   name: string;
   code: string;
-  status: "active" | "disabled";
+  /** Lifecycle status. ``pending`` and ``rejected`` are the new wizard
+   *  workflow values introduced in the 20260908_0002 migration —
+   *  pre-existing rows are ``active`` / ``disabled``. */
+  status: "pending" | "active" | "rejected" | "disabled";
   description: string | null;
   schedule_enabled: boolean;
-  // v2 weekly schedule: monitor_freq is a UI hint ("w1"/"w2"/"wn"),
-  // monitor_days is the actual schedule ("1".."7"). Both come from
-  // backend ProjectOut and may be null/empty for projects without one.
-  monitor_freq: "w1" | "w2" | "wn" | null;
-  monitor_days: string[] | null;
+  // v4 weekly schedule: per-mode map keyed by ``"fast"`` / ``"think"``.
+  // Replaces the old ``monitor_freq`` / ``monitor_days`` pair so a project
+  // can monitor fast / think platforms on independent weekly cadences.
+  // Each value carries the same shape (``freq`` UI hint + ``days``
+  // ISO weekday keys); an empty / missing key means "this mode is not
+  // scheduled".
+  monitor_schedule: Partial<Record<WizardMode, WizardMonitorEntry>>;
   slots: SlotOut[];
   next_run_at: string | null;
   brand: string | null;
@@ -34,16 +55,37 @@ export interface ProjectOut {
   prompts_count: number;
   created_at: string;
   updated_at: string;
+  // ===== Review workflow metadata (post 20260908_0002) =====
+  review_note: string | null;
+  submitted_by: number | null;
+  submitted_at: string | null;
+  reviewed_by: number | null;
+  reviewed_at: string | null;
+  approved_by: number | null;
+  approved_at: string | null;
+  /** 形态信息(联系方式等),与 wizard ``WizardPayload.semantic`` 同形;
+   *  active/disabled 行的 modal 反推 wizard state 时也读这个。 */
+  semantic_json: SemanticInfo | null;
+  /** Verbatim wizard payload JSON, kept on the row for audit + edit-pending
+   *  rehydrate. UI only renders this on the 待审核 page. */
+  wizard_payload_json: string | null;
 }
 
 // ``mode`` is the LLM mode forwarded to the remote — only the four values
-// docs/api/submit-task.md §平台 lists are accepted. ``delivery_mode`` is
+// https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/submit-task.md
+// §平台 lists are accepted. ``delivery_mode`` is
 // frontend-only (the live remote has no surface field); it's stored locally
 // but NOT in the submit payload.
 export type LlmMode = "standard" | "reasoning" | "search" | "reasoning_search";
 
 export interface ProjectPlatform {
+  /** 逻辑模型名(永远是 WIZARD_MODELS 的 ``value``,例如 ``qianwen``),
+   * 不随 web/mobile 变 — UI 用它分组。 */
   platform: string;
+  /** 远端 API 平台代码:web = ``value``,mobile = ``mobileCode``(例如
+   * ``qianwen`` / ``qianwen_mobile``)。scheduler 原样转发给模力 API。
+   * PUT 时不传会被后端用 ``platform`` 兜底,但显式传值更稳。 */
+  platform_code?: string;
   mode: LlmMode;
   delivery_mode: "web" | "mobile";
   thinking_mode: boolean;
@@ -88,6 +130,8 @@ export interface ProjectList {
 export interface ScheduleOut {
   project_id: number;
   schedule_enabled: boolean;
+  // Per-mode map; empty object when the schedule is disabled.
+  monitor_schedule: Partial<Record<WizardMode, WizardMonitorEntry>>;
   slots: SlotOut[];
   next_run_at: string | null;
   last_run: RunSummary | null;
@@ -98,6 +142,10 @@ export interface ScheduleRunOut {
   project_id: number;
   slot_index: number;
   trigger_type: "cron" | "manual";
+  /** ``"fast"`` / ``"think"`` for cron-driven runs, ``""`` for manual
+   *  triggers. The dashboard splits runs by mode in the UI; the
+   *  scheduler uses it to compute mode-aware cooldown keys. */
+  mode: string;
   status: "queued" | "running" | "success" | "failed" | "skipped";
   triggered_at: string;
   started_at: string | null;
@@ -198,6 +246,8 @@ export type PromptAnswerDetail = PromptAnswerDetailOut;
 
 export interface TriggerOut {
   run_id: number;
+  /** 当项目同时存在 fast 和 think 平台行时,后端会拆成两个 ScheduleRun,这是第二个 run 的 id;单模式项目为 null。 */
+  think_run_id: number | null;
   status: "queued" | "skipped";
 }
 
@@ -223,6 +273,9 @@ export interface ProjectUpdatePayload {
   aliases?: string[] | null;
   category_taxonomy?: string[] | null;
   category_renames?: Record<string, string> | null;
+  /** 「语义监控」卡片内容(核心卖点 / 官网 / 微信 / 自定义 等)。
+   *  写入 ``geo_projects.semantic_json``;空对象/null 表示清空。 */
+  semantic_json?: SemanticInfo | null;
 }
 
 export interface SlotIn {
@@ -290,14 +343,14 @@ export interface BrandMentionOut {
   customer_id: number;
   prompt: string | null;
   platform: string | null;
-  brand_canonical: string;
+  brand: string;
   is_self: boolean;
-  mention_count: number;
+  is_mention: number;
   rank_position: number | null;
   // "positive" / "neutral" / "negative" — the API-pass refactor writes
   // the Molizhishu label directly; the dashboard KPI layer translates
   // to a float average for the color buckets.
-  sentiment_score: string | null;
+  sentiment: string | null;
   is_recommended: boolean | null;
   // Self rows carry a single snippet from the API's mentionContext.
   concern_hits_json: Array<{ text: string }> | null;
@@ -326,12 +379,29 @@ export interface ListProjectsParams {
   page?: number;
   size?: number;
   customer_id?: number;
-  status?: "active" | "disabled";
+  /** Pre-20260908_0002 surface only accepted ``active`` / ``disabled``.
+   *  The merged-table API now exposes ``pending`` / ``rejected`` too; the
+   *  wire value is forwarded verbatim so the project list and the
+   *  pending-review list both hit ``GET /api/projects`` with different
+   *  filters. */
+  status?: "active" | "disabled" | "pending" | "rejected";
+  /** 「监控项目」列表按调度开关过滤:启用=正在跑,停用=暂停调度。
+   *  与 status 独立 —— status=active 的项目里也可能有 schedule_enabled=false。 */
+  schedule_enabled?: boolean;
   q?: string;
 }
 
 export const listProjects = (params: ListProjectsParams) =>
   client.get<ProjectList>("/projects", { params }).then((r) => r.data);
+
+export interface LlmPricingOut {
+  cost_per_call: number;
+  currency: string;
+  unit: string;
+}
+
+export const getLlmPricing = () =>
+  client.get<LlmPricingOut>("/config/llm-pricing").then((r) => r.data);
 
 export const getProject = (id: number) =>
   client.get<ProjectDetailOut>(`/projects/${id}`).then((r) => r.data);
@@ -356,13 +426,13 @@ export const updateSchedule = (id: number, data: ScheduleUpdatePayload) =>
     slots: data.slots,
   }).then((r) => r.data);
 
-// v2 weekly schedule shape — separate from `updateSchedule` because the
+// v4 weekly schedule shape — separate from `updateSchedule` because the
 // slot-based `ScheduleUpdatePayload` is still used by BatchQuestionModal
 // and the two wire shapes are not interchangeable on the backend.
 export interface WeeklyScheduleUpdate {
   schedule_enabled: boolean;
-  monitor_freq: "w1" | "w2" | "wn";
-  monitor_days: string[];
+  // Per-mode map; ``null`` / missing key means "don't touch this mode".
+  monitor_schedule: Partial<Record<WizardMode, WizardMonitorEntry | null>>;
 }
 
 export const putWeeklySchedule = (id: number, data: WeeklyScheduleUpdate) =>
@@ -482,7 +552,7 @@ export const listBrandMentions = (
     page?: number;
     size?: number;
     is_self?: boolean;
-    brand_canonical?: string;
+    brand?: string;
     days?: number;
     start?: string;
     end?: string;
@@ -509,7 +579,7 @@ export interface QuestionPlatformStat {
   recommend_yes: boolean;
   // Populated when ``view=competitor`` — the dominant competitor
   // brand that drove the aggregation for this (prompt, platform).
-  brand_canonical?: string | null;
+  brand?: string | null;
 }
 
 export interface QuestionPrevStat {
@@ -536,7 +606,7 @@ export interface CategoryStat {
 }
 
 export interface CompetitorBrandStat {
-  brand_canonical: string;
+  brand: string;
   is_self: boolean;
   color: string;
   mention_rate: number;
@@ -738,13 +808,40 @@ export interface ProjectOverview {
   failed_count: number;
 }
 
-/** ``start``/``end`` are inclusive ``YYYY-MM-DD`` and win over ``days``. */
+/** ``start``/``end`` are inclusive ``YYYY-MM-DD`` and win over ``days``.
+ *  ``platforms`` 是 UI 「全局工具栏 → 模型」筛选的 modelCode 列表;
+ *  ``prompt_ids`` 是 UI 「全局工具栏 → 问题」筛选的 ProjectPrompt.id 列表;
+ *  ``thinking_mode`` 是 UI 「全局工具栏 → 模式」分桶(true/false);
+ *  ``delivery_mode`` 是 UI 「全局工具栏 → 终端」分桶(web/mobile)。
+ *  空数组 / 缺省 = 不筛,与后端原口径一致。 */
 export const getProjectOverview = (
   projectId: number,
-  params: { days?: number; start?: string; end?: string } = {},
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    platforms?: string[];
+    prompt_ids?: number[];
+    thinking_mode?: ("fast" | "think")[];
+    delivery_mode?: ("web" | "mobile")[];
+  } = {},
 ) =>
   client
-    .get<ProjectOverview>(`/projects/${projectId}/overview`, { params })
+    .get<ProjectOverview>(`/projects/${projectId}/overview`, {
+      params: {
+        ...params,
+        platforms: params.platforms?.length ? params.platforms.join(",") : undefined,
+        prompt_ids: params.prompt_ids?.length ? params.prompt_ids.join(",") : undefined,
+        thinking_mode: params.thinking_mode?.length
+          ? params.thinking_mode
+              .map((m) => (m === "fast" ? "false" : "true"))
+              .join(",")
+          : undefined,
+        delivery_mode: params.delivery_mode?.length
+          ? params.delivery_mode.join(",")
+          : undefined,
+      },
+    })
     .then((r) => r.data);
 
 // ------------------------------------------------------------------
@@ -752,11 +849,11 @@ export const getProjectOverview = (
 // ------------------------------------------------------------------
 
 export interface CompetitorKpi {
-  brand_canonical: string;
+  brand: string;
   name: string;
   aliases: string[] | null;
   is_self: boolean;
-  mention_count: number;
+  is_mention: number;
   mention_rate: number;
   top3_rate: number;
   recommend_rate: number;
@@ -764,9 +861,9 @@ export interface CompetitorKpi {
   avg_rank: number | null;
   /** 15-day sparkline, zero-filled, ordered oldest → newest. */
   spark: number[];
-  /** Top1 提及率(= rank_position=1 且 mention_count>0 的次数 / total_subtasks) */
+  /** Top1 提及率(= rank_position=1 且 is_mention>0 的次数 / total_subtasks) */
   top1_rate: number;
-  /** 情感三档占比(分母 = mention_count>0 的样本数) */
+  /** 情感三档占比(分母 = is_mention>0 的样本数) */
   sentiment_positive: number;
   sentiment_neutral: number;
   sentiment_negative: number;
@@ -778,7 +875,7 @@ export interface CompetitorKpi {
 }
 
 export interface CompetitorTrendSeries {
-  brand_canonical: string;
+  brand: string;
   name: string;
   is_self: boolean;
   color: string;
@@ -943,3 +1040,140 @@ export function getSourcePreferences(
     )
     .then((r) => r.data);
 }
+
+// ------------------------------------------------------------------
+// Wizard / review workflow (post 20260908_0002)
+// ------------------------------------------------------------------
+
+export type WizardDevice = "pc" | "mobile";
+export type WizardMode = "fast" | "think";
+export type WizardFreq = "w1" | "w2" | "wn";
+export type WizardDay = "1" | "2" | "3" | "4" | "5" | "6" | "7";
+export type WizardGeoMode = "national_random" | "fixed";
+export type WizardSentiment = "on" | "off";
+
+export interface WizardQuestion {
+  text: string;
+  category: string;
+  tag: string | null;
+}
+
+export interface WizardBrand {
+  name: string;
+  product: string | null;
+  aliases: string[];
+}
+
+export interface WizardCompetitor {
+  name: string;
+  product: string | null;
+  aliases: string[];
+}
+
+/** Per-mode schedule entry — the inner shape of ``monitor_schedule``
+ *  on the project row and the inner shape of each ``schedules`` value
+ *  in the wizard payload. ``freq`` is the same UI hint it was in v2
+ *  (``w1`` / ``w2`` / ``wn``); ``days`` are the ISO weekday keys. */
+export interface WizardMonitorEntry {
+  freq: WizardFreq;
+  days: WizardDay[];
+}
+
+export interface WizardMonitor {
+  /** PC / mobile — controls which ``ProjectPlatform`` rows the wizard
+   *  expands on submit (web vs mobile surface). */
+  devices: WizardDevice[];
+  /** 快速 / 思考 — controls which ``ProjectPlatform`` rows the wizard
+   *  expands on submit (thinking_mode flag). Both modes can ship the
+   *  same platform as two rows so one batch covers both. */
+  modes: WizardMode[];
+  /** Per-mode schedule map; each value is either a fully-filled
+   *  ``WizardMonitorEntry`` or ``null`` when the wizard wants to keep
+   *  this mode's previous configuration unchanged. Missing key is the
+   *  same as ``null``. Independent of ``modes``: a project may pick a
+   *  platform in 思考 mode but only schedule 快速 mode. */
+  schedules: Partial<Record<WizardMode, WizardMonitorEntry | null>>;
+}
+
+export interface WizardGeo {
+  mode: WizardGeoMode;
+  region_code: string | null;
+}
+
+export interface WizardSemantic extends SemanticInfo {}
+
+/** 待审核 modal 的「每张模型卡」配置。``code`` 是网页版
+ *  (``doubao``) 或移动版 (``doubao_mobile``) 的 modelCode,两个
+ *  surface 各自一张卡,所以快速 / 思考 / 截图是逐卡独立的。
+ *  ``modes`` 每项落一条 ProjectPlatform 行(think → thinking_mode)。 */
+export interface WizardModelConfig {
+  code: string;
+  modes: WizardMode[];
+  screenshot: boolean;
+}
+
+export interface WizardPayload {
+  questions: WizardQuestion[];
+  brand: WizardBrand;
+  competitors: WizardCompetitor[];
+  models: string[];
+  /** 仅 待审核 modal 提交时非空。非空时后端忽略
+   *  ``models × monitor.devices`` 的笛卡尔展开,直接按这里的 code 落行。 */
+  models_config: WizardModelConfig[];
+  monitor: WizardMonitor;
+  categories: string[];
+  geo: WizardGeo;
+  sentiment: WizardSentiment;
+  semantic: WizardSemantic;
+}
+
+export interface WizardSubmissionPayload {
+  /** Required for super_admin; ignored for customer_admin (always forced
+   *  to their own tenant on the server side). */
+  customer_id?: number | null;
+  payload: WizardPayload;
+  /** When true the server keeps the project's existing
+   *  ``schedule_enabled`` value instead of recomputing it from
+   *  ``monitor.days``. Used by the active/disabled edit modal — the
+   *  enable flag lives on the list-page Switch and must not flip as a
+   *  side-effect of editing wizard fields. PENDING submissions leave
+   *  this unset. */
+  preserve_schedule_enabled?: boolean;
+  /** Project row ``name`` (UI: "监控名称"). Not part of WizardPayload
+   *  because the wizard has no top-level name field — wizard submit
+   *  initialises ``name = brand.name``. PENDING can't reach this field
+   *  via ``PUT /projects/{id}`` (lifecycle rule blocks business fields),
+   *  so the draft endpoint accepts it here as a side flag. */
+  name?: string | null;
+}
+
+/** Submit a new wizard run as ``status=PENDING``. Returns the created
+ *  ``ProjectOut`` so the caller can navigate straight to the pending
+ *  project id. */
+export const submitWizardProject = (body: WizardSubmissionPayload) =>
+  client.post<ProjectOut>("/projects", body).then((r) => r.data);
+
+/** Overwrite the wizard payload of an existing PENDING row. */
+export const putWizardDraft = (projectId: number, body: WizardSubmissionPayload) =>
+  client
+    .put<ProjectOut>(`/projects/${projectId}/draft`, body)
+    .then((r) => r.data);
+
+/** Super admin approves a pending submission. PENDING → ACTIVE. */
+export const approveProject = (projectId: number) =>
+  client
+    .post<ProjectOut>(`/projects/${projectId}/approve`)
+    .then((r) => r.data);
+
+/** Super admin rejects a pending submission. PENDING → REJECTED. The
+ *  ``review_note`` is shown back on the list page as a tooltip. */
+export const rejectProject = (projectId: number, reviewNote: string) =>
+  client
+    .post<ProjectOut>(`/projects/${projectId}/reject`, {
+      review_note: reviewNote,
+    })
+    .then((r) => r.data);
+
+/** Hard-delete a PENDING submission (customer_admin: own tenant only). */
+export const withdrawProject = (projectId: number) =>
+  client.delete(`/projects/${projectId}/withdraw`).then((r) => r.data);

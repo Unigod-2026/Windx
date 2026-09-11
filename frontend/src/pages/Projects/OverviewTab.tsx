@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { DatePicker, Empty, Skeleton, message } from "antd";
+import { useToolbarFilter } from "../../components/ToolbarFilterContext";
+import { Empty, Skeleton, message } from "antd";
 import * as echarts from "echarts";
-import dayjs, { type Dayjs } from "dayjs";
 import EChart from "../../components/EChart";
 import {
   getProjectOverview,
@@ -15,27 +15,13 @@ interface Props {
   projectId: number;
 }
 
-type SubTab = "summary" | "trend" | "model" | "alert";
-type RangeKey = "7" | "15" | "30" | "60" | "custom";
+type SubTab = "summary" | "trend" | "model";
 
 const SUB_TABS: { key: SubTab; label: string }[] = [
   { key: "summary", label: "总览数据" },
   { key: "trend", label: "趋势分析" },
   { key: "model", label: "模型维度" },
-  { key: "alert", label: "告警中心" },
 ];
-
-const TIME_RANGES: { key: RangeKey; label: string }[] = [
-  { key: "7", label: "7 天" },
-  { key: "15", label: "15 天" },
-  { key: "30", label: "30 天" },
-  { key: "60", label: "2 个月" },
-  { key: "custom", label: "自定义" },
-];
-
-// Backend rejects anything wider; the picker enforces it up front so the
-// user gets a disabled date rather than a 400.
-const MAX_RANGE_DAYS = 62;
 
 function fmtInt(v: number): string {
   return Math.round(v).toLocaleString("zh-CN");
@@ -47,7 +33,7 @@ function fmtRate(v: number): string {
 
 /**
  * 首屏概览 —— 复刻 docs/更新版UI/index.html #tab-overview:
- *   顶部: 二级 Tab(总览数据 / 趋势分析 / 模型维度 / 告警中心) + 时间选择器
+ *   顶部: 二级 Tab(总览数据 / 趋势分析 / 模型维度) + 时间选择器
  *   总览数据 sub-pane:
  *     4 张 KPI 卡片(总提及率 / Top1 / Top3 / 正确率,各占一色),每张带
  *     trend + KPI-meta 分子分母 + sparkline
@@ -56,42 +42,39 @@ function fmtRate(v: number): string {
  *     放大版趋势图(420px)+ 可点击 chip 图例多选过滤(echarts legend)
  *   模型维度 sub-pane:
  *     2×2 子图:提及率 / Top1 / Top2 / Top3 跨模型对比
- *   告警中心 sub-pane:
- *     Empty 占位(本次未实现告警规则,后续补)
  *
  * 单一数据源 ``GET /projects/{id}/overview``,已扩展为同时返回
  * mention_rate / correct_rate / model_dimensions。
  */
 export default function OverviewTab({ projectId }: Props) {
+  const toolbar = useToolbarFilter();
   const [subTab, setSubTab] = useState<SubTab>("summary");
-  const [range, setRange] = useState<RangeKey>("15");
-  const [custom, setCustom] = useState<[Dayjs, Dayjs]>(() => [
-    dayjs().subtract(14, "day"),
-    dayjs(),
-  ]);
-  // Half-picked range while the calendar is open — drives disabledDate so
-  // the 2-month cap is enforced by greying out dates, not by an error.
-  const [picking, setPicking] = useState<[Dayjs | null, Dayjs | null] | null>(
-    null,
-  );
   const [data, setData] = useState<ProjectOverview | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const query = useMemo(
-    () =>
-      range === "custom"
-        ? {
-            start: custom[0].format("YYYY-MM-DD"),
-            end: custom[1].format("YYYY-MM-DD"),
-          }
-        : { days: Number(range) },
-    [range, custom],
-  );
+  // 日期范围 —— 走 GlobalToolbar(用户在工具栏日期下拉里改);null 时
+  // fallback 到「近 15 天」作为安全默认。
+  const query = useMemo(() => {
+    const tdr = toolbar.selectedDateRange;
+    if (tdr) {
+      return "days" in tdr
+        ? { days: tdr.days }
+        : { start: tdr.start, end: tdr.end };
+    }
+    return { days: 15 };
+  }, [toolbar.selectedDateRange]);
 
+  // 把 toolbar 的「模型筛选版本号」拼进 useEffect 依赖,点「应用」就重拉。
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getProjectOverview(projectId, query)
+    getProjectOverview(projectId, {
+      ...query,
+      platforms: toolbar.selectedModels ?? undefined,
+      prompt_ids: toolbar.selectedPromptIds ?? undefined,
+      thinking_mode: toolbar.selectedThinkingMode ?? undefined,
+      delivery_mode: toolbar.selectedDeliveryMode ?? undefined,
+    })
       .then((o) => {
         if (cancelled) return;
         setData(o);
@@ -106,11 +89,19 @@ export default function OverviewTab({ projectId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, query]);
+  }, [
+    projectId,
+    query,
+    toolbar.version,
+    toolbar.selectedModels,
+    toolbar.selectedPromptIds,
+    toolbar.selectedThinkingMode,
+    toolbar.selectedDeliveryMode,
+  ]);
 
   return (
     <div className="overview-tab">
-      {/* 二级 Tab + 时间选择器 */}
+      {/* 二级 Tab —— 时间选择统一走 GlobalToolbar,不在这里重复展示。 */}
       <div className="secondary-tabs">
         {SUB_TABS.map((t) => (
           <div
@@ -121,41 +112,6 @@ export default function OverviewTab({ projectId }: Props) {
             {t.label}
           </div>
         ))}
-        <div className="secondary-tabs-right">
-          <div className="time-selector">
-            {TIME_RANGES.map((r) => (
-              <button
-                key={r.key}
-                type="button"
-                className={`time-btn${range === r.key ? " active" : ""}`}
-                onClick={() => setRange(r.key)}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-          {range === "custom" && (
-            <DatePicker.RangePicker
-              size="small"
-              value={custom}
-              allowClear={false}
-              disabledDate={(cur) => {
-                if (cur > dayjs().endOf("day")) return true;
-                if (!picking) return false;
-                const [from, to] = picking;
-                if (from && cur.diff(from, "day") >= MAX_RANGE_DAYS) return true;
-                if (to && to.diff(cur, "day") >= MAX_RANGE_DAYS) return true;
-                return false;
-              }}
-              onCalendarChange={(v) => setPicking(v)}
-              onOpenChange={(open) => setPicking(open ? [null, null] : null)}
-              onChange={(v) => {
-                if (v && v[0] && v[1]) setCustom([v[0], v[1]]);
-              }}
-              style={{ marginLeft: 8, width: 240 }}
-            />
-          )}
-        </div>
       </div>
 
       <div className="overview-content">
@@ -180,12 +136,6 @@ export default function OverviewTab({ projectId }: Props) {
               data-sub="model"
             >
               <ModelPane data={data} />
-            </div>
-            <div
-              className={`sub-pane${subTab === "alert" ? " active" : ""}`}
-              data-sub="alert"
-            >
-              <AlertPane />
             </div>
           </>
         )}
@@ -542,20 +492,6 @@ function ModelPane({ data }: { data: ProjectOverview }) {
         </div>
       </div>
     </div>
-  );
-}
-
-/* -------------------------------------------------------------------------
- * 告警中心 sub-pane — 当前 Empty 占位,后续接入告警规则后填充
- * ---------------------------------------------------------------------- */
-
-function AlertPane() {
-  return (
-    <Empty
-      image={Empty.PRESENTED_IMAGE_SIMPLE}
-      description="告警中心暂未接入,后续补上"
-      style={{ padding: 80 }}
-    />
   );
 }
 

@@ -41,6 +41,7 @@ import {
   type ProjectDetailOut,
   type ProjectPlatform,
   type PromptInPayload,
+  type WizardDay,
 } from "../../api/projects";
 import { WIZARD_MODELS, type WizardModelOption } from "./wizardConfig";
 
@@ -817,7 +818,12 @@ function ModelsSection({
       for (const code of codes) {
         for (const t of modes) {
           rows.push({
-            platform: code,
+            // ``platform`` 是 UI 用的逻辑模型名,永远用 value;远端 API
+            // 代码放 ``platform_code``。原先 ``platform: code`` 把 API
+            // code 写到 platform 列,mobile 行就成了 ``qianwen_mobile``,
+            // 污染分组语义。
+            platform: m.value,
+            platform_code: code,
             mode: t ? "reasoning" : "standard",
             delivery_mode: code === m.mobileCode ? "mobile" : "web",
             thinking_mode: t,
@@ -957,10 +963,26 @@ function MonitorSection({
   onSaved: () => void;
 }) {
   const [enabled, setEnabled] = useState(detail.schedule_enabled);
-  const [freq, setFreq] = useState<"w1" | "w2" | "wn">(
-    detail.monitor_freq ?? "w1",
-  );
-  const [days, setDays] = useState<string[]>(detail.monitor_days ?? []);
+  // Per-mode schedule map. ``fast`` / ``think`` are independent so a
+  // project can monitor its 快速平台 on weekdays and its 思考平台 only
+  // on weekends. ``null`` means "this mode is not scheduled".
+  const initialSchedule: Partial<
+    Record<"fast" | "think", { freq: "w1" | "w2" | "wn"; days: WizardDay[] } | null>
+  > = {
+    fast: detail.monitor_schedule?.fast
+      ? {
+          freq: detail.monitor_schedule.fast.freq,
+          days: [...detail.monitor_schedule.fast.days],
+        }
+      : null,
+    think: detail.monitor_schedule?.think
+      ? {
+          freq: detail.monitor_schedule.think.freq,
+          days: [...detail.monitor_schedule.think.days],
+        }
+      : null,
+  };
+  const [schedules, setSchedules] = useState(initialSchedule);
   const [saving, setSaving] = useState(false);
 
   // 终端 / 模式 由④监控模型决定,这里只展示不可编辑的 Segmented,
@@ -968,25 +990,25 @@ function MonitorSection({
   const mobileOn = detail.platforms.some((p) => p.delivery_mode === "mobile");
   const thinkingOn = detail.platforms.some((p) => p.thinking_mode);
 
-  const maxDays = freq === "w1" ? 1 : freq === "w2" ? 2 : 7;
+  const updateMode = (
+    modeKey: "fast" | "think",
+    next: { freq: "w1" | "w2" | "wn"; days: WizardDay[] } | null,
+  ) => setSchedules((prev) => ({ ...prev, [modeKey]: next }));
 
   const dirty =
     enabled !== detail.schedule_enabled ||
-    freq !== (detail.monitor_freq ?? "w1") ||
-    JSON.stringify(days) !== JSON.stringify(detail.monitor_days ?? []);
-
-  const setFreqAndClear = (next: "w1" | "w2" | "wn") => {
-    // 切换频率清空日期,避免出现与新频率不匹配的残留选择(对齐 NewProjectWizard L632-635)。
-    setFreq(next);
-    setDays([]);
-  };
+    schedules.fast?.freq !== (detail.monitor_schedule?.fast?.freq ?? null) ||
+    JSON.stringify(schedules.fast?.days ?? []) !==
+      JSON.stringify(detail.monitor_schedule?.fast?.days ?? []) ||
+    schedules.think?.freq !== (detail.monitor_schedule?.think?.freq ?? null) ||
+    JSON.stringify(schedules.think?.days ?? []) !==
+      JSON.stringify(detail.monitor_schedule?.think?.days ?? []);
 
   const save = () =>
     runSave(setSaving, "已保存监控配置", async () => {
       await putWeeklySchedule(detail.id, {
         schedule_enabled: enabled,
-        monitor_freq: freq,
-        monitor_days: days,
+        monitor_schedule: schedules,
       });
     }, onSaved);
 
@@ -1034,42 +1056,198 @@ function MonitorSection({
             />
           </div>
         </div>
-        <div>
-          <label style={labelStyle}>采集频率</label>
-          <Segmented
-            value={freq}
-            onChange={(v) => setFreqAndClear(v as "w1" | "w2" | "wn")}
-            options={[
-              { value: "w1", label: "一周一次" },
-              { value: "w2", label: "一周两次" },
-              { value: "wn", label: "一周多次" },
-            ]}
-          />
+        <div
+          style={{
+            fontSize: 12,
+            color: "var(--text-tertiary)",
+            marginTop: -4,
+          }}
+        >
+          每个模式可以独立配置监控频率;关闭调度的模式不会出现在 cron 里。
         </div>
-        <div>
-          <label style={labelStyle}>采集日期(最多 {maxDays} 天)</label>
-          <Checkbox.Group
-            value={days}
-            onChange={(v) => {
-              const next = v as string[];
-              if (next.length > maxDays) {
-                message.warning(`最多只能选 ${maxDays} 天`);
-              }
-              setDays(next.slice(0, maxDays));
-            }}
-            options={[
-              { value: "1", label: "周一" },
-              { value: "2", label: "周二" },
-              { value: "3", label: "周三" },
-              { value: "4", label: "周四" },
-              { value: "5", label: "周五" },
-              { value: "6", label: "周六" },
-              { value: "7", label: "周日" },
-            ]}
-          />
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 16,
+          }}
+        >
+          {(["fast", "think"] as const).map((modeKey) => (
+            <MonitorModeCard
+              key={modeKey}
+              modeKey={modeKey}
+              entry={schedules[modeKey] ?? null}
+              onChange={(next) => updateMode(modeKey, next)}
+            />
+          ))}
         </div>
       </div>
     </Card>
+  );
+}
+
+/** 单个模式的 freq + days 编辑卡片,AntD inline 版。 */
+function MonitorModeCard(props: {
+  modeKey: "fast" | "think";
+  entry: { freq: "w1" | "w2" | "wn"; days: WizardDay[] } | null;
+  onChange: (
+    next: { freq: "w1" | "w2" | "wn"; days: WizardDay[] } | null,
+  ) => void;
+}) {
+  const { modeKey, entry, onChange } = props;
+  const modeLabel = modeKey === "fast" ? "快速" : "思考";
+  if (!entry) {
+    return (
+      <div
+        style={{
+          padding: 16,
+          border: "1px dashed var(--border-default)",
+          borderRadius: 8,
+          background: "#fafafa",
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+          {modeLabel}模式调度
+        </div>
+        <div
+          style={{
+            fontSize: 12,
+            color: "var(--text-tertiary)",
+            marginBottom: 12,
+          }}
+        >
+          未启用 —— 不会在 cron 中触发
+        </div>
+        <Button onClick={() => onChange({ freq: "w1", days: [] })}>
+          启用{modeLabel}模式调度
+        </Button>
+      </div>
+    );
+  }
+  const maxDays = entry.freq === "w1" ? 1 : entry.freq === "w2" ? 2 : 7;
+  return (
+    <div
+      style={{
+        padding: 16,
+        border: "1px solid var(--border-default)",
+        borderRadius: 8,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <span style={{ fontSize: 14, fontWeight: 500 }}>
+          {modeLabel}模式调度
+        </span>
+        <Button
+          type="link"
+          size="small"
+          onClick={() => onChange(null)}
+          style={{ padding: 0 }}
+        >
+          关闭调度
+        </Button>
+      </div>
+      <div>
+        <label style={labelStyle}>采集频率</label>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "nowrap",
+            gap: 6,
+            width: "100%",
+          }}
+        >
+          {(
+            [
+              { value: "w1", label: "一周一次", hint: "每周固定 1 天采集" },
+              { value: "w2", label: "一周两次", hint: "每周固定 2 天采集" },
+              { value: "wn", label: "一周多次", hint: "每周 1~7 天自由勾选,最多 7 次" },
+            ] as const
+          ).map((opt) => {
+            const active = entry.freq === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() =>
+                  onChange({
+                    freq: opt.value as "w1" | "w2" | "wn",
+                    days: [] as WizardDay[],
+                  })
+                }
+                style={{
+                  flex: "1 1 0",
+                  minWidth: 0,
+                  width: 0,
+                  padding: "6px 4px",
+                  border: `1px solid ${active ? "var(--brand-blue)" : "var(--border-default)"}`,
+                  borderRadius: 6,
+                  background: active ? "#eff6ff" : "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 1,
+                  transition: "all 0.15s",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 500,
+                    color: active ? "var(--brand-blue)" : "var(--text-primary)",
+                  }}
+                >
+                  {opt.label}
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-tertiary)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    maxWidth: "100%",
+                  }}
+                >
+                  {opt.hint}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div>
+        <label style={labelStyle}>采集日期(最多 {maxDays} 天)</label>
+        <Checkbox.Group
+          value={entry.days}
+          onChange={(v) => {
+            const next = v as WizardDay[];
+            if (next.length > maxDays) {
+              message.warning(`最多只能选 ${maxDays} 天`);
+            }
+            onChange({ freq: entry.freq, days: next.slice(0, maxDays) });
+          }}
+          options={[
+            { value: "1", label: "周一" },
+            { value: "2", label: "周二" },
+            { value: "3", label: "周三" },
+            { value: "4", label: "周四" },
+            { value: "5", label: "周五" },
+            { value: "6", label: "周六" },
+            { value: "7", label: "周日" },
+          ]}
+        />
+      </div>
+    </div>
   );
 }
 

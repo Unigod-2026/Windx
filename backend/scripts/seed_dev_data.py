@@ -8,17 +8,17 @@ What it does
 ------------
 - Adds the 10 prompts (project 3 may already have the first two) and a
   small set of 核心词 (keywords) so the LLM extraction pass has them.
-- Adds three synthetic competitors (通义千问 / 智谱清言 / 文心一言) so
+- Adds three synthetic competitors (通义千问 / 智谱清言 / 百度文心) so
   the Top1 率 ranking chart shows five-six bars instead of three.
 - For each of the past 30 days, generates ONE batch ``Task`` with all
   10 prompts × all 3 platforms = 30 ``Subtask`` rows (~900 total).
 - Writes a generated Markdown ``answer_content`` per subtask that
   mentions the monitored brand (``deepseek``) and 1-2 competitors with
   realistic frequency, plus a short reference list.
-- Counts ``mention_count`` as a binary 1 (the production pipeline only
+- Counts ``is_mention`` as a binary 1 (the production pipeline only
   creates a row when the brand appears at least once — see
   ``app/services/extraction.py`` for the rationale).
-- Fills LLM-derived fields (``rank_position``, ``sentiment_score``,
+- Fills LLM-derived fields (``rank_position``, ``sentiment``,
   ``is_recommended``, ``concern_hits_json``) so the KPIs (Top1, Top3,
   较上一周期 delta) get realistic deltas instead of all PENDING.
 
@@ -94,7 +94,7 @@ KEYWORDS: list[str] = [
 EXTRA_COMPETITORS: list[dict] = [
     {"name": "通义千问", "aliases": ["千问", "通义", "qwen"], "note": "阿里"},
     {"name": "智谱清言", "aliases": ["智谱", "GLM", "ChatGLM"], "note": "清华系"},
-    {"name": "文心一言", "aliases": ["文心", "ERNIE", "百度文心"], "note": "百度"},
+    {"name": "百度文心", "aliases": ["文心", "ERNIE"], "note": "百度"},
     {"name": "腾讯混元", "aliases": ["混元", "Tencent"], "note": "腾讯"},
 ]
 
@@ -103,7 +103,7 @@ EXTRA_COMPETITORS: list[dict] = [
 # project's ``ProjectPlatform.sort`` after seeding.
 EXTRA_PLATFORMS: list[dict] = [
     {"platform": "qianwen", "note": "通义千问"},
-    {"platform": "wenxinyiyan", "note": "百度文心"},
+    {"platform": "baiduai", "note": "百度文心"},
     {"platform": "hunyuan", "note": "腾讯混元"},
 ]
 
@@ -551,11 +551,11 @@ def _home_platform_for(canonical: str) -> str | None:
         "通义千问": "qianwen",
         "千问": "qianwen",
         "qianwen": "qianwen",
-        "百度文心": "wenxinyiyan",
-        "文心一言": "wenxinyiyan",
-        "文心": "wenxinyiyan",
-        "wenxinyiyan": "wenxinyiyan",
-        "ERNIE": "wenxinyiyan",
+        "百度文心": "baiduai",
+        "文心一言": "baiduai",
+        "文心": "baiduai",
+        "wenxinyiyan": "baiduai",
+        "ERNIE": "baiduai",
         "腾讯混元": "hunyuan",
         "混元": "hunyuan",
         "hunyuan": "hunyuan",
@@ -770,7 +770,7 @@ def seed_project(project_id: int, *, seed: int = DEFAULT_SEED) -> None:
                     new_subs += 1
 
                     # Every (subtask × brand_target) gets a row, including
-                    # unmentioned brands (mention_count=0, status=SKIPPED).
+                    # unmentioned brands (is_mention=0, status=SKIPPED).
                     # Mirrors ``app.services.extraction._regex_pass`` so
                     # the seed reflects the same invariant the production
                     # pipeline maintains.
@@ -924,13 +924,13 @@ def _add_brand_row(
         customer_id=project.customer_id,
         prompt=prompt,
         platform=platform,
-        brand_canonical=canonical,
+        brand=canonical,
         is_self=is_self,
-        mention_count=1 if count > 0 else 0,
+        is_mention=1 if count > 0 else 0,
         rank_position=_rank_for_brand(
             rng, canonical, home_platform, platform, count
         ),
-        sentiment_score=sentiment,
+        sentiment=sentiment,
         is_recommended=(
             recommended if status == ExtractStatus.SUCCESS else None
         ),
@@ -946,7 +946,7 @@ def _add_brand_row(
         raw_extraction=(
             {
                 "rank_position": 1,
-                "sentiment_score": sentiment,
+                "sentiment": sentiment,
                 "is_recommended": recommended,
                 "concern_hits": concerns,
             }
@@ -976,7 +976,7 @@ def _add_zero_row(
 
     Per the (subtask × brand_target) invariant, every subtask has a row
     for the self brand and every configured competitor — even when the
-    answer never mentions the brand. ``mention_count=0`` and
+    answer never mentions the brand. ``is_mention=0`` and
     ``extract_status=SKIPPED`` are the production pipeline's signals that
     "no LLM call needed" — rank/sentiment stay NULL because they have no
     meaningful value when the brand isn't in the answer.
@@ -988,11 +988,11 @@ def _add_zero_row(
         customer_id=project.customer_id,
         prompt=prompt,
         platform=platform,
-        brand_canonical=canonical,
+        brand=canonical,
         is_self=is_self,
-        mention_count=0,
+        is_mention=0,
         rank_position=None,
-        sentiment_score=None,
+        sentiment=None,
         is_recommended=None,
         concern_hits_json=None,
         extract_status=ExtractStatus.SKIPPED,

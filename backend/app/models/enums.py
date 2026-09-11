@@ -26,6 +26,17 @@ class AdminStatus(str, Enum):
 
 
 class ProjectStatus(str, Enum):
+    """Lifecycle of a ``geo_projects`` row, covering both pre-approval
+    (wizard) and post-approval (active monitoring) phases.
+
+    - ``PENDING`` — wizard submission, awaiting super_admin review.
+    - ``ACTIVE`` — approved and (if schedule is enabled) running.
+    - ``REJECTED`` — super_admin dismissed the submission; ``review_note``
+      carries the reason. Read-only on the surface; kept in DB for audit.
+    - ``DISABLED`` — operator paused an ACTIVE project; existing runs
+      stay queryable but no new schedules fire.
+    """
+
     PENDING = "pending"
     ACTIVE = "active"
     REJECTED = "rejected"

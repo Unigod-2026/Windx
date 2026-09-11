@@ -32,9 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import re
 import secrets
 import time
 import uuid
@@ -69,6 +67,92 @@ class LLMError(Exception):
 # --------------------------------------------------------------------------
 
 
+def _parse_correctness_verdict(raw: str) -> tuple[bool | None, str | None]:
+    """Extract ``(is_correct, reason)`` from the LLM's free-text reply.
+
+    The prompt insists on strict JSON ``{"is_correct": bool, "reason": str}``,
+    but real model output occasionally wraps it in a ```json fence or adds
+    a trailing sentence. We try:
+
+    1. ``json.loads`` on the whole reply.
+    2. ``json.loads`` on the substring between the first ``{`` and the
+       last ``}`` (drops a leading ``Here is the JSON: `` prefix or a
+       trailing ``Let me know if...`` sentence).
+    3. Bareword fallback: look for ``"true"`` / ``"false"`` token after
+       the ``is_correct`` key — last resort, so we still count a chatty
+       reply that omitted the JSON braces.
+
+    Returns ``(None, None)`` if all three attempts fail.
+    """
+    import json
+
+    text = (raw or "").strip()
+    if not text:
+        return (None, None)
+
+    # Drop ```json ... ``` fences if the model wrapped its reply.
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    for candidate in (text, _slice_first_json_object(text)):
+        if not candidate:
+            continue
+        try:
+            obj = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            verdict = obj.get("is_correct")
+            reason = obj.get("reason")
+            if isinstance(verdict, bool):
+                if not isinstance(reason, str):
+                    reason = None
+                return (verdict, reason)
+            if isinstance(verdict, str) and verdict.lower() in ("true", "false"):
+                return (verdict.lower() == "true", reason if isinstance(reason, str) else None)
+
+    return _bareword_verdict(text)
+
+
+def _slice_first_json_object(text: str) -> str:
+    """Return the substring from the first ``{`` to the matching last ``}``.
+
+    Handles single-level nesting (sufficient for our one-key payload).
+    Returns ``""`` if no balanced pair is found.
+    """
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return ""
+
+
+def _bareword_verdict(text: str) -> tuple[bool | None, str | None]:
+    """Last-resort substring scan for ``"is_correct": true|false``."""
+    lowered = text.lower()
+    marker = "is_correct"
+    idx = lowered.find(marker)
+    if idx < 0:
+        return (None, None)
+    tail = lowered[idx + len(marker): idx + len(marker) + 40]
+    if "true" in tail and "false" not in tail:
+        return (True, None)
+    if "false" in tail:
+        return (False, None)
+    return (None, None)
+
+
 def _new_subtask_id() -> str:
     return uuid.uuid4().hex
 
@@ -85,142 +169,6 @@ def _normalise_text(text: str | None) -> str:
     if not text:
         return ""
     return "".join(text).strip()
-
-
-def _slice_first_json_object(text: str) -> str | None:
-    """Return the substring of the first balanced ``{...}`` block, or None.
-
-    Defensive helper for ``judge_brand_correctness``: the model sometimes
-    wraps the JSON in a code fence or prefixes it with reasoning chatter
-    like ``好的,这是判断结果: {...} 希望对您有帮助`` — strict ``json.loads``
-    rejects both shapes. Scanning for the first balanced object lets us
-    pull out the JSON regardless of surrounding prose.
-    """
-    if not text:
-        return None
-    start = text.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
-
-
-def _bareword_verdict(text: str) -> tuple[bool | None, str | None]:
-    """Last-resort parser: look for the verdict as a bare word in prose.
-
-    Used when ``json.loads`` and the brace scanner both fail. Returns
-    ``(verdict, reason)`` if a recognisable yes/no appears, else
-    ``(None, None)``.
-
-    Two Chinese / English gotchas that this avoids:
-
-    1. ``不正确`` contains ``正确`` as a substring — a naive substring
-       scan over the positive word ``正确`` would also match the
-       negative ``不正确`` and flip the verdict.
-    2. ``incorrect`` contains ``correct`` as a substring — same trap
-       on the English side.
-
-    Strategy: first mask out all negation-prefixed forms (Chinese ``不``
-    / ``非``, English ``in`` / ``im`` / ``ir`` / ``un`` / ``dis``) before
-    searching for standalone positive tokens. If the masked text
-    differs from the original, there's a negative in there. Then count
-    standalone positive tokens in the masked text. Whichever count wins.
-
-    Single-character ``错`` is treated as negative so a model that
-    just says ``错`` (Chinese for "wrong") still counts — same goes for
-    a standalone ``正确`` counting as positive.
-    """
-    if not text:
-        return None, None
-    lowered = text.lower()
-    masked = re.sub(
-        r"(不\S+|非\S+|错误|incorrect|inconsistent|invalid|false|wrong)",
-        " ",
-        lowered,
-    )
-    negative_present = masked != lowered or bool(re.search(r"(?<![不非])错", lowered))
-    positive = bool(
-        re.search(
-            r"(回答正确|答案正确|判断正确|一致|相符|吻合|match|correct|true|yes|ok|对的|正确(?![是到]))",
-            masked,
-        )
-    )
-    if negative_present and not positive:
-        return False, (text.strip()[:200] or None)
-    if positive and not negative_present:
-        return True, (text.strip()[:200] or None)
-    return None, None
-
-
-def _parse_correctness_verdict(
-    text: str,
-) -> tuple[bool | None, str | None]:
-    """Pull ``(is_correct, reason)`` out of whatever the model said.
-
-    Three fallback passes, in order of strictness:
-
-    1. ``json.loads`` on the raw text — succeeds when the model emits
-       pure JSON.
-    2. Slice the first balanced ``{...}`` then ``json.loads`` — recovers
-       the verdict when the model prefixes / suffixes the JSON with
-       prose or wraps it in a fence.
-    3. Bare-word scan for ``正确/不正确`` / ``true/false`` — last resort
-       so a chatty model that never emits JSON still counts.
-
-    Returns ``(None, None)`` only when nothing recognisable was found,
-    so the retry wrapper knows to back off and try again.
-    """
-    text = (text or "").strip()
-    if not text:
-        return None, None
-
-    try:
-        payload = json.loads(text)
-    except Exception:
-        payload = None
-    if isinstance(payload, dict) and isinstance(
-        payload.get("is_correct"), bool
-    ):
-        return (
-            payload["is_correct"],
-            str(payload.get("reason") or "") or None,
-        )
-
-    slice_ = _slice_first_json_object(text)
-    if slice_:
-        try:
-            payload = json.loads(slice_)
-        except Exception:
-            payload = None
-        if isinstance(payload, dict) and isinstance(
-            payload.get("is_correct"), bool
-        ):
-            return (
-                payload["is_correct"],
-                str(payload.get("reason") or "") or None,
-            )
-
-    return _bareword_verdict(text)
 
 
 # --------------------------------------------------------------------------
@@ -616,7 +564,7 @@ class LLMClient:
         return cleaned
 
     # ------------------------------------------------------------------
-    # Public API: brand-answer correctness judge (called after extraction)
+    # Public API: correctness judge (extraction pipeline)
     # ------------------------------------------------------------------
 
     async def judge_brand_correctness(
@@ -626,52 +574,41 @@ class LLMClient:
         brand: str,
         answer: str,
     ) -> tuple[bool | None, str | None]:
-        """Ask the LLM whether ``answer`` matches ``selling_points`` for ``brand``.
+        """Ask the LLM whether ``answer`` agrees with the brand's selling points.
 
-        Returns ``(is_correct, reason)``. ``is_correct`` is ``True`` /
-        ``False`` on a successful verdict, ``None`` when the model
-        didn't give us anything parseable (the retry wrapper in
-        :meth:`judge_brand_correctness_sync` will then back off and
-        try again).
+        Returns ``(is_correct, reason)``:
+        - ``(True, "...")``   judge says answer is consistent
+        - ``(False, "...")``  judge says answer contradicts selling points
+        - ``(None, "<error>")`` on any failure (network / JSON parse / empty
+          response); the extraction pipeline maps this to
+          ``geo_brand_mentions.is_correct = None``.
 
-        Tools are disabled — the judge only needs the prompt + answer,
-        no web research. The prompt demands a strict JSON object; we
-        parse it with three fallbacks (raw JSON → balanced-brace slice
-        → bare-word scan) so a chatty model that emits
-        ``好的,这是判断:{...} 希望对您有帮助`` still counts.
+        The prompt (``PROMPT_JUDGE_CORRECTNESS``) instructs the model to
+        return strict JSON ``{"is_correct": bool, "reason": str}`` — we
+        parse defensively (strip code fences, fall back to substring
+        match for ``true`` / ``false``) so a slightly chatty response
+        still counts.
         """
-        # The prompt template has a single ``{brand}`` placeholder.
-        system = PROMPT_JUDGE_CORRECTNESS.format(brand=brand or "")
-        bullets = "\n".join(
-            f"- {pt.strip()}" for pt in selling_points if pt and pt.strip()
-        )
-        if not bullets:
-            bullets = "（未填写）"
-        # Cap the answer at 8 KB — the judge only needs enough text to
-        # spot a contradiction, and very long answers tend to push
-        # small models into rambling.
-        answer_trim = (answer or "").strip()
-        if len(answer_trim) > 8000:
-            answer_trim = answer_trim[:8000] + "\n...(截断)"
+        bullets = "\n".join(f"- {sp}" for sp in selling_points if sp and sp.strip())
         user_prompt = (
-            f"【项目核心卖点】\n{bullets}\n\n"
-            f"【被监测品牌】{brand or '（未知）'}\n\n"
-            f"【AI 回答正文】\n{answer_trim or '（空）'}\n\n"
-            "请按 system 指令输出 JSON。"
+            f"【监控品牌】{brand}\n\n"
+            f"【核心卖点】\n{bullets or '(空)'}\n\n"
+            f"【LLM 回答正文】\n{(answer or '').strip() or '(空)'}"
         )
         try:
-            text, _transcript, _structured = await self.ask(
-                system=system,
+            raw_answer, _, _ = await self.ask(
+                system=PROMPT_JUDGE_CORRECTNESS,
                 user_prompt=user_prompt,
                 tools=None,
-                max_tokens=512,
+                max_tokens=256,
             )
-        except LLMError as exc:
-            logger.warning(
-                "judge_brand_correctness: LLM call failed: %s", exc
-            )
-            return None, f"llm call failed: {exc}"
-        return _parse_correctness_verdict(text)
+        except Exception as exc:  # noqa: BLE001 - propagate as None to caller
+            return (None, f"llm call failed: {exc}")
+
+        verdict, reason = _parse_correctness_verdict(raw_answer)
+        if verdict is None:
+            return (None, f"unparseable verdict: {raw_answer[:120]!r}")
+        return (verdict, reason)
 
     def judge_brand_correctness_sync(
         self,
@@ -680,22 +617,17 @@ class LLMClient:
         brand: str,
         answer: str,
     ) -> tuple[bool | None, str | None]:
-        """Sync wrapper with the 5s / 10s retry the user requested.
+        """Sync wrapper with retry: 5s, 10s. Returns ``(None, msg)`` on
+        three failed attempts.
 
-        Three attempts total — one initial call plus two retries with
-        5s and 10s back-off between them (per the user spec "可以隔5,10s
-        再重复两次"). The LLM endpoint occasionally 429s on bursts;
-        the back-off is short enough to stay inside the
-        ``extract_brand_mentions`` wall clock budget but long enough to
-        clear the typical rate-limit window. After exhausting retries
-        we return ``(None, last_reason)`` so the caller can write
-        ``is_correct=None`` without losing the heavy-fields pipeline
-        state.
+        Used by :mod:`app.services.extraction` — ``extract_brand_mentions``
+        is sync so the LLM call has to be wrapped. Each subtask only fires
+        one judge call (covers every self row at once), so the retry
+        budget doesn't multiply per row.
         """
         delays = (5, 10)
-        last: tuple[bool | None, str | None] = (None, "no attempt yet")
-        total_attempts = 1 + len(delays)
-        for attempt in range(1, total_attempts + 1):
+        last: tuple[bool | None, str | None] = (None, "no attempt")
+        for attempt in range(1 + len(delays) + 1):  # 1 first try + 2 retries
             try:
                 last = asyncio.run(
                     self.judge_brand_correctness(
@@ -704,27 +636,20 @@ class LLMClient:
                         answer=answer,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 - last-chance wrap
+            except Exception as exc:  # noqa: BLE001 - asyncio.run can re-raise
                 last = (None, f"llm call raised: {exc}")
             verdict, reason = last
             if verdict is not None:
-                if attempt > 1:
-                    logger.info(
-                        "judge_brand_correctness: brand=%s succeeded on attempt %d/%d",
-                        brand, attempt, total_attempts,
-                    )
-                return verdict, reason
-            if attempt < total_attempts:
+                return (verdict, reason)
+            if attempt < 1 + len(delays):
                 wait = delays[attempt - 1]
                 logger.warning(
-                    "judge_brand_correctness: brand=%s attempt %d/%d failed (%s), sleeping %ds",
-                    brand, attempt, total_attempts, reason, wait,
+                    "judge_brand_correctness_sync attempt %d failed (%s), retry in %ds",
+                    attempt + 1,
+                    reason,
+                    wait,
                 )
                 time.sleep(wait)
-        logger.warning(
-            "judge_brand_correctness: brand=%s exhausted %d attempts, returning None",
-            brand, total_attempts,
-        )
         return last
 
 

@@ -19,7 +19,7 @@ What it does:
 
 What it does NOT do:
 
-- It does not re-run the regex pass. ``mention_count`` was filled by
+- It does not re-run the regex pass. ``is_mention`` was filled by
   ``backfill_brand_mentions.py`` (or the live pipeline); re-running
   ``extract_brand_mentions_async`` keeps those values intact.
 - It does not touch rows with ``extract_status`` other than

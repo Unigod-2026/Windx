@@ -26,6 +26,7 @@ dist/
 # Logs / runtime data
 backend/logs/
 backend/data/
+scripts/.logs/
 
 # Local DB files (sqlite dev db)
 *.db

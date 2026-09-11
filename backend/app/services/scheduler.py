@@ -12,13 +12,14 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session_factory
 from app.models.common import now_local
-from app.models.enums import RegionStrategy, RunStatus, RunTrigger
+from app.models.enums import CompetitorStatus, RegionStrategy, RunStatus, RunTrigger
 from app.models.project import Project
 from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.services.extraction import extract_brand_mentions
 from app.services.llm_client import LLMClient, LLMError
 from app.services.molizhishu_client import MolizhishuClient, MolizhishuError
+from app.services.schedule_time import cooldown_key as _build_cooldown_key
 
 logger = logging.getLogger("app.scheduler")
 
@@ -72,11 +73,17 @@ NATIONAL_RANDOM_POOL: tuple[str, ...] = (
 )
 
 
-def cooldown_key(project_id: int, slot_index: int, when: datetime) -> str:
-    return (
-        f"project-{project_id}-slot-{slot_index}-"
-        f"{when.strftime('%Y%m%d%H')}{when.minute // 5}"
-    )
+def cooldown_key(project_id: int, slot_index: int, when: datetime, *, mode: str = "") -> str:
+    """Backwards-compatible wrapper around :func:`app.services.schedule_time.cooldown_key`.
+
+    The canonical helper lives in ``schedule_time`` so the API and the
+    scheduler can never disagree on the key shape — a mismatch would
+    silently break the 5-minute cooldown dedupe between manual and cron
+    triggers. We accept ``when`` as a positional arg to match the old
+    signature (``cooldown_key(project_id, slot_index, now)``) and forward
+    the new ``mode`` kwarg.
+    """
+    return _build_cooldown_key(project_id, slot_index, when, mode=mode)
 
 
 def _resolve_region_code(project: Project, *, rand: random.Random | None = None) -> str | None:
@@ -137,10 +144,18 @@ def run_project(
     slot_index: int,
     trigger_type: str | RunTrigger,
     *,
+    mode: str = "",
     rand: random.Random | None = None,
     run_id: int | None = None,
 ) -> int | None:
     """Submit one project run and persist its local task summary.
+
+    ``mode`` (``"fast"`` / ``"think"`` / ``""``) selects which half of
+    the project's platforms to submit. Cron-triggered runs pass the mode
+    that registered the firing job; manual triggers and the API's
+    ``trigger_schedule`` endpoint pass ``""`` so every platform ships
+    in one batch — operator-driven runs want the full picture, not
+    half a project.
 
     ``rand`` is injectable so tests can pin the "national random" pick.
 
@@ -170,6 +185,8 @@ def run_project(
             raise RuntimeError(f"schedule run {run_id} not found")
         run.started_at = now
         run.status = RunStatus.RUNNING
+        if mode:
+            run.mode = mode
         db.commit()
         db.refresh(run)
     else:
@@ -177,10 +194,11 @@ def run_project(
             project_id=project_id,
             slot_index=slot_index,
             trigger_type=trigger_type,
+            mode=mode,
             triggered_at=now,
             started_at=now,
             status=RunStatus.RUNNING,
-            cooldown_key=cooldown_key(project_id, slot_index, now),
+            cooldown_key=cooldown_key(project_id, slot_index, now, mode=mode),
         )
         db.add(run)
         try:
@@ -196,8 +214,8 @@ def run_project(
             db.query(Project)
             .options(
                 selectinload(Project.prompts),
-                selectinload(Project.keywords),
                 selectinload(Project.platforms),
+                selectinload(Project.project_competitors),
             )
             .filter(Project.id == project_id)
             .one_or_none()
@@ -208,22 +226,40 @@ def run_project(
         prompts = [item.prompt for item in project.prompts]
         if not prompts:
             raise RuntimeError("prompts 为空")
-        keywords = [item.keyword for item in project.keywords]
         # The remote expects ``mode`` to be the LLM mode
-        # (standard/reasoning/search/reasoning_search — see docs/api/submit-task.md).
+        # (standard/reasoning/search/reasoning_search — see
+        # https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/submit-task.md).
         # Earlier revisions mistakenly forwarded ``delivery_mode.value``
         # ("web"/"mobile") into ``mode``; that ships a value the live endpoint
         # silently drops or rejects. ``delivery_mode`` (web/mobile surface)
         # is intentionally NOT forwarded — the live remote has no surface
         # field and the legacy docs example doesn't include one.
+        #
+        # ``mode`` (the schedule mode kwarg) selects which platform rows
+        # ship: ``"fast"`` keeps rows with ``thinking_mode=False``,
+        # ``"think"`` keeps ``thinking_mode=True``, ``""`` keeps both —
+        # matches the cron job's split vs the manual trigger's "all at
+        # once" semantics. The platform list is intentionally derived
+        # here rather than at job-registration time so a fast/think row
+        # that's added between two cron fires lands on the next fire
+        # without needing a reload.
+        want_thinking = mode == "think"
+        platform_rows = [
+            item
+            for item in project.platforms
+            if mode == "" or bool(item.thinking_mode) == want_thinking
+        ]
         platforms = [
             {
-                "platform": item.platform,
+                # ``platform_code`` is the resolved API platform string for
+                # both web and mobile rows (web: ``doubao``, mobile:
+                # ``doubao_mobile`` / ``baidu_mobile``); always forward it.
+                "platform": item.platform_code,
                 "mode": item.mode,
                 "screenshot": item.screenshot,
                 "thinkingMode": item.thinking_mode,
             }
-            for item in project.platforms
+            for item in platform_rows
         ]
         if not platforms:
             raise RuntimeError("platforms 为空")
@@ -238,23 +274,45 @@ def run_project(
 
             validate_platforms(platforms)
         payload: dict = {"prompts": prompts, "platforms": platforms}
-        if keywords:
-            payload["monitorKeywords"] = ",".join(keywords)
+        # Brand hint for the remote's brand-mention extraction
+        # (``mentionPosition`` / ``sentiment`` / ``mentionContext`` /
+        # ``allRankings`` / ``competitorRankings``). Per the official
+        # ``POST /task/batch/shared`` schema, ``monitorKeywords`` is the
+        # single monitor brand string and ``monitorKeywordAliases`` is a
+        # flat list of its short-forms; ``competitors`` is a structured
+        # list of ``{name, aliases}`` objects. Without these the remote
+        # leaves every brand field empty. ``brand`` is non-empty in
+        # practice (project memory ``project_brand_nonempty``) but the
+        # ``if brand`` guard stays so a brandless project never sends a
+        # confusing half-payload.
+        brand = (project.brand or "").strip()
+        aliases = [a for a in (project.aliases or []) if a and a.strip()]
+        if brand:
+            payload["monitorKeywords"] = brand
+            payload["monitorKeywordAliases"] = aliases
+        competitor_pairs: list[tuple[str, list[str]]] = [
+            ((c.name or "").strip(), [a for a in (c.aliases or []) if a and a.strip()])
+            for c in project.project_competitors
+            if c.status == CompetitorStatus.CONFIRMED
+        ]
+        if competitor_pairs:
+            payload["competitors"] = [
+                {"name": name, "aliases": als}
+                for name, als in competitor_pairs
+                if name
+            ]
         # Callback URL is intentionally not forwarded: this build runs the
         # LLM backend synchronously so there's no async result to push.
         region = _resolve_region_code(project, rand=rand)
         if region:
             payload["regionCode"] = [region]
 
-        # The LLM client wants the monitor brand + its aliases so it can
-        # render them into the prompt (the real molizhishu remote has no
-        # such concept and ignores them). Both live on ``geo_projects``
-        # now; ``brand`` is a single string, ``aliases`` is the JSON list
-        # of short-forms. ``keywords`` (核心词) is a separate concept and
-        # is NOT used here.
-        brand = project.brand or ""
-        aliases = list(project.aliases or [])
-
+        # The LLM client also wants the monitor brand + its aliases so it
+        # can render them into the prompt itself (a separate concern
+        # from the API-side brand hint above). The remote molizhishu
+        # client accepts and ignores these kwargs; the local LLM client
+        # uses them to build the system prompt per
+        # ``render_monitor_prompt``.
         client = _build_submit_client(settings)
         data = client.submit_task_sync(payload, brand=brand, aliases=aliases)
 
@@ -369,9 +427,14 @@ async def run_project_async(
     project_id: int,
     slot_index: int,
     trigger_type: str | RunTrigger,
+    mode: str = "",
     *,
     run_id: int | None = None,
 ) -> int | None:
+    # ``mode`` is positional (not kwarg-only) so APScheduler's
+    # ``check_callable_args`` accepts the 4-arg ``args`` list built by
+    # ``scheduler_runtime.reload_jobs``. Manual / API callers that don't
+    # care about the mode pass the empty string by default.
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -380,6 +443,7 @@ async def run_project_async(
             project_id,
             slot_index,
             trigger_type,
+            mode=mode,
             run_id=run_id,
         ),
     )

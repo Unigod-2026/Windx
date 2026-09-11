@@ -62,10 +62,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = ""
     jwt_expire_days: int = 0
 
+    # ---- Monitoring schedule (per-project weekly runs) --------------------
+    # Time-of-day (Asia/Shanghai) when weekly monitor runs fire. Project
+    # rows only store ``monitor_freq`` (w1/w2/wn) + ``monitor_days``; the
+    # actual clock time comes from these env vars so ops can shift the
+    # window in one place. Default 12:00.
+    monitor_default_hour: int = 12
+    monitor_default_minute: int = 0
+
     # ---- Billing ----------------------------------------------------------
-    # Per-call LLM price in CNY. Surfaced via ``GET /api/config/llm-pricing``
-    # so the edit-project modal's "预计费用" footer can show a live number
-    # without embedding a hardcoded rate in the bundle.
+    # Cost per single LLM API call (CNY), surfaced to the frontend so the
+    # 「编辑监控项目」modal can show 「预计费用 = 单价 × 调用次数」. The
+    # value is informational only — actual invoicing happens against the
+    # LLM provider. Default 0 means the UI shows ¥0.00 (no surprise cost).
     api_cost_per_call: float = 0.0
 
 

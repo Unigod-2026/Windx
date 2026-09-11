@@ -41,7 +41,7 @@ export default function OverviewTable({ rows }: { rows: CompetitorKpi[] }) {
               </thead>
               <tbody>
                 {rows.map((row) => (
-                  <tr key={row.brand_canonical}>
+                  <tr key={row.brand}>
                     <td>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         {row.is_self && <Tag color="blue" style={{ margin: 0 }}>自身</Tag>}

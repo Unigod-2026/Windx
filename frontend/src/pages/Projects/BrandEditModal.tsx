@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { Button, Input, Modal, Tag, message } from "antd";
-import { PlusOutlined, ThunderboltOutlined } from "@ant-design/icons";
-import { X } from "lucide-react";
+import { Button, Input, Modal, message } from "antd";
+import { ThunderboltOutlined } from "@ant-design/icons";
 
 interface BrandEditModalProps {
   open: boolean;
@@ -35,10 +34,10 @@ export default function BrandEditModal({
   }, [open, initialName, initialAliases]);
 
   const addAlias = () => {
-    const v = aliasDraft.trim();
+    const v = aliasDraft.trim().replace(/[,，]$/, "");
     if (!v) return;
     if (aliases.includes(v)) {
-      message.warning(`已存在别名「${v}」`);
+      setAliasDraft("");
       return;
     }
     setAliases([...aliases, v]);
@@ -115,57 +114,77 @@ export default function BrandEditModal({
         style={{
           display: "flex",
           flexWrap: "wrap",
-          gap: 6,
-          minHeight: 40,
-          padding: "8px 10px",
+          alignItems: "center",
+          gap: 4,
+          minHeight: 32,
+          padding: "4px 8px",
           border: "1px solid var(--border-default, #d1d5db)",
           borderRadius: 6,
           background: "#fff",
-          marginBottom: 8,
         }}
       >
-        {aliases.length === 0 ? (
+        {aliases.length === 0 && aliasDraft === "" && (
           <span style={{ color: "var(--text-quaternary)", fontSize: 13 }}>
             尚未添加别名
           </span>
-        ) : (
-          aliases.map((a, i) => (
-            <Tag
-              key={`${a}-${i}`}
-              closable
-              onClose={(e) => {
-                e.preventDefault();
-                removeAlias(i);
-              }}
-              closeIcon={<X size={12} />}
-              style={{ margin: 0, padding: "2px 8px" }}
-            >
-              {a}
-            </Tag>
-          ))
         )}
-      </div>
-
-      <Input
-        placeholder="输入品牌别名,回车添加"
-        value={aliasDraft}
-        onChange={(e) => setAliasDraft(e.target.value)}
-        onPressEnter={(e) => {
-          e.preventDefault();
-          addAlias();
-        }}
-        suffix={
-          <Button
-            type="link"
-            size="small"
-            onClick={addAlias}
-            icon={<PlusOutlined />}
-            style={{ padding: 0 }}
+        {aliases.map((a, i) => (
+          <span
+            key={`${a}-${i}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              background: "#eff6ff",
+              color: "var(--brand-blue)",
+              border: "1px solid #bfdbfe",
+              borderRadius: 4,
+              padding: "1px 6px",
+              fontSize: 13,
+              lineHeight: "20px",
+            }}
           >
-            添加
-          </Button>
-        }
-      />
+            {a}
+            <button
+              type="button"
+              aria-label={`删除 ${a}`}
+              onClick={() => removeAlias(i)}
+              style={{
+                background: "none",
+                border: 0,
+                color: "var(--brand-blue)",
+                fontSize: 13,
+                lineHeight: 1,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          placeholder={aliases.length === 0 ? "输入品牌别名,回车添加" : ""}
+          value={aliasDraft}
+          onChange={(e) => setAliasDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              addAlias();
+            }
+          }}
+          style={{
+            border: 0,
+            outline: "none",
+            fontSize: 13,
+            flex: 1,
+            minWidth: 100,
+            background: "transparent",
+            padding: "2px 4px",
+          }}
+        />
+      </div>
     </Modal>
   );
 }

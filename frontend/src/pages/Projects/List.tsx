@@ -1,7 +1,6 @@
 import {
   Button,
   Card,
-  Form,
   Input,
   Modal,
   Select,
@@ -20,11 +19,10 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSetCurrentProject } from "../../auth/ProjectContext";
 import dayjs from "dayjs";
 import {
-  createProject,
   deleteProject,
   getProject,
   listProjects,
@@ -38,13 +36,6 @@ import {
 import { listCustomers, type Customer } from "../../api/customers";
 import BatchQuestionModal from "./BatchQuestionModal";
 import TaskDetailModal from "./TaskDetailModal";
-
-interface CreateFormValues {
-  customer_id: number;
-  name: string;
-  code: string;
-  description?: string;
-}
 
 interface RowDetail {
   prompts: number;
@@ -132,6 +123,7 @@ function renderRunSummary(r: ScheduleRunOut): string {
 export default function ProjectsList() {
   const setCurrentProjectId = useSetCurrentProject();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [items, setItems] = useState<ProjectOut[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -139,11 +131,12 @@ export default function ProjectsList() {
   const [loading, setLoading] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [customerFilter, setCustomerFilter] = useState<number | undefined>(undefined);
-  const [statusFilter, setStatusFilter] = useState<"active" | "disabled" | undefined>(undefined);
+  // 「监控项目」页面只看 status=active 行;筛选 dropdown 改按调度状态过滤:
+  // 启用 = schedule_enabled=true(正在跑),停用 = false(暂停调度)。
+  const [scheduleFilter, setScheduleFilter] = useState<boolean | undefined>(undefined);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [details, setDetails] = useState<Record<number, RowDetail>>({});
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createForm] = Form.useForm<CreateFormValues>();
+  // 新建项目 —— 已迁移到独立页面 ``/admin/new-project``,这里只跳过去。
   // modal state — when set, opens BatchQuestionModal over the list page
   const [modalProjectId, setModalProjectId] = useState<number | undefined>(undefined);
   const [taskDetailId, setTaskDetailId] = useState<number | undefined>(undefined);
@@ -160,7 +153,7 @@ export default function ProjectsList() {
       setSearchParams(next, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [searchParams, setSearchParams]);
 
   // Publish the active project to ProjectContext whenever the in-place
   // modal is opened (via row click or auto-open from ?open=<id>) so the
@@ -210,7 +203,8 @@ export default function ProjectsList() {
         page: p,
         size: pageSize,
         customer_id: customerFilter,
-        status: statusFilter,
+        status: "active",
+        schedule_enabled: scheduleFilter,
       });
       setItems(data.items);
       setTotal(data.total);
@@ -238,7 +232,7 @@ export default function ProjectsList() {
     load(1);
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerFilter, statusFilter]);
+  }, [customerFilter, scheduleFilter]);
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase();
@@ -251,28 +245,8 @@ export default function ProjectsList() {
   }, [items, keyword]);
 
   const openCreate = () => {
-    createForm.resetFields();
-    setCreateOpen(true);
-  };
-
-  const onCreate = async () => {
-    try {
-      const v = await createForm.validateFields();
-      const created = await createProject(v.customer_id, {
-        name: v.name,
-        code: v.code,
-        description: v.description || null,
-      });
-      message.success("已创建");
-      setCreateOpen(false);
-      load(1);
-      setPage(1);
-      // jump straight into the batch-edit modal for the freshly-created project
-      setModalProjectId(created.id);
-    } catch (err) {
-      if ((err as { errorFields?: unknown }).errorFields) return;
-      message.error((err as Error).message || "创建失败");
-    }
+    // 列表页头部「新建项目」按钮 —— 直接跳到独立向导页。
+    navigate("/admin/new-project");
   };
 
   const onToggle = async (record: ProjectOut, enabled: boolean) => {
@@ -288,8 +262,9 @@ export default function ProjectsList() {
 
   const onTrigger = async (record: ProjectOut) => {
     try {
-      await triggerRun(record.id);
-      message.success("已开始执行");
+      const res = await triggerRun(record.id);
+      const count = 1 + (res.think_run_id ? 1 : 0);
+      message.success(count > 1 ? `已开始执行 (${count} 个任务)` : "已开始执行");
       load(page);
     } catch (err) {
       const e = err as { response?: { status?: number; data?: { detail?: string } } };
@@ -421,18 +396,11 @@ export default function ProjectsList() {
       key: "scheduleEnabled",
       width: 80,
       render: (_, record) => (
-        <Tooltip
-          title={
-            record.status === "disabled" ? "项目已停用,无法开启调度" : ""
-          }
-        >
-          <Switch
-            checked={record.schedule_enabled}
-            disabled={record.status === "disabled"}
-            onChange={(v) => onToggle(record, v)}
-            size="small"
-          />
-        </Tooltip>
+        <Switch
+          checked={record.schedule_enabled}
+          onChange={(v) => onToggle(record, v)}
+          size="small"
+        />
       ),
     },
     {
@@ -587,14 +555,14 @@ export default function ProjectsList() {
             optionFilterProp="label"
           />
           <Select
-            placeholder="全部状态"
+            placeholder="全部调度"
             allowClear
             style={{ width: 140 }}
-            value={statusFilter}
-            onChange={(v) => setStatusFilter(v)}
+            value={scheduleFilter}
+            onChange={(v) => setScheduleFilter(v)}
             options={[
-              { value: "active", label: "启用" },
-              { value: "disabled", label: "停用" },
+              { value: true, label: "启用" },
+              { value: false, label: "停用" },
             ]}
           />
         </div>
@@ -616,48 +584,6 @@ export default function ProjectsList() {
           }}
         />
       </Card>
-
-      <Modal
-        open={createOpen}
-        title="新建项目"
-        okText="创建"
-        cancelText="取消"
-        onCancel={() => setCreateOpen(false)}
-        onOk={onCreate}
-        destroyOnClose
-      >
-        <Form form={createForm} layout="vertical" preserve={false}>
-          <Form.Item
-            name="customer_id"
-            label="所属客户"
-            rules={[{ required: true, message: "请选择客户" }]}
-          >
-            <Select
-              placeholder="选择客户"
-              options={customers.map((c) => ({ value: c.id, label: c.name }))}
-              showSearch
-              optionFilterProp="label"
-            />
-          </Form.Item>
-          <Form.Item
-            name="name"
-            label="项目名称"
-            rules={[{ required: true, message: "请输入项目名称" }]}
-          >
-            <Input placeholder="例如:品牌形象监控" />
-          </Form.Item>
-          <Form.Item
-            name="code"
-            label="项目编号"
-            rules={[{ required: true, message: "请输入项目编号" }]}
-          >
-            <Input placeholder="客户内唯一,例如 PROJ-0001" />
-          </Form.Item>
-          <Form.Item name="description" label="项目描述">
-            <Input.TextArea rows={3} placeholder="选填" />
-          </Form.Item>
-        </Form>
-      </Modal>
 
       <BatchQuestionModal
         open={modalProjectId !== undefined}

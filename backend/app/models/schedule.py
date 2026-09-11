@@ -81,6 +81,12 @@ class ScheduleRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # ``project-{id}-slot-{idx}-{YYYYMMDDHH}{floor(minute/5)}`` — 5 minute dedupe window.
     cooldown_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Which monitor mode triggered this run: ``fast`` / ``think`` / ``""``
+    # (empty for manual triggers where the operator didn't pick a mode).
+    # Cron-driven runs always carry a value; the column exists so the
+    # 5-minute cooldown key can be made mode-aware and the dashboard can
+    # bucket runs by mode for trend / KPI purposes.
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="", server_default="")
 
     project: Mapped["Project | None"] = relationship(
         "Project",
@@ -96,5 +102,5 @@ class ScheduleRun(Base):
     def __repr__(self) -> str:
         return (
             f"<ScheduleRun id={self.id} project_id={self.project_id} "
-            f"slot_index={self.slot_index} status={self.status!r}>"
+            f"slot_index={self.slot_index} mode={self.mode!r} status={self.status!r}>"
         )

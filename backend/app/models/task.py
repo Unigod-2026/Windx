@@ -24,6 +24,7 @@ from sqlalchemy import (
     Enum,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -54,7 +55,8 @@ class Task(Base):
         Index("ix_tasks_project_task", "project_id", "task_id"),
     )
 
-    # Remote taskId (32-char hex) doubles as the PK — see docs/api/submit-task.md.
+    # Remote taskId (32-char hex) doubles as the PK — see
+    # https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/submit-task.md.
     task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     prompts_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -143,7 +145,8 @@ class Subtask(Base):
         ),
     )
 
-    # Remote subTaskId (32-char hex) is the PK — see docs/api/submit-task.md.
+    # Remote subTaskId (32-char hex) is the PK — see
+    # https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/submit-task.md.
     subtask_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # Plain column, no FK: deletes of the parent Task row do not cascade and
     # the value is the remote taskId rather than a local surrogate.
@@ -160,6 +163,14 @@ class Subtask(Base):
     citation_list_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     reasoning_process_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     recommended_questions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Molizhishu 2026-09 API 升级后 subTaskList[] 新增字段,见 alembic
+    # ``20260910_0001_subtask_new_api_fields``。下游当前没有消费方,纯
+    # schema 推进 —— 真有 UI 用再说。
+    share_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    search_keywords_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    video_list_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    goods_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    amount: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     media_content_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     proxy_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)

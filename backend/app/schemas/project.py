@@ -1,9 +1,16 @@
 """Pydantic schemas for the Project API surface.
 
-The v2 schedule is embedded on the project row, so the schedule schemas
-live here too rather than in a ``schedule`` module. Slots are exchanged as
-a list (``[{"hour": 9, "minute": 0}, ...]``, at most 2) and mapped onto the
-``slot1_*`` / ``slot2_*`` columns by ``Project.set_schedule_slots``.
+The v4 schedule is embedded on the project row and is **per-mode**:
+``monitor_schedule`` is a ``{fast: {freq, days}, think: {freq, days}}``
+map so a project can monitor its fast / think platforms on independent
+weekly cadences. Time-of-day is not per-project: the scheduler reads it
+from the ``MONITOR_DEFAULT_HOUR`` / ``MONITOR_DEFAULT_MINUTE`` env vars.
+
+``MonitorScheduleEntry`` is the inner shape used both on the wizard
+(wizard side writes both keys) and on the project row (storage
+round-trips through the same shape). An entry whose ``days`` is empty
+is treated as "this mode is not scheduled" — ``schedule_enabled`` still
+flips on if the other mode is configured.
 """
 
 from __future__ import annotations
@@ -11,7 +18,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import (
     CompetitorOrigin,
@@ -26,17 +33,10 @@ from app.models.enums import (
 )
 
 
-class SlotIn(BaseModel):
-    hour: int = Field(..., ge=0, le=23)
-    minute: int = Field(..., ge=0, le=59)
-
-
-class SlotOut(BaseModel):
-    # 1-based to match the ``slot1_*`` / ``slot2_*`` columns; 0 is reserved
-    # for manual triggers on ScheduleRun.
-    slot_index: int
-    hour: int
-    minute: int
+MonitorMode = Literal["fast", "think"]
+MonitorFreq = Literal["w1", "w2", "wn"]
+MonitorDay = Literal["1", "2", "3", "4", "5", "6", "7"]
+MonitorDevice = Literal["pc", "mobile"]
 
 
 class PlatformIn(BaseModel):
@@ -58,10 +58,29 @@ class PlatformOut(BaseModel):
 
     id: int
     platform: str
+    # Resolved API platform string (web or mobile) that the scheduler forwards
+    # verbatim. Always set — for web rows this equals ``platform`` (e.g.
+    # ``doubao``); for mobile rows it's the mapped variant (e.g.
+    # ``doubao_mobile`` / ``baidu_mobile``).
+    platform_code: str
     mode: str
     delivery_mode: DeliveryMode
     thinking_mode: bool
     screenshot: int
+
+
+class MonitorScheduleEntry(BaseModel):
+    """One mode's weekly plan.
+
+    ``days`` is the source of truth for cadence — ``freq`` is a UI hint
+    that follows ``len(days)`` at render time. Empty ``days`` means
+    "this mode is not scheduled"; the wizard never submits an entry with
+    a freq hint but zero days, but the storage column can hold one if
+    a PENDING row gets edited through the schedule API.
+    """
+
+    freq: MonitorFreq = "w1"
+    days: list[MonitorDay] = Field(default_factory=list)
 
 
 class ProjectCreate(BaseModel):
@@ -69,7 +88,7 @@ class ProjectCreate(BaseModel):
     code: str = Field(..., min_length=1, max_length=64)
     description: str | None = None
     schedule_enabled: bool = False
-    slots: list[SlotIn] = Field(default_factory=list, max_length=2)
+    monitor_schedule: dict[MonitorMode, MonitorScheduleEntry | None] | None = None
     sentiment_enabled: bool = False
     region_strategy: RegionStrategy = RegionStrategy.FIXED
     region_codes: list[str] | None = None
@@ -94,6 +113,11 @@ class ProjectUpdate(BaseModel):
     # diffing the new taxonomy against the old one so renames preserve
     # prompt.category references instead of cascading to NULL.
     category_renames: dict[str, str] | None = None
+    # 「语义监控」卡片的核心卖点 / 官网 / 微信 / 自定义等键值对。
+    # 写入 ``geo_projects.semantic_json`` JSON 列。前端 active/disabled
+    # modal 直接保存(不再走 wizard draft 通道);Pending 仍走 wizard
+    # payload,语义也在里面。
+    semantic_json: dict | None = None
 
 
 class ProjectOut(BaseModel):
@@ -106,7 +130,14 @@ class ProjectOut(BaseModel):
     status: ProjectStatus
     description: str | None
     schedule_enabled: bool
-    slots: list[SlotOut] = Field(default_factory=list)
+    # Per-mode schedule map. Each value is either a ``MonitorScheduleEntry``
+    # or ``None`` (mode not scheduled). Stored verbatim on
+    # ``geo_projects.monitor_schedule`` so the wizard / project-edit / list
+    # views share one shape.
+    monitor_schedule: dict[str, MonitorScheduleEntry] = Field(default_factory=dict)
+    # Earliest upcoming fire across BOTH modes — single-value for the
+    # project list row's 「下一次执行」 column. Mode-aware "next" lives
+    # in the dashboard upcoming list and the schedule detail endpoint.
     next_run_at: datetime | None = None
     sentiment_enabled: bool
     region_strategy: RegionStrategy
@@ -114,6 +145,35 @@ class ProjectOut(BaseModel):
     brand: str | None = None
     aliases: list[str] | None = None
     category_taxonomy: list[str] | None = None
+    # Wizard step 6 payload — empty fields are pruned at approval time,
+    # so ``None`` and ``{}`` are interchangeable on the read side.
+    semantic_json: dict | None = None
+
+    # ===== Review / approval metadata =====
+    # All nullable: pre-20260908 rows are ACTIVE / DISABLED without this
+    # metadata, and the UI must keep rendering them correctly.
+    review_note: str | None = None
+    submitted_by: int | None = None
+    submitted_at: datetime | None = None
+    reviewed_by: int | None = None
+    reviewed_at: datetime | None = None
+    approved_by: int | None = None
+    approved_at: datetime | None = None
+    # The raw wizard submission JSON kept for audit / re-edit; UI uses it
+    # to prefill BatchQuestionModal on the 待审核 page. NOT shown on the
+    # active project page once status leaves PENDING.
+    wizard_payload_json: str | None = None
+
+    @field_validator("monitor_schedule", mode="before")
+    @classmethod
+    def _coerce_monitor_schedule(cls, v):
+        # ``monitor_schedule`` is nullable on the ORM side; projects
+        # without a weekly plan round-trip through this endpoint as
+        # ``None``. Normalise to ``{}`` so the UI can ``.fast`` / ``.think``
+        # without a null guard.
+        if v is None:
+            return {}
+        return v
     # Number of prompts in this project — kept on the list endpoint so the
     # sidebar's 问题提及分析 badge can render the real count without a
     # second round-trip. Detail endpoint returns the same value
@@ -121,6 +181,152 @@ class ProjectOut(BaseModel):
     prompts_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+# --------------------------------------------------------------------------
+# Wizard submission payload
+#
+# Multi-step 新建项目 wizard writes a single ``WizardPayload`` to the
+# project row's ``wizard_payload_json`` column. ``POST /api/projects`` and
+# ``PUT /api/projects/{id}/draft`` both validate against this; the API
+# materialises prompts / competitors / platforms from it at submit time
+# and again at approval time so the project is fully queryable on the
+# 待审核 page without a separate "draft" surface.
+# --------------------------------------------------------------------------
+
+
+class WizardQuestion(BaseModel):
+    text: str = Field(..., min_length=1)
+    category: str = Field(default="引流类", min_length=1, max_length=32)
+    tag: str | None = None
+
+
+class WizardBrand(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    product: str | None = Field(default=None, max_length=255)
+    aliases: list[str] = Field(default_factory=list)
+
+
+class WizardCompetitor(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    product: str | None = Field(default=None, max_length=255)
+    aliases: list[str] = Field(default_factory=list)
+
+
+class WizardMonitor(BaseModel):
+    """Wizard's step-5 monitor configuration.
+
+    ``devices`` / ``modes`` control which ``ProjectPlatform`` rows the
+    wizard expands on submit (web vs mobile surface × thinking-mode
+    flag). ``schedules`` is keyed by ``fast`` / ``think`` and controls
+    which mode fires on which weekday at the cron layer; an entry whose
+    ``days`` is empty (or a missing key entirely) means "this mode is
+    not scheduled".
+
+    The two axes are independent on purpose: a project can pick a
+    platform in 思考 mode but only schedule 快速 mode so the slower
+    reasoning call doesn't run every day. The submitted wizard payload
+    is what gets materialised onto ``Project.monitor_schedule`` at
+    approval time.
+    """
+
+    devices: list[MonitorDevice] = Field(default_factory=list)
+    modes: list[Literal["fast", "think"]] = Field(default_factory=lambda: ["fast"])
+    schedules: dict[MonitorMode, MonitorScheduleEntry | None] = Field(
+        default_factory=lambda: {"fast": None, "think": None}
+    )
+
+
+class WizardGeo(BaseModel):
+    mode: Literal["national_random", "fixed"] = "national_random"
+    region_code: str | None = None
+
+
+class WizardSemantic(BaseModel):
+    selling_points: list[str] = Field(default_factory=list)
+    website: str | None = None
+    phone: str | None = None
+    address: str | None = None
+    email: str | None = None
+    wechat_service: str | None = None
+    wechat_official: str | None = None
+    xiaohongshu: str | None = None
+    douyin: str | None = None
+    weibo: str | None = None
+    custom: str | None = None
+
+
+class WizardModelConfig(BaseModel):
+    """Per-model-card config from the 待审核 modal.
+
+    ``code`` is a web (``doubao``) or mobile (``doubao_mobile``)
+    modelCode picked explicitly on its own card, so each surface gets
+    its own 快速 / 思考 / 截图 choice. ``modes`` maps to
+    ``ProjectPlatform.thinking_mode`` (one row per mode).
+    """
+
+    code: str = Field(..., min_length=1, max_length=32)
+    modes: list[Literal["fast", "think"]] = Field(default_factory=lambda: ["fast"])
+    screenshot: bool = False
+
+
+class WizardPayload(BaseModel):
+    """Multi-step wizard output; see ``frontend/.../api/pendingProjects.ts``
+    for the TypeScript twin. Field set is locked: do NOT add or remove
+    fields without coordinating with the frontend.
+    """
+
+    questions: list[WizardQuestion] = Field(default_factory=list)
+    brand: WizardBrand
+    competitors: list[WizardCompetitor] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    # Present only for submissions from the 待审核 modal, where every
+    # surface is its own card. When non-empty it REPLACES the
+    # ``models × monitor.devices`` cross-product (see
+    # ``_expand_wizard_platforms``) — the codes are already explicit.
+    models_config: list[WizardModelConfig] = Field(default_factory=list)
+    monitor: WizardMonitor = Field(default_factory=WizardMonitor)
+    categories: list[str] = Field(default_factory=lambda: ["引流类", "品牌类"])
+    geo: WizardGeo = Field(default_factory=WizardGeo)
+    sentiment: Literal["on", "off"] = "on"
+    semantic: WizardSemantic = Field(default_factory=WizardSemantic)
+
+
+class WizardSubmissionIn(BaseModel):
+    """Body of ``POST /api/projects`` and ``PUT /api/projects/{id}/draft``.
+
+    ``customer_id`` is required for super_admin (must pick the target
+    tenant) and IGNORED for customer_admin (always forced to their own
+    tenant). The validation lives in the API handler.
+
+    ``preserve_schedule_enabled`` defaults to ``False``: PENDING
+    submissions compute ``schedule_enabled`` from ``monitor.days``
+    (``bool(days)``). When ``True`` (active/disabled edit through the
+    wizard draft endpoint) ``_materialise_wizard_payload`` keeps the
+    project's existing ``schedule_enabled`` value — that flag lives on
+    the list-page Switch and the modal isn't allowed to flip it as a
+    side-effect of editing other wizard fields.
+    """
+
+    customer_id: int | None = None
+    payload: WizardPayload
+    preserve_schedule_enabled: bool = False
+    # 项目行字段,跟 wizard payload 平行。PENDING 的 "监控名称" 走这条
+    # 路径(``update_project`` 对 PENDING 业务字段拒收,见
+    # ``app/api/projects.py`` update_project 的 lifecycle rule);空时
+    # 不动 ``project.name``。
+    name: str | None = None
+
+
+class ReviewDecisionIn(BaseModel):
+    """Body of ``POST /api/projects/{id}/reject``.
+
+    Super_admin only. ``review_note`` is the only field today; the schema
+    is shaped this way so future fields (e.g. re-route to another admin)
+    can land without breaking older clients.
+    """
+
+    review_note: str = Field(..., min_length=1, max_length=2000)
 
 
 class ProjectDetailOut(ProjectOut):
@@ -174,7 +380,10 @@ class PlatformsUpdate(BaseModel):
 
 class ScheduleUpdate(BaseModel):
     schedule_enabled: bool
-    slots: list[SlotIn] = Field(default_factory=list, max_length=2)
+    # Per-mode schedule map. Same shape as ``Project.monitor_schedule``.
+    # Optional so callers can flip only the master switch without
+    # rewriting the schedule.
+    monitor_schedule: dict[MonitorMode, MonitorScheduleEntry | None] | None = None
 
 
 class ScheduleStatusUpdate(BaseModel):
@@ -193,15 +402,24 @@ class RunSummary(BaseModel):
 class ScheduleOut(BaseModel):
     project_id: int
     schedule_enabled: bool
-    slots: list[SlotOut]
+    monitor_schedule: dict[str, MonitorScheduleEntry] = Field(default_factory=dict)
+    # Single next-run across both modes — earliest of fast/think. Mode-aware
+    # "next" lives in the dashboard upcoming list.
     next_run_at: datetime | None
     last_run: RunSummary | None
 
 
 class TriggerOut(BaseModel):
     run_id: int
+    # 当项目同时存在 fast 和 think 平台行时,手动触发会拆成两个
+    # ``ScheduleRun``(``mode=fast`` + ``mode=think``)。``think_run_id`` 是
+    # 第二个 run 的 id;单模式项目下为 ``None``。``run_id`` 始终是 fast 那个,
+    # 没有 fast 时与 ``think_run_id`` 等价(目前仅出现在 fast + think
+    # 都存在的拆分路径里)。
+    think_run_id: int | None = None
     # ``queued`` for a fresh run, ``skipped`` when the cooldown window
-    # already holds a run for this project/slot.
+    # already holds a run for this project/slot. 拆分场景下至少一个
+    # ``queued`` 就算 ``queued``,只有两个都因 cooldown 命中才 ``skipped``。
     status: Literal["queued", "skipped"]
 
 
@@ -219,6 +437,10 @@ class ScheduleRunOut(BaseModel):
     # Remote taskId once the run's Task row is created; null while still queued.
     task_id: str | None
     error_message: str | None
+    # ``"fast"`` / ``"think"`` for cron-driven runs, ``""`` for manual
+    # triggers. The list endpoint splits runs by mode in the UI; the
+    # scheduler uses it to compute mode-aware cooldown keys.
+    mode: str = ""
     # Subtask breakdown for multi-model runs. Aggregated from
     # geo_subtasks via Task.schedule_run_id; 0 when the run has not
     # yet produced a Task (queued/manual triggers before submit).
@@ -383,12 +605,12 @@ class BrandMentionOut(BaseModel):
     customer_id: int
     prompt: str | None
     platform: str | None
-    brand_canonical: str
+    brand: str
     is_self: bool
-    mention_count: int
+    is_mention: int
     rank_position: int | None
     # Discrete label from the Molizhishu API: positive / neutral / negative.
-    sentiment_score: str | None
+    sentiment: str | None
     is_recommended: bool | None
     # For self brand rows only: ``[{"text": mentionContext}]`` so the UI
     # can show the snippet where the brand was mentioned. Competitor rows
@@ -475,7 +697,7 @@ class QuestionPlatformStat(BaseModel):
     recommend_yes: bool
     # Only filled when ``view=competitor``: which competitor brand
     # drove the aggregation. ``None`` for self-view rows.
-    brand_canonical: str | None = None
+    brand: str | None = None
 
 
 class PlatformExcerpt(BaseModel):
@@ -599,7 +821,7 @@ class QuestionCompetitorAnalyticsOut(BaseModel):
 class CompetitorBrandStat(BaseModel):
     """One brand's row in the 竞品分析 view's brand × model matrix.
 
-    Re-aggregates ``geo_brand_mentions`` per (prompt × brand_canonical)
+    Re-aggregates ``geo_brand_mentions`` per (prompt × brand)
     over the same window the analytics item uses. ``is_self`` flags the
     monitored brand so the UI can render the 「自身」 tag + accent ring
     around its card. ``color`` is a fixed palette slot (NOT derived from
@@ -612,7 +834,7 @@ class CompetitorBrandStat(BaseModel):
     never appeared on that platform in the window.
     """
 
-    brand_canonical: str
+    brand: str
     is_self: bool
     color: str
     # KPI cards in the brand × matrix view.
@@ -716,22 +938,22 @@ class CompetitorKpi(BaseModel):
     trend chart. Same shape for the self brand and competitors so the
     UI can mix them on the same chart / same row color logic.
 
-    ``mention_count`` is the count of distinct (subtask × brand) rows
-    where the brand was actually mentioned (``mention_count > 0``).
-    Since the regex pass writes a 0/1 ``mention_count`` for every
+    ``is_mention`` is the count of distinct (subtask × brand) rows
+    where the brand was actually mentioned (``is_mention > 0``).
+    Since the regex pass writes a 0/1 ``is_mention`` for every
     (subtask, brand) pair, this is equivalent to "how many times was
     this brand actually named in the AI's reply". ``mention_rate`` is
     that divided by ``total_subtasks`` (the window's denominator,
     shared across all brands)."""
 
-    brand_canonical: str
+    brand: str
     # Display name — usually the canonical string itself; the row in
     # ``geo_project_competitors`` adds aliases but no separate display
     # label, so we mirror the canonical to keep the shape uniform.
     name: str
     aliases: list[str] | None
     is_self: bool
-    mention_count: int
+    is_mention: int
     mention_rate: float
     top3_rate: float
     recommend_rate: float
@@ -753,7 +975,7 @@ class CompetitorKpi(BaseModel):
 
 
 class CompetitorTrendSeries(BaseModel):
-    brand_canonical: str
+    brand: str
     name: str
     is_self: bool
     # One of the platform chart colors (PLATFORM_CATALOG[*].chartColor
@@ -812,7 +1034,7 @@ class CompetitorAnalysisOut(BaseModel):
     # ``None`` for legacy projects that haven't picked a brand yet.
     self_brand: CompetitorKpi | None
     # All non-self brands that appeared at least once in the window,
-    # ordered by mention_count DESC. Empty list when no competitor has
+    # ordered by is_mention DESC. Empty list when no competitor has
     # been picked up yet.
     competitors: list[CompetitorKpi]
     trend: CompetitorTrendBlock

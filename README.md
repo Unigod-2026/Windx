@@ -36,7 +36,6 @@ windx/
 │   ├── nginx.conf          # 反代 /api /static 到后端
 │   ├── vite.config.ts
 ├── docs/
-│   ├── api/                # 模力指数 API 规范(权威)
 │   └── superpowers/
 │       ├── specs/          # 设计文档
 │       └── plans/          # 实施计划
@@ -158,9 +157,9 @@ uv run ruff check .
 
 ## 接入模力指数监控 API(关键约定)
 
-写入代码前必读 [`docs/api/`](docs/api/),这里只列最容易踩坑的:
+写入代码前必读[模力指数监控 API 文档](https://github.com/molizhishu/molizhishu-api-pub/tree/main/docs/api),这里只列最容易踩坑的:
 
-1. **业务码 ≠ HTTP 码**:HTTP 200 也可能业务失败,必须用 `success` + `code` 判断(`docs/api/errors.md`)
+1. **业务码 ≠ HTTP 码**:HTTP 200 也可能业务失败,必须用 `success` + `code` 判断([`errors.md`](https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md))
 2. **主任务终态**:`completed` / `partial_completed` / `failed` / `stopped`
 3. **幂等**:回调用 `(taskId, payload_hash)` 去重,upsert 不抛错
 4. **answerContent 不洗**:后端原样存储 Markdown / HTML
@@ -244,7 +243,7 @@ uv run ruff check .
 |---|---|
 | 只读本地 DB | `GET /api/tasks`、`GET /api/tasks/{taskId}`、`GET /api/projects/{id}/tasks`、`GET /api/projects/{id}/runs`、`GET /api/projects/runs/{run_id}` |
 | 调用远端 SubmitTask | `POST /api/projects/{id}/schedule/trigger`(内部 → `MolizhishuClient.submit_task`) |
-| 接收 Callback | `POST /webhooks/molizhishu`(沿用 [`docs/api/callback.md`](docs/api/callback.md) 规范) |
+| 接收 Callback | `POST /webhooks/molizhishu`(沿用 [`docs/api/callback.md`](https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/callback.md) 规范) |
 | 后台轮询 | 本期未实现;Callback 是唯一加速路径。完整轮询逻辑见 [`api调用prompt.md`](api调用prompt.md) §十 |
 
 ## 数据模型概览
@@ -299,7 +298,7 @@ uv run ruff check .
 |---|---|
 | [需求.md](需求.md) | 业务需求 + 技术选型 |
 | [api调用prompt.md](api调用prompt.md) | 接入 prompt(原规范) |
-| [docs/api/](docs/api/) | 模力指数 API 规范(权威) |
+| [模力指数 API 文档](https://github.com/molizhishu/molizhishu-api-pub/tree/main/docs/api) | 模力指数 API 规范(权威) |
 | [docs/superpowers/specs/2026-08-07-schedule-management-design.md](docs/superpowers/specs/2026-08-07-schedule-management-design.md) | 调度管理界面设计 |
 | [docs/superpowers/plans/2026-08-07-schedule-management.md](docs/superpowers/plans/2026-08-07-schedule-management.md) | 17 任务实施计划 |
 | [CLAUDE.md](CLAUDE.md) | 项目级 Claude 指令 |

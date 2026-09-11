@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { DatePicker, Empty, Modal, Skeleton, Spin, Tag, message } from "antd";
-import { LinkOutlined, SearchOutlined } from "@ant-design/icons";
-import dayjs, { type Dayjs } from "dayjs";
+import { Empty, Modal, Skeleton, Spin, Tag, message } from "antd";
+import { LinkOutlined } from "@ant-design/icons";
+import dayjs from "dayjs";
 import { useSearchParams } from "react-router-dom";
 import {
   getQuestionCompetitorAnalytics,
@@ -29,22 +29,12 @@ import {
 } from "../../api/projects";
 import { cachedFetch, cacheKey } from "./questionTabCache";
 import { platformColor, platformLabel } from "./platforms";
+import { useToolbarFilter } from "../../components/ToolbarFilterContext";
 
 interface Props {
   projectId: number;
   detail: ProjectDetailOut;
 }
-
-type RankFilter = "all" | "top1" | "top3" | "top10";
-type RangeKey = "7" | "15" | "30" | "60" | "custom";
-
-const TIME_RANGES: { key: RangeKey; label: string }[] = [
-  { key: "7", label: "7 天" },
-  { key: "15", label: "15 天" },
-  { key: "30", label: "30 天" },
-  { key: "60", label: "2 个月" },
-  { key: "custom", label: "自定义" },
-];
 
 interface PrevWindow {
   mentionRate: number;
@@ -103,13 +93,6 @@ function toPrevWindow(prev: QuestionPrevStat | null): PrevWindow | null {
     rankAvg: prev.rank_avg,
   };
 }
-
-const RANK_FILTER_LABEL: Record<RankFilter, string> = {
-  all: "全部排名",
-  top1: "Top1",
-  top3: "Top3",
-  top10: "Top10",
-};
 
 const CATEGORY_COLORS = ["blue", "green", "purple", "orange", "cyan", "yellow", "red", "magenta", "volcano", "geekblue"];
 
@@ -319,6 +302,7 @@ function rankClass(rank: number | null): string {
  *   右侧卡片自带内部滚动条,页面整体不会滚动
  */
 export default function QuestionTab({ projectId, detail }: Props) {
+  const toolbar = useToolbarFilter();
   const [platforms, setPlatforms] = useState<ProjectPlatform[]>([]);
   // Layered analytics loads — replaced the single ``analytics`` blob in
   // 2026-08-18 so the left list shows instantly and each pane fetches its
@@ -342,24 +326,12 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // state mid-load. Per-pane refetches don't flip this.
   const [loading, setLoading] = useState(true);
 
-  const [keyword, setKeyword] = useState("");
-  const [modelFilter, setModelFilter] = useState<string>("all");
-  const [rankFilter, setRankFilter] = useState<RankFilter>("all");
   const [selectedPromptId, setSelectedPromptId] = useState<number | null>(null);
   // Project-level category roll-up from the analytics endpoint, used by
   // the 「下钻分析」 chip strip. Empty when the project has no prompts.
   const [categorySummary, setCategorySummary] = useState<
     import("../../api/projects").CategoryStat[]
   >([]);
-  // Top-right time selector — mirrors OverviewTab's range buttons so the
-  // "查看原文" modal pulls answers from the same window the operator just
-  // saw on screen. Default is 15 天 per the spec.
-  const [range, setRange] = useState<RangeKey>("15");
-  const [custom, setCustom] = useState<[Dayjs, Dayjs]>(() => [
-    dayjs().subtract(14, "day"),
-    dayjs(),
-  ]);
-
   // Top-level sub-pane switcher. URL-synced via ``?sub=product|competitor|
   // stable`` so a deep link / refresh keeps the operator where they were.
   // The default is "product" (自品牌分析) per the spec.
@@ -381,15 +353,12 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // Stable pane has its own server round-trip; cached alongside the
   // analytics fetch so the time selector invalidates both at once.
 
+  // Date range comes from the global toolbar (``ToolbarFilterContext``).
+  // ``null`` means the user hasn't picked yet — fall back to 近 15 天 so
+  // the analytics endpoints still get a valid window on first mount.
   const dateQuery = useMemo(
-    () =>
-      range === "custom"
-        ? {
-            start: custom[0].format("YYYY-MM-DD"),
-            end: custom[1].format("YYYY-MM-DD"),
-          }
-        : { days: Number(range) },
-    [range, custom],
+    () => toolbar.selectedDateRange ?? { days: 15 },
+    [toolbar.selectedDateRange],
   );
 
   // The window that "current" gets compared against: the same-length
@@ -400,22 +369,22 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // card so the operator can tell at a glance which window is being
   // compared.
   const prevWindowLabel = useMemo(() => {
-    const lengthDays =
-      range === "custom"
-        ? custom[1].diff(custom[0], "day") + 1
-        : Number(range);
-    let prevEnd: Dayjs;
-    let prevStart: Dayjs;
-    if (range !== "custom") {
+    const isCustom = dateQuery.start !== undefined;
+    const lengthDays = isCustom
+      ? dayjs(dateQuery.end).diff(dayjs(dateQuery.start), "day") + 1
+      : dateQuery.days;
+    let prevEnd: dayjs.Dayjs;
+    let prevStart: dayjs.Dayjs;
+    if (!isCustom) {
       const today = dayjs();
       prevEnd = today.subtract(lengthDays, "day");
       prevStart = prevEnd.subtract(lengthDays - 1, "day");
     } else {
-      prevEnd = custom[0].subtract(1, "day");
+      prevEnd = dayjs(dateQuery.start).subtract(1, "day");
       prevStart = prevEnd.subtract(lengthDays - 1, "day");
     }
     return `${prevStart.format("YYYY-MM-DD")} ~ ${prevEnd.format("YYYY-MM-DD")}`;
-  }, [range, custom]);
+  }, [dateQuery]);
 
   // Long prev window — same length as the current window, but offset
   // 30 days further back. Drives the 「本月 vs 上月」 card. The offset
@@ -425,20 +394,20 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // we need per-window "this month vs same month last year" the
   // backend would need a second offset param.
   const prevLongLabel = useMemo(() => {
-    const lengthDays =
-      range === "custom"
-        ? custom[1].diff(custom[0], "day") + 1
-        : Number(range);
-    let anchor: Dayjs;
-    if (range !== "custom") {
+    const isCustom = dateQuery.start !== undefined;
+    const lengthDays = isCustom
+      ? dayjs(dateQuery.end).diff(dayjs(dateQuery.start), "day") + 1
+      : dateQuery.days;
+    let anchor: dayjs.Dayjs;
+    if (!isCustom) {
       anchor = dayjs().subtract(lengthDays, "day");
     } else {
-      anchor = custom[0].subtract(1, "day");
+      anchor = dayjs(dateQuery.start).subtract(1, "day");
     }
     const prevLongEnd = anchor.subtract(30, "day");
     const prevLongStart = prevLongEnd.subtract(lengthDays - 1, "day");
     return `${prevLongStart.format("YYYY-MM-DD")} ~ ${prevLongEnd.format("YYYY-MM-DD")}`;
-  }, [range, custom]);
+  }, [dateQuery]);
 
   // Stable key for the time window — keeps the cache stable when only
   // object identity differs (``dateQuery`` is recreated by useMemo every
@@ -586,7 +555,9 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // ``QuestionStat`` shape the list + detail UI consume. Per-prompt
   // platform breakdown is only present for the currently-selected
   // prompt (via ``productPlatforms``); the model's table in the right
-  // pane filters down from there.
+  // pane filters down from there. The toolbar-supplied ``selectedModels``
+  // (null = 全部) narrows the per-prompt platform rows to the operator's
+  // chosen subset — the same modelCode set the rest of the app sees.
   const stats = useMemo<QuestionStat[]>(
     () =>
       (summary?.items ?? []).map((a) => {
@@ -595,10 +566,12 @@ export default function QuestionTab({ projectId, detail }: Props) {
         const sourcePlatforms =
           a.prompt_id === selectedPromptId ? productPlatforms : [];
         const filteredModels = sourcePlatforms.filter((m) => {
-          if (modelFilter !== "all" && m.platform !== modelFilter) return false;
-          if (rankFilter === "top1" && m.best_rank !== 1) return false;
-          if (rankFilter === "top3" && (m.best_rank === null || m.best_rank > 3)) return false;
-          if (rankFilter === "top10" && (m.best_rank === null || m.best_rank > 10)) return false;
+          if (
+            toolbar.selectedModels !== null &&
+            !toolbar.selectedModels.includes(m.platform)
+          ) {
+            return false;
+          }
           return true;
         });
         return {
@@ -623,18 +596,19 @@ export default function QuestionTab({ projectId, detail }: Props) {
             : null,
         };
       }),
-    [summary, productPlatforms, selectedPromptId, modelFilter, rankFilter, productDetail],
+    [summary, productPlatforms, selectedPromptId, toolbar.selectedModels, productDetail],
   );
 
-  // Apply keyword filter only — category subtabs were removed in
-  // 2026-08-18 cleanup; prompts are no longer sliced by category here.
+  // Apply toolbar's prompt-id filter only — null = 全部. Replaces the
+  // legacy substring search input that lived in the page's left rail;
+  // the toolbar's 问题 dropdown exposes the same "show only these
+  // prompts" intent as a structured multi-select.
   const visibleStats = useMemo(() => {
-    const k = keyword.trim().toLowerCase();
-    return stats.filter((s) => {
-      if (k && !s.prompt.toLowerCase().includes(k)) return false;
-      return true;
-    });
-  }, [stats, keyword]);
+    const ids = toolbar.selectedPromptIds;
+    if (ids === null) return stats;
+    const set = new Set(ids);
+    return stats.filter((s) => set.has(s.promptId));
+  }, [stats, toolbar.selectedPromptIds]);
 
   const selected = visibleStats.find((s) => s.promptId === selectedPromptId) ?? visibleStats[0] ?? null;
 
@@ -851,31 +825,6 @@ export default function QuestionTab({ projectId, detail }: Props) {
             {t.label}
           </button>
         ))}
-        <div className="qt-pane-tabs-right">
-          <div className="qt-time-selector">
-            {TIME_RANGES.map((r) => (
-              <button
-                key={r.key}
-                type="button"
-                className={`qt-time-btn${range === r.key ? " active" : ""}`}
-                onClick={() => setRange(r.key)}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-          {range === "custom" && (
-            <DatePicker.RangePicker
-              size="small"
-              value={custom}
-              allowClear={false}
-              onChange={(v) => {
-                if (v && v[0] && v[1]) setCustom([v[0], v[1]]);
-              }}
-              style={{ marginLeft: 8, width: 240 }}
-            />
-          )}
-        </div>
       </div>
 
       {paneTab === "stable" ? (
@@ -889,40 +838,6 @@ export default function QuestionTab({ projectId, detail }: Props) {
       <div className="qt-split">
         {/* 左侧:问题列表 */}
         <div className="qt-split-left">
-          <div className="qt-search-bar">
-            <div className="qt-search-input-wrap">
-              <SearchOutlined style={{ color: "var(--text-quaternary)" }} />
-              <input
-                type="text"
-                placeholder="搜索问题..."
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-              />
-            </div>
-            <select
-              className="qt-select"
-              value={modelFilter}
-              onChange={(e) => setModelFilter(e.target.value)}
-            >
-              <option value="all">全模型</option>
-              {platforms.map((p) => (
-                <option key={p.platform} value={p.platform}>
-                  {p.platform}
-                </option>
-              ))}
-            </select>
-            <select
-              className="qt-select"
-              value={rankFilter}
-              onChange={(e) => setRankFilter(e.target.value as RankFilter)}
-            >
-              {(Object.keys(RANK_FILTER_LABEL) as RankFilter[]).map((k) => (
-                <option key={k} value={k}>
-                  {RANK_FILTER_LABEL[k]}
-                </option>
-              ))}
-            </select>
-          </div>
           <div className="qt-list">
             {visibleStats.length === 0 ? (
               <Empty description="无匹配问题" style={{ padding: 32 }} />
@@ -1112,32 +1027,6 @@ export default function QuestionTab({ projectId, detail }: Props) {
              scrollbar. */
           overflow: hidden;
         }
-        /* Time selector (top-right) — mirrors .time-selector in OverviewTab
-           so the two pages feel consistent. */
-        .qt-time-selector {
-          display: inline-flex;
-          background: var(--bg-page, #f5f6f8);
-          border-radius: 6px;
-          padding: 2px;
-          gap: 2px;
-        }
-        .qt-time-btn {
-          background: transparent;
-          border: 0;
-          padding: 4px 12px;
-          font-size: 13px;
-          color: var(--text-secondary, #4f4f4f);
-          cursor: pointer;
-          border-radius: 4px;
-          font-family: inherit;
-        }
-        .qt-time-btn:hover { color: var(--brand-blue, #1a55e8); }
-        .qt-time-btn.active {
-          background: #fff;
-          color: var(--brand-blue, #1a55e8);
-          font-weight: 500;
-          box-shadow: 0 1px 2px rgba(0,0,0,0.06);
-        }
 
         .qt-split {
           display: grid;
@@ -1159,32 +1048,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
           overflow: hidden;
           min-height: 0;
         }
-        .qt-search-bar {
-          display: flex;
-          gap: 8px;
-          padding: 10px 12px;
-          border-bottom: 1px solid var(--border-light, #f0f0f0);
-          flex-wrap: wrap;
-        }
-        .qt-search-input-wrap {
-          flex: 1;
-          min-width: 140px;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          padding: 4px 10px;
-          border: 1px solid var(--border-light, #e5e7eb);
-          border-radius: 4px;
-          background: var(--bg-page, #fafafa);
-        }
-        .qt-search-input-wrap input {
-          flex: 1;
-          border: 0;
-          outline: none;
-          background: transparent;
-          font-size: 13px;
-          font-family: inherit;
-        }
+
         .qt-select {
           padding: 4px 8px;
           border: 1px solid var(--border-light, #e5e7eb);
@@ -1633,11 +1497,6 @@ export default function QuestionTab({ projectId, detail }: Props) {
           color: var(--brand-blue, #1a55e8);
           border-bottom-color: var(--brand-blue, #1a55e8);
           font-weight: 500;
-        }
-        .qt-pane-tabs-right {
-          margin-left: auto;
-          display: flex;
-          align-items: center;
         }
 
         /* AI 摘录 2 列 grid(6 张 = 3 行 × 2 列) */
@@ -2160,13 +2019,20 @@ function CompetitorDetail({
   brands: CompetitorBrandStat[];
   platforms: string[];
 }) {
-  const modelColumns = useMemo(() => {
+  const toolbar = useToolbarFilter();
+  // Toolbar 「模型」 filter — null = 全部. Intersected against the union
+  // of project platforms + the model_ranks keys so columns the operator
+  // excluded never render.
+  const filteredModelColumns = useMemo(() => {
     const keys = new Set(platforms);
     brands.forEach((brand) => {
       Object.keys(brand.model_ranks).forEach((platform) => keys.add(platform));
     });
-    return Array.from(keys);
-  }, [brands, platforms]);
+    const all = Array.from(keys);
+    if (toolbar.selectedModels === null) return all;
+    const allowed = new Set(toolbar.selectedModels);
+    return all.filter((p) => allowed.has(p));
+  }, [brands, platforms, toolbar.selectedModels]);
   const rankedBrands = useMemo(
     () =>
       [...brands].sort(
@@ -2174,7 +2040,7 @@ function CompetitorDetail({
       ),
     [brands],
   );
-  const summaries = modelColumns
+  const summaries = filteredModelColumns
     .map((platform) => ({ platform, excerpt: item?.excerpts[platform]?.excerpt }))
     .filter((entry) => entry.excerpt);
 
@@ -2192,12 +2058,12 @@ function CompetitorDetail({
           <div className="qc-overview">
             {brands.map((brand) => (
               <div
-                key={brand.brand_canonical}
+                key={brand.brand}
                 className={`qc-overview-item${brand.is_self ? " qc-self" : ""}`}
                 style={{ "--accent": brand.color } as CSSProperties}
               >
                 <div className="qc-name">
-                  {brand.brand_canonical}
+                  {brand.brand}
                   {brand.is_self && <span className="qc-self-tag">自身</span>}
                 </div>
                 <div className="qc-num">{pct(brand.mention_rate)}</div>
@@ -2222,7 +2088,7 @@ function CompetitorDetail({
                 <thead>
                   <tr>
                     <th>品牌</th>
-                    {modelColumns.map((platform) => (
+                    {filteredModelColumns.map((platform) => (
                       <th key={platform}>{platformLabel(platform)}</th>
                     ))}
                     <th>综合位次</th>
@@ -2230,18 +2096,18 @@ function CompetitorDetail({
                 </thead>
                 <tbody>
                   {rankedBrands.map((brand) => (
-                    <tr key={brand.brand_canonical}>
+                    <tr key={brand.brand}>
                       <td>
                         <span className="qc-brand-cell">
                           <span
                             className="qc-brand-dot"
                             style={{ background: brand.color }}
                           />
-                          <strong>{brand.brand_canonical}</strong>
+                          <strong>{brand.brand}</strong>
                           {brand.is_self && <span className="qc-self-tag">自身</span>}
                         </span>
                       </td>
-                      {modelColumns.map((platform) => {
+                      {filteredModelColumns.map((platform) => {
                         const rank = brand.model_ranks[platform];
                         return (
                           <td key={platform}>
@@ -2309,12 +2175,20 @@ function QuestionDetail({
   categorySummary: import("../../api/projects").CategoryStat[];
   view: "self" | "competitor";
 }) {
+  const toolbar = useToolbarFilter();
   // Platforms to render AI excerpt cards for. The user spec calls for
   // "6 models each" — the actual count comes from whichever platforms
   // produced an excerpt for this prompt in the current window, not the
   // project's configured platforms (which can be smaller). Sorted for
   // stable order so the same card layout shows up across reloads.
-  const excerptPlatforms = Object.keys(item?.excerpts ?? {}).sort();
+  // The toolbar's 「模型」 filter narrows this further — null = 全部,
+  // otherwise intersect with the operator's selection.
+  const excerptPlatforms = Object.keys(item?.excerpts ?? {})
+    .filter(
+      (p) =>
+        toolbar.selectedModels === null || toolbar.selectedModels.includes(p),
+    )
+    .sort();
   return (
     <div className="qt-detail-body">
       <div className="qt-detail-header">
@@ -2415,10 +2289,10 @@ function QuestionDetail({
                 return (
                   <tr key={m.platform}>
                     <td>
-                      {m.platform}
-                      {view === "competitor" && m.brand_canonical && (
+                      {platformLabel(m.platform)}
+                      {view === "competitor" && m.brand && (
                         <Tag color="orange" style={{ marginLeft: 6 }}>
-                          {m.brand_canonical}
+                          {m.brand}
                         </Tag>
                       )}
                     </td>

@@ -6,10 +6,18 @@ from typing import Any, Iterable
 import httpx
 
 
-# Platforms the live molizhishu endpoint accepts. Source: docs/api/submit-task.md
-# §平台. ``wenxinyiyan`` is still listed in docs but prod rejects it at submit
-# time ("暂不支持以下模型: wenxinyiyan") so it's intentionally omitted here —
-# callers should fail loud instead of submitting a row that will be rejected.
+# Platforms the live molizhishu endpoint accepts. Source:
+# https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/get-available-models.md
+# (动态清单;``wenxinyiyan`` 是历史保留 —— 远端文档曾列出但 prod 在 submit
+# 时拒绝:"暂不支持以下模型: wenxinyiyan",所以仍刻意不收,避免静默成功)。
+# 2026-09 远端 /api/business/system/models:web 新增 ``antafu`` / ``chatgpt`` /
+# ``weibo_zhisou`` / ``quark`` / ``douyinai``;mobile 新增 ``xiaohongshu_mobile``
+# / ``douyin_mobile``。``xiaohongshu`` 无 web 版,``douyinai`` 是 douyin 的
+# web code(命名仍是 baiduai → baidu_mobile 那种不规则映射)。
+#
+# 远端去重键是 ``(platform, mode)`` 元组,不是单一 ``platform`` 名 —— 同一
+# ``platform_code`` 配不同 ``mode`` 会被算成两次调用。``platform_code`` 严格
+# 对齐前端 ``WIZARD_MODELS``:web = value,mobile = mobileCode。
 MOLIZHISHU_SUPPORTED_PLATFORMS: frozenset[str] = frozenset(
     {
         "deepseek",
@@ -20,9 +28,42 @@ MOLIZHISHU_SUPPORTED_PLATFORMS: frozenset[str] = frozenset(
         "quark",
         "baiduai",
         "weibo_zhisou",
+        "antafu",
+        "chatgpt",
+        "douyinai",
         "doubao_mobile",
+        "yuanbao_mobile",
+        "qianwen_mobile",
+        "deepseek_mobile",
+        "baidu_mobile",
+        "xiaohongshu_mobile",
+        "douyin_mobile",
     }
 )
+
+# Wizard-side model code → API-side mobile code. Mirrors
+# ``frontend/src/pages/Projects/wizardConfig.ts#WIZARD_MODELS[*].mobileCode``;
+# the mapping isn't a uniform ``+_mobile`` suffix (e.g. ``baiduai`` →
+# ``baidu_mobile``, ``douyinai`` → ``douyin_mobile``), so we resolve at
+# approval time and persist the resolved code on
+# ``geo_project_platforms.mobile_code``.
+MOBILE_PLATFORM_CODE_MAP: dict[str, str] = {
+    "doubao": "doubao_mobile",
+    "deepseek": "deepseek_mobile",
+    "yuanbao": "yuanbao_mobile",
+    "qianwen": "qianwen_mobile",
+    "baiduai": "baidu_mobile",
+    "douyinai": "douyin_mobile",
+}
+
+# Wizard monitor.mode → Molizhishu API mode. The wizard uses ``fast`` / ``think``;
+# the live endpoint expects ``search`` / ``reasoning_search`` per
+# https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/submit-task.md (联网搜索模式 / 深度+联网模式). Mapped at approval
+# time so the persisted ``mode`` column matches what the remote accepts.
+WIZARD_TO_API_MODE: dict[str, str] = {
+    "fast": "search",
+    "think": "reasoning_search",
+}
 
 # Modes the live endpoint accepts. ``web`` / ``mobile`` are NOT valid here —
 # those describe the delivery surface and belong on ``delivery_mode`` (a
@@ -94,7 +135,7 @@ class MolizhishuError(Exception):
 def _unwrap(response: httpx.Response) -> dict:
     """Validate an HTTP response and return the ``data`` block.
 
-    Two failure modes to handle (per docs/api/overview.md §通用响应格式):
+    Two failure modes to handle (per https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/overview.md §通用响应格式):
 
     1. **Transport failure** (HTTP non-2xx): the wrapper never has
        ``success=true`` so we surface it as :class:`MolizhishuError` with
@@ -157,6 +198,57 @@ class MolizhishuClient:
         """
         return asyncio.run(self.submit_task(payload))
 
+    async def list_cities(self) -> list[dict]:
+        """``GET /eip-edge/ports/city-info`` — supported region codes.
+
+        The remote envelope wraps the list in ``{"success": ..., "data": [...]}``
+        where each item is ``{"province": "...", "regionCode": ["410000"]}``.
+        We unwrap the envelope here and flatten ``regionCode`` (always a
+        single-element array per https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/city-info.md) down to ``code``
+        so callers don't have to re-unwrap per item.
+
+        Returned shape:
+            [{"code": "410000", "name": "河南省"}, ...]
+
+        Used by :class:`app.api.molizhishu.router` to back the wizard's
+        「指定区域」 dropdown. See ``https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/city-info.md`` for the raw
+        contract.
+        """
+        url = self._city_url()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(url, headers=self._auth_headers())
+        data = _unwrap(response)
+        if not isinstance(data, list):
+            return []
+        out: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            codes = item.get("regionCode") or []
+            if not codes:
+                continue
+            name = item.get("province") or item.get("name")
+            if not name:
+                continue
+            out.append({"code": str(codes[0]), "name": str(name)})
+        return out
+
+    def _city_url(self) -> str:
+        """Resolve the city-info URL from ``Settings.molizhishu_city_url``.
+
+        Kept as a method (not a constructor arg) so callers don't have to
+        rewire two URLs when only one is needed. The Molizhishu city-info
+        endpoint lives on a different host (``eip-edge``) than the submit
+        API, so ``base_url`` alone can't be reused.
+        """
+        from app.config import get_settings
+
+        return get_settings().molizhishu_city_url
+
+    def list_cities_sync(self) -> list[dict]:
+        """Sync wrapper around :meth:`list_cities`."""
+        return asyncio.run(self.list_cities())
+
     async def get_task_status(self, task_id: str) -> dict:
         """``GET /task/status/{taskId}`` — main task + per-sub-task status.
 
@@ -191,7 +283,7 @@ class MolizhishuClient:
     # (a sync thread), so it can't ``await`` directly. These wrappers
     # mirror :meth:`submit_task_sync` — minimal surface, no logging here
     # because the sync loop already knows ``source`` and writes its own
-    # structured lines per docs/api/errors.md §日志建议.
+    # structured lines per https://github.com/molizhishu/molizhishu-api-pub/blob/main/docs/api/errors.md §日志建议.
 
     def get_task_status_sync(self, task_id: str) -> dict:
         """Sync wrapper around :meth:`get_task_status`."""

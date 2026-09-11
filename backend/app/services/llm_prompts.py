@@ -6,6 +6,11 @@ files without touching Python. Group by *use case*, not by feature flag:
 ``POLISH_QUESTION`` is for the editor-time "润色问题" call;
 ``EXTRACT_KEYWORDS`` is for the keyword-generator UI; and so on.
 
+历史用例 ``EXTRACT_BRAND_MENTION`` 已下线 —— 品牌提及抽取改为直接读
+``geo_subtasks.raw_result_json`` 里的 ``mentionPosition`` / ``sentiment``
+/ ``mentionContext`` / ``allRankings``,不再过 LLM。详见
+``app.services.extraction`` 的模块 docstring。
+
 Adding a new use case: define a new ``PROMPT_USE_CASE`` constant here
 and reference it from :class:`LLMClient`. Don't add flag-driven branches
 inside an existing prompt — that path leads to drift between the doc
@@ -104,25 +109,45 @@ PROMPT_EXTRACT_KEYWORDS: str = (
     "输出格式：每行一个关键词，不要任何前缀 / 后缀说明。\n"
 )
 
-
-# --------------------------------------------------------------------------
-# Brand mention extraction (called after every Subtask upsert)
-# --------------------------------------------------------------------------
-
-
-PROMPT_EXTRACT_BRAND_MENTION: str = (
-    "你是一名中文品牌营销分析专家，负责从一段 AI 助手的回答中抽取"
-    "对某个品牌的事实性判断：\n"
-    "- 排名位置（rank_position）\n"
-    "- 情感倾向（sentiment_score，0.0 表示明显负面，1.0 表示明显正面）\n"
-    "- 是否被主动推荐（is_recommended）\n"
-    "- 该品牌被提及的语境下覆盖了哪些核心词（concern_hits）\n"
+# 卖点一致性判断 —— :func:`app.services.extraction._populate_correctness_pass`
+# 用这个 prompt 调一次 LLM,拿到 subtask 回答是否与项目核心卖点相符。
+#
+# 三类判定标准(对应用户给的三个例子):
+# 1. 卖点说「这是 X 类产品」,回答完全没提 X → 不正确(答非所问)
+# 2. 卖点说「这是医保产品」,回答否认医保 / 说不是医保 → 不正确(答案与卖点矛盾)
+# 3. 卖点说「某属性」,回答对 X 类产品做了正面 / 客观描述,未否认卖点 → 正确
+#
+# 注意点:
+# - 用户填的 selling_points 是 LLM 自己看到的卖点原文(最多 10 行),不要
+#   让模型二次抽象或重新组织;直接逐条对比。
+# - 「未提到」不一定是「不正确」:如果回答里完全没出现品牌 X,但卖点也是
+#   通用陈述(如「敏感肌可用」,回答里推荐了某产品),不能机械判错 — 应该
+#   看「回答里关于该品牌的关键描述」是否与卖点冲突。
+# - 必须返回严格 JSON,不带任何解释文字或 markdown code fence。
+PROMPT_JUDGE_CORRECTNESS: str = (
+    "你是一名品牌一致性审查员。你会拿到三段输入:\n"
+    "1. 核心卖点(用户对监控品牌自己声明的关键卖点,最多 10 行,每行一条)\n"
+    "2. 监控品牌名\n"
+    "3. 一段 LLM 回答正文(可能长,需读完)\n"
     "\n"
-    "请基于实际回答内容判断，不要编造信息。如果无法判断某个字段，"
-    "请传 null（数值字段传 null，concern_hits 传空数组）。\n"
+    "你的任务是判断:这段回答中「关于该监控品牌的描述」是否与核心卖点"
+    "「相符」。判断标准:\n"
+    "  - 回答完全没提及该品牌所代表的产品类别(卖点声称是 X 类产品,回答"
+    "    答的是无关品类)→ 不正确。\n"
+    "  - 回答否认 / 反驳卖点声称的属性(卖点说「医保产品」,回答却说"
+    "    「不是医保」或「不能报销」)→ 不正确。\n"
+    "  - 回答对品牌的描述与卖点一致或无矛盾,即使回答内容较短或卖点"
+    "    未全部展开 → 正确。\n"
+    "  - 回答里完全没出现该品牌名,且卖点中没有「必须提到品牌名」之类的"
+    "    强约束 → 正确(回答跑题到无关品类才判错,泛泛而谈不判错)。\n"
     "\n"
-    "【交付要求】必须调用 record_extraction 工具一次，按 schema 提交结果。"
-    "不要在文本里直接输出 JSON，不要重复尝试调用其他工具。"
+    "输出必须是严格 JSON,不要任何解释、不要 markdown code fence,不要"
+    "任何前缀 / 后缀文字,形如:\n"
+    "{\"is_correct\": true, \"reason\": \"回答中关于该品牌的描述与卖点一致\"}\n"
+    "或\n"
+    "{\"is_correct\": false, \"reason\": \"卖点声称医保产品,但回答中明确说不是医保\"}\n"
+    "\n"
+    "reason 字段用中文,1-2 句话说明判断依据;不要超过 80 字。"
 )
 
 
