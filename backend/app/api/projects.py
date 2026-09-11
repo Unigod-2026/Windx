@@ -3332,40 +3332,81 @@ class _OverviewWindow:
             if has_answer:
                 answered[day] += 1
 
-        n = len(self.mentions)
-        top1 = sum(1 for m in self.mentions if m.rank_position == 1)
+        # top1 / top3 rates are computed off ``geo_brand_mentions`` alone,
+        # independent of the subtask-level rollups below. The denominator
+        # is the count of self rows where the brand was actually mentioned
+        # (``is_mention > 0``) — the rows where a rank_position even makes
+        # sense. Rows with ``is_mention = 0`` carry no rank and would
+        # dilute the rate if they were included.
+        n_mentions = sum(m.is_mention for m in self.mentions)
+        top1 = sum(
+            1 for m in self.mentions
+            if m.is_mention and m.rank_position == 1
+        )
         top3 = sum(
-            1
-            for m in self.mentions
-            if m.rank_position is not None and m.rank_position <= 3
+            1 for m in self.mentions
+            if m.is_mention and m.rank_position is not None and m.rank_position <= 3
         )
 
-        # Subtask counts bucketed per day, used for the new
-        # ``mention_rate`` and ``correct_rate`` sparklines.
+        # Subtask counts bucketed per day for the ``mention_rate``
+        # sparkline (correct_rate now rolls off is_correct on self rows,
+        # see below — doesn't need subtask bucketing).
         subtasks_by_day: dict[date, int] = {d: 0 for d in self.days}
-        correct_by_day: dict[date, int] = {d: 0 for d in self.days}
         for _platform, status, created_at in self.subtask_rows:
             day = created_at.date()
             if day not in subtasks_by_day:
                 continue
             subtasks_by_day[day] += 1
-            if status in ("success", "completed"):
+
+        # is_correct bucketed per day. ``self.mentions`` is already filtered
+        # to ``is_self=True`` rows (see __init__), so we count the True
+        # bucket against the same row set as the denominator. ``None``
+        # (un-judged / competitor / LLM-failed) is treated as "not True"
+        # rather than skipped, so partially-backfilled windows don't
+        # silently inflate the rate.
+        correct_by_day: dict[date, int] = {d: 0 for d in self.days}
+        for m in self.mentions:
+            day = self.task_dates[m.id].date()
+            if day not in correct_by_day:
+                continue
+            if m.is_correct:
                 correct_by_day[day] += 1
 
+        # Mention rate is measured at the **subtask** level, not the
+        # brand-mention-row level. A subtask counts as "品牌被提及"
+        # iff at least one self row has ``is_mention > 0``. Counting
+        # rows directly would inflate the numerator whenever a subtask
+        # has multiple self rows (e.g. multiple brands in the same row
+        # of the AI response), and would also force the denominator
+        # onto a row-count basis that doesn't match how the rest of
+        # the overview reports "of N questions, K got a hit".
+        subtasks_with_mention: set[str] = {
+            m.subtask_id for m in self.mentions if m.is_mention
+        }
+        subtasks_with_mention_by_day: dict[date, set[str]] = {
+            d: set() for d in self.days
+        }
+        for m in self.mentions:
+            if not m.is_mention:
+                continue
+            day = self.task_dates[m.id].date()
+            if day in subtasks_with_mention_by_day:
+                subtasks_with_mention_by_day[day].add(m.subtask_id)
+
         total_subs = max(self.total_subtasks, 1)
+        total_self_rows = max(len(self.mentions), 1)
         return {
             # Mention rate: % of subtasks in which the brand was actually
-            # named in the answer (is_mention > 0). Sum-of-counts is
-            # 0/1 in the new pipeline, but we keep the sum form so a
-            # future pipeline that emits per-mention counters stays
-            # consistent.
+            # named in the answer (at least one self row with
+            # ``is_mention > 0``). Denominator is the window's subtask
+            # count so the number reads as "of N answers, K mentioned
+            # the brand" — matching how the rest of the overview
+            # reports the metric.
             "mention_rate": (
-                _rate(sum(m.is_mention for m in self.mentions), total_subs),
+                _rate(len(subtasks_with_mention), total_subs),
                 [
-                    _rate(
-                        sum(m.is_mention for m in by_day_mentions[d]),
-                        max(subtasks_by_day[d], 1),
-                    )
+                    _rate(len(subtasks_with_mention_by_day[d]),
+                          max(subtasks_by_day[d], 1))
                     for d in self.days
                 ],
             ),
@@ -3376,38 +3417,62 @@ class _OverviewWindow:
                     for d in self.days
                 ],
             ),
+            # Top1 / Top3 mention rate: % of *mention rows* (self rows
+            # where the brand was actually named) that ranked #1 / in
+            # the top 3. Computed purely off ``geo_brand_mentions``; the
+            # subtask rollup is irrelevant here because each self row
+            # already corresponds to one (subtask × brand) pair.
             "top1_rate": (
-                _rate(top1, n),
+                _rate(top1, max(n_mentions, 1)),
                 [
                     _rate(
-                        sum(1 for m in by_day_mentions[d] if m.rank_position == 1),
-                        len(by_day_mentions[d]),
+                        sum(
+                            1 for m in by_day_mentions[d]
+                            if m.is_mention and m.rank_position == 1
+                        ),
+                        max(
+                            sum(1 for m in by_day_mentions[d] if m.is_mention),
+                            1,
+                        ),
                     )
                     for d in self.days
                 ],
             ),
             "top3_rate": (
-                _rate(top3, n),
+                _rate(top3, max(n_mentions, 1)),
                 [
                     _rate(
                         sum(
-                            1
-                            for m in by_day_mentions[d]
-                            if m.rank_position is not None and m.rank_position <= 3
+                            1 for m in by_day_mentions[d]
+                            if m.is_mention and m.rank_position is not None
+                            and m.rank_position <= 3
                         ),
-                        len(by_day_mentions[d]),
+                        max(
+                            sum(1 for m in by_day_mentions[d] if m.is_mention),
+                            1,
+                        ),
                     )
                     for d in self.days
                 ],
             ),
-            # Correct rate: % of subtasks that returned a usable answer.
-            # "Correct" = status in (success, completed) — see
-            # correct_subtasks property for the rationale on the dual
-            # accepted values.
+            # Correct rate: among self rows in the window, the share
+            # whose LLM judge returned ``is_correct=True``. The
+            # denominator is *all* self rows (including ``is_correct=None``
+            # for un-judged / historical backfill gaps) so a partial
+            # backfill doesn't artificially inflate the number. Competitor
+            # (``is_self=False``) rows are filtered out upstream in
+            # ``__init__`` because they always carry ``is_correct=None``.
             "correct_rate": (
-                _rate(self.correct_subtasks, total_subs),
+                _rate(sum(1 for m in self.mentions if m.is_correct), total_self_rows),
                 [
-                    _rate(correct_by_day[d], max(subtasks_by_day[d], 1))
+                    _rate(correct_by_day[d], max(
+                        sum(
+                            1
+                            for m in self.mentions
+                            if self.task_dates[m.id].date() == d
+                        ),
+                        1,
+                    ))
                     for d in self.days
                 ],
             ),
