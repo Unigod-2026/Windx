@@ -1,0 +1,418 @@
+/* ==========================================================================
+   Login page — 对齐 docs/风球GEO监控平台UI/index.html #page-login (L14-112)
+   + css/components.css:225-456 + css/main.css:477-509
+   适配 React + AntD 5:保留参考视觉(.page-login / .login-*),通过高优先级选择器
+   把 AntD Form/Input/Button/Divider/Checkbox 拉到与参考一致。
+   ========================================================================== */
+
+.page-login {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #f0f4ff 0%, #fff5eb 100%);
+  min-height: 100vh;
+  font-family: var(--font-family);
+}
+
+/* ---- 背景形状(参考的 3 个模糊渐变圆) ---- */
+.login-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.login-bg-shape {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+}
+
+.shape-1 {
+  width: 480px;
+  height: 480px;
+  background: var(--brand-blue);
+  top: -120px;
+  right: -120px;
+  opacity: 0.5;
+}
+
+.shape-2 {
+  width: 380px;
+  height: 380px;
+  background: var(--brand-orange);
+  bottom: -100px;
+  left: -100px;
+  opacity: 0.4;
+}
+
+.shape-3 {
+  width: 280px;
+  height: 280px;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  top: 40%;
+  left: 30%;
+  opacity: 0.2;
+}
+
+/* ---- 主分屏:左品牌 + 右表单 ---- */
+.login-container {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 1fr 480px;
+  height: 100vh;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+/* ============ 左侧品牌区 ============ */
+.login-left {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 80px;
+}
+
+.brand-block {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 56px;
+}
+
+.brand-logo {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.brand-block h1 {
+  font-size: var(--fs-3xl, 36px);
+  color: var(--brand-blue);
+  font-weight: 700;
+  letter-spacing: 1px;
+  line-height: 1.1;
+}
+
+.brand-text p {
+  font-size: var(--fs-md, 16px);
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.login-slogan h2 {
+  font-size: var(--fs-3xl, 36px);
+  color: var(--text-primary);
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 0 0 16px;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-orange));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.login-slogan p {
+  font-size: var(--fs-md, 16px);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  max-width: 560px;
+  margin: 0;
+}
+
+.login-features {
+  margin-top: 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.feature-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.feature-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  background: var(--brand-blue-50);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 参考的 .feature-icon.icon-* 是空 div + mask-image 染品牌蓝 */
+.feature-icon[class*="icon-"] {
+  width: 24px;
+  height: 24px;
+  background: var(--brand-blue);
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+.icon-monitor {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M21 12H18L15.5 16L9.5 8L6 12H3'/%3E%3Cpath d='M3 3V12V21H21V12V3H3Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M21 12H18L15.5 16L9.5 8L6 12H3'/%3E%3Cpath d='M3 3V12V21H21V12V3H3Z'/%3E%3C/svg%3E");
+}
+
+.icon-chart {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M7 10H11V21H7V10Z M15 6H19V21H15V6Z'/%3E%3Cpath d='M21 21H3V3'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M7 10H11V21H7V10Z M15 6H19V21H15V6Z'/%3E%3Cpath d='M21 21H3V3'/%3E%3C/svg%3E");
+}
+
+.icon-alert {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12Z'/%3E%3Cpath d='M12 7.5V13M12 16.5H12.0039V16.5039H12V16.5Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='square' stroke-linejoin='miter'%3E%3Cpath d='M22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12Z'/%3E%3Cpath d='M12 7.5V13M12 16.5H12.0039V16.5039H12V16.5Z'/%3E%3C/svg%3E");
+}
+
+.feature-text strong {
+  display: block;
+  font-size: var(--fs-md, 16px);
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.feature-text span {
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-tertiary);
+}
+
+/* ============ 右侧表单区 ============ */
+.login-right {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: #fff;
+  border-radius: 12px;
+  padding: 36px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.login-card-header h3 {
+  font-size: 24px;
+  color: var(--text-primary);
+  margin: 0 0 8px;
+}
+
+.login-card-header p {
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-tertiary);
+  margin: 0 0 28px;
+}
+
+/* ---- AntD 表单 label(对齐参考 .form-group label) ---- */
+.login-card .ant-form-item .ant-form-item-label > label {
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.login-card .ant-form-item .ant-form-item-label > label::after {
+  display: none;
+}
+
+/* ---- AntD Form.Item 间距:参考 .form-group margin-bottom: 16px ---- */
+.login-card .ant-form-item {
+  margin-bottom: 20px;
+}
+
+.login-card .ant-form-item:last-of-type {
+  margin-bottom: 24px;
+}
+
+/* ---- AntD Input / Input.Password:与参考 .input-wrap input 像素对齐 ---- */
+.login-card .ant-input-affix-wrapper,
+.login-card .ant-input {
+  height: 48px;
+  border-radius: 9px;
+  background: #fafafa;
+  border-color: var(--border-default);
+  font-size: 14px;
+  padding: 4px 12px;
+  transition: all 0.15s;
+}
+
+.login-card .ant-input-affix-wrapper {
+  padding: 4px 12px 4px 12px;
+}
+
+.login-card .ant-input-affix-wrapper > input.ant-input {
+  height: auto;
+  padding: 0;
+  background: transparent;
+  font-size: 14px;
+}
+
+.login-card .ant-input-affix-wrapper .ant-input-prefix {
+  margin-right: 10px;
+  color: var(--text-tertiary);
+  font-size: 16px;
+}
+
+.login-card .ant-input-affix-wrapper-focused,
+.login-card .ant-input-affix-wrapper:focus,
+.login-card .ant-input-affix-wrapper:hover {
+  border-color: var(--brand-blue);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(26, 85, 232, 0.1);
+}
+
+.login-card .ant-input:focus,
+.login-card .ant-input:hover {
+  border-color: var(--brand-blue);
+}
+
+.login-card .ant-input-password .ant-input-suffix .ant-input-password-icon {
+  color: var(--text-tertiary);
+}
+
+.login-card .ant-input-password .ant-input-suffix .ant-input-password-icon:hover {
+  color: var(--brand-blue);
+}
+
+/* ---- "记住我 / 忘记密码" 行(对齐参考 .form-row) ---- */
+.login-options {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.login-options .ant-checkbox-wrapper {
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-secondary);
+}
+
+.login-options .ant-checkbox-checked .ant-checkbox-inner {
+  background-color: var(--brand-blue);
+  border-color: var(--brand-blue);
+}
+
+.login-options .link {
+  color: var(--brand-blue);
+  font-size: var(--fs-sm, 14px);
+  cursor: pointer;
+}
+
+.login-options .link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 主登录按钮 ---- */
+.login-submit.ant-btn {
+  height: 48px;
+  font-size: 16px;
+  font-weight: 500;
+  border-radius: 9px;
+  background: var(--brand-blue);
+  border-color: var(--brand-blue);
+  letter-spacing: 2px;
+}
+
+.login-submit.ant-btn:hover:not(:disabled) {
+  background: var(--brand-blue-dark);
+  border-color: var(--brand-blue-dark);
+  box-shadow: 0 2px 8px rgba(26, 85, 232, 0.25);
+}
+
+/* ---- "其他登录方式" 分隔线 ---- */
+.login-divider {
+  display: flex;
+  align-items: center;
+  margin: 24px 0;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs, 12px);
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-default);
+}
+
+.login-divider span {
+  padding: 0 16px;
+}
+
+/* ---- 社交登录按钮(参考的 .social-btn,纯 button 不用 AntD Button) ---- */
+.login-social {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.social-btn {
+  padding: 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: #fff;
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.social-btn:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+/* ---- "还没有账号?立即注册" ---- */
+.login-footer {
+  text-align: center;
+  margin-top: 24px;
+  font-size: var(--fs-sm, 14px);
+  color: var(--text-tertiary);
+}
+
+.login-footer .link {
+  color: var(--brand-blue);
+  cursor: pointer;
+}
+
+.login-footer .link:hover {
+  text-decoration: underline;
+}
+
+/* ---- 备案号页脚 ---- */
+.login-meta {
+  margin-top: 32px;
+  font-size: var(--fs-xs, 12px);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* ============ 响应式:窄屏隐藏左侧 ============ */
+@media (max-width: 900px) {
+  .login-container {
+    grid-template-columns: 1fr;
+  }
+  .login-left {
+    display: none;
+  }
+}
