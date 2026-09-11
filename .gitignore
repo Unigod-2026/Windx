@@ -56,6 +56,23 @@ backend/data/
 /test_modal.mjs
 /verify-question-tab.mjs
 /frontend/test_question_page_perf.mjs
+/frontend/probe.mjs
+/frontend/test_modal.mjs
+/frontend/verify-question-tab.mjs
+/frontend/verify-toolbar-dropdown.mjs
+/frontend/check-name-save.mjs
+/frontend/screenshot-issue.mjs
+
+# Frontend dev runtime
+/frontend.log
+/frontend/pnpm-lock.yaml
+
+# WIP / one-off backfill scripts (not part of the deployable backend)
+/scripts/
+/backend/scripts/refresh_one_task.py
+/backend/scripts/test_monitorkeywords.py
+/backend/scripts/trigger_project_38.py
+/test2.md
 
 # Backend test suite
 /backend/tests/
