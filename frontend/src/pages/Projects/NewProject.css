@@ -1,0 +1,19 @@
+/* 新建项目页面 —— 向导占满整个 .app-content。
+   进入路由时由 AppLayout.css 的 ``body.windx-new-project .app-content``
+   把 .app-content 的 padding/背景归零,所以这里不再需要「卡片套卡片」
+   的边框/圆角/padding,直接透明穿透,让 wizard 顶到侧栏右侧。
+   height: 100% + display:flex 列布局,让 .new-project-wizard 把
+   头/步骤条/底固定,把唯一滚动面(.wizard-body)顶在中间。 */
+
+.new-project-page {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}

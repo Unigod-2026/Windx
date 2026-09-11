@@ -1,0 +1,1232 @@
+/* ==========================================================================
+   新建项目向导 · 样式
+   移植自 docs/风球GEO监控平台UI/css/wizard.css(TDesign 风格),
+   适配项目变量(--brand-blue / --text-* / --border-*)+ 品质微调:
+   卡片 padding 加大、阴影加强、选中态外发光、字号分级、圆角小幅调整。
+   ========================================================================== */
+
+/* ----- 向导局部变量(TDesign → 项目已有 / 缺值补齐) ----- */
+.new-project-wizard {
+  --w-brand: var(--brand-blue, #1a55e8);
+  --w-brand-hover: var(--brand-blue-dark, #1240b8);
+  --w-brand-soft: var(--brand-blue-50, #e8f0fe);
+  --w-warning: var(--brand-orange, #ff6b1a);
+  --w-warning-soft: var(--brand-orange-50, #fff1e6);
+  --w-error: #f5222d;
+  --w-error-soft: #ffeded;
+  --w-success: #00b42a;
+  --w-success-soft: #d8f5dc;
+  --w-text-1: var(--text-primary, #181818);
+  --w-text-2: var(--text-secondary, #4f4f4f);
+  --w-text-3: var(--text-tertiary, #8c8c8c);
+  --w-bg-container: #ffffff;
+  --w-bg-soft: #fafafa;
+  --w-bg-hover: #f5f5f5;
+  --w-bg-page: #f5f6f8;
+  --w-bg-component: #f0f0f0;
+  --w-border-1: var(--border-default, #e7e7e7);
+  --w-border-2: var(--border-strong, #d9d9d9);
+  --w-shadow-1: 0 2px 12px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.03);
+  --w-shadow-2: 0 4px 16px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --w-shadow-3: 0 12px 32px rgba(15, 23, 42, 0.10), 0 4px 12px rgba(15, 23, 42, 0.05);
+  --w-ring: 0 0 0 3px rgba(26, 85, 232, 0.12);
+  --w-radius-sm: 6px;
+  --w-radius-md: 8px;
+  --w-radius-lg: 12px;
+  --w-radius-pill: 999px;
+}
+
+/* ---------- 容器 ---------- */
+/* 三段式布局:头/步骤条 + 内容(body,唯一滚动) + 底(footer,固定)。
+   对齐参考 wizard.css 的 .wizard-pane / .wizard-body / .wizard-footer。
+   高度由 .new-project-page(100% of .app-content)传导,内部三段
+   flex 分摊:head/steps/footer = 0 0 auto,body = 1 1 auto + min-height:0。 */
+.new-project-wizard {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 内容区:唯一滚动面,scrollbar 默认透明轨道(配合 .app-content 的
+   同款处理,鼠标 hover 时才显形)。
+   四面 padding 归零,让 .w-block 紧贴 body 边缘。 */
+.wizard-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.wizard-body::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+.wizard-body::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.18s ease;
+}
+.wizard-body:hover {
+  scrollbar-color: var(--text-quaternary, #bfbfbf) transparent;
+}
+.wizard-body:hover::-webkit-scrollbar-thumb {
+  background: var(--text-quaternary, #bfbfbf);
+}
+.wizard-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary, #8c8c8c);
+}
+
+.wizard-step {
+  min-height: 320px;
+}
+
+.wizard-step .step-hint {
+  font-size: 13px;
+  color: var(--w-text-3);
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+.wizard-step .step-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--w-text-3);
+}
+
+/* ---------- 步骤条(自定义,替换 AntD Steps) ---------- */
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  padding: 18px 24px;
+  background: var(--w-bg-container);
+  border-bottom: 1px solid var(--w-border-1);
+  flex: 0 0 auto;
+  overflow-x: auto;
+  gap: 4px;
+}
+
+.w-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 4px 0;
+}
+
+.w-step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--w-bg-component);
+  color: var(--w-text-3);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.w-step-title {
+  font-size: 14px;
+  color: var(--w-text-3);
+  white-space: nowrap;
+  transition: color 0.18s ease, font-weight 0.18s ease;
+}
+
+.w-step.is-current .w-step-dot {
+  background: var(--w-brand);
+  color: #fff;
+  box-shadow: var(--w-ring);
+  transform: scale(1.05);
+}
+
+.w-step.is-current .w-step-title {
+  color: var(--w-brand);
+  font-weight: 700;
+}
+
+.w-step.is-done .w-step-dot {
+  background: var(--w-brand-soft);
+  color: var(--w-brand);
+}
+
+.w-step.is-done .w-step-title {
+  color: var(--w-text-2);
+}
+
+.w-step-line {
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 1px;
+  margin: 0 12px;
+  background: var(--w-border-1);
+}
+
+.w-step.is-done + .w-step-line,
+.w-step.is-current + .w-step-line {
+  background: var(--w-brand);
+}
+
+/* ---------- 通用区块 ---------- */
+.w-block {
+  padding: 24px;
+  margin: 0;
+  background: var(--w-bg-container);
+  border-radius: 0;
+  border: 0;
+  border-top: 1px solid var(--w-border-1);
+}
+.w-block:first-child {
+  border-top: 0;
+}
+
+/* 紧凑模式 —— 给 step 5「监控配置」用。
+   目标:1366×768 视口下不出现滚动条。原来的 24+24 padding + 14+14 margin
+   太大,这里压缩到 10px 上下、4-6px margin。 */
+.wizard-step.is-compact .w-block {
+  padding: 8px 24px;
+}
+.wizard-step.is-compact .w-block-head {
+  margin-bottom: 6px;
+}
+.wizard-step.is-compact .w-block-head h3 {
+  font-size: 14px;
+}
+.wizard-step.is-compact .w-desc {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.wizard-step.is-compact .w-seg-lg .w-seg-item {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+.wizard-step.is-compact .w-freq-card {
+  padding: 8px 10px;
+}
+.wizard-step.is-compact .w-freq-label {
+  font-size: 13px;
+}
+.wizard-step.is-compact .w-freq-hint {
+  font-size: 12px;
+}
+.wizard-step.is-compact .w-day-item {
+  height: 30px;
+  font-size: 12px;
+}
+
+.w-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.w-block-head h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--w-text-1);
+  letter-spacing: 0.2px;
+}
+
+.w-desc {
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--w-text-2);
+}
+
+.w-sub-info {
+  font-size: 12px;
+  color: var(--w-text-3);
+}
+
+.w-required {
+  font-size: 12px;
+  color: var(--w-error);
+  font-weight: 600;
+}
+
+.w-counter {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--w-text-2);
+}
+
+.w-counter.is-full {
+  color: var(--w-error);
+}
+
+.w-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.w-row-actions-wrap {
+  margin-top: 14px;
+}
+
+/* 步骤 2 顶部按钮行:左两个「全部设为 X」,右侧一个「编辑标签」,两端
+   撑开,中间自适应。 */
+.w-row-actions-split {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.w-row-actions-split .w-row-actions-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.w-row-actions-split > .ant-btn:last-child {
+  margin-left: auto;
+}
+
+/* 「编辑标签」Modal 内:输入行 + chip 列表。 */
+.w-row-addcat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.w-cat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.w-cat-chips-modal {
+  margin-top: 14px;
+}
+
+.w-cat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 10px;
+  border-radius: var(--w-radius-sm);
+  background: var(--w-bg-soft);
+  color: var(--w-text-2);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.w-cat-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--w-text-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
+}
+
+.w-cat-chip-x:hover {
+  opacity: 1;
+  color: var(--w-text-1);
+}
+
+.w-empty-sm {
+  padding: 16px;
+  font-size: 13px;
+}
+
+/* 「编辑标签」Modal 里的标签列表:每行一个标签 + 右侧「删除」按钮,
+   整行可读,跟添加输入行视觉一致。 */
+.w-tag-edit-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 1px solid var(--w-border-1);
+  border-radius: var(--w-radius-md);
+  overflow: hidden;
+}
+
+.w-tag-edit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--w-border-1);
+  background: var(--w-bg-container);
+}
+
+.w-tag-edit-row:last-child {
+  border-bottom: none;
+}
+
+.w-tag-edit-row:hover {
+  background: var(--w-bg-soft);
+}
+
+.w-tag-edit-name {
+  font-size: 14px;
+  color: var(--w-text-1);
+  font-weight: 500;
+}
+
+.w-empty {
+  padding: 32px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--w-text-3);
+  background: var(--w-bg-soft);
+  border-radius: var(--w-radius-md);
+  border: 1px dashed var(--w-border-1);
+}
+
+/* ---------- Step 1:问题输入 ---------- */
+.w-textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--w-text-1);
+  resize: vertical;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.w-textarea:focus {
+  outline: none;
+  border-color: var(--w-brand);
+  background: var(--w-bg-container);
+  box-shadow: var(--w-ring);
+}
+
+.w-textarea::placeholder {
+  color: var(--w-text-3);
+}
+
+.w-q-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.w-q-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--w-radius-md);
+  transition: background-color 0.15s ease;
+}
+
+.w-q-item:hover {
+  background: var(--w-bg-hover);
+}
+
+.w-q-idx {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--w-brand-soft);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--w-brand);
+}
+
+.w-q-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--w-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-q-del {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--w-radius-sm);
+  background: transparent;
+  color: var(--w-text-3);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.w-q-del:hover {
+  background: var(--w-error-soft);
+  color: var(--w-error);
+}
+
+.w-q-del svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------- Step 2:分类 ---------- */
+.w-tip-card {
+  padding: 18px 20px;
+  margin-bottom: 18px;
+  background: linear-gradient(180deg, var(--w-brand-soft) 0%, #ffffff 100%);
+  border-radius: var(--w-radius-lg);
+  border-left: 4px solid var(--w-brand);
+  box-shadow: var(--w-shadow-1);
+}
+
+.w-tip-title {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--w-brand);
+  letter-spacing: 0.5px;
+}
+
+.w-tip-list {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 14px;
+  line-height: 1.85;
+  color: var(--w-text-1);
+}
+
+.w-tip-list strong {
+  color: var(--w-text-1);
+  margin-right: 4px;
+}
+
+.w-tip-note {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--w-text-2);
+  margin: 0;
+}
+
+.w-cat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.w-cat-item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto 170px;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: var(--w-radius-md);
+  border-bottom: 1px solid var(--w-border-1);
+  transition: background-color 0.15s ease;
+}
+
+.w-cat-item:last-child {
+  border-bottom: none;
+}
+
+.w-cat-item:hover {
+  background: var(--w-bg-hover);
+}
+
+.w-cat-text {
+  font-size: 14px;
+  color: var(--w-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 胶囊组(分类/终端/模式复用) ---------- */
+.w-seg-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--w-bg-component);
+  border-radius: var(--w-radius-md);
+}
+
+.w-seg-item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  height: 32px;
+  padding: 0 14px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--w-text-2);
+  border-radius: var(--w-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.w-seg-item:hover {
+  color: var(--w-text-1);
+}
+
+.w-seg-item.is-active {
+  background: var(--w-bg-container);
+  color: var(--w-brand);
+  font-weight: 600;
+  box-shadow: var(--w-shadow-1);
+}
+
+.w-seg-lg .w-seg-item {
+  height: 36px;
+  padding: 0 20px;
+  font-size: 14px;
+}
+
+.w-select {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--w-text-1);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.w-select:focus {
+  outline: none;
+  border-color: var(--w-brand);
+  box-shadow: var(--w-ring);
+}
+
+/* ---------- Step 3:品牌与竞品 ---------- */
+.w-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.w-field {
+  display: block;
+}
+
+.w-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--w-text-2);
+}
+
+.w-label em {
+  color: var(--w-error);
+  font-style: normal;
+  margin-left: 2px;
+}
+
+.w-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--w-text-1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.w-input:focus {
+  outline: none;
+  border-color: var(--w-brand);
+  box-shadow: var(--w-ring);
+}
+
+.w-input::placeholder {
+  color: var(--w-text-3);
+}
+
+/* 标签输入 */
+.w-tag-input {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 6px 4px 14px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  cursor: text;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.w-tag-input:focus-within {
+  border-color: var(--w-brand);
+  box-shadow: var(--w-ring);
+}
+
+/* 标签输入框里嵌入的文本输入 + 「添加」按钮:不重复父容器的边框,
+   输入 flex:1 撑满剩余空间,按钮在右侧。 */
+.w-tag-input .w-input {
+  flex: 1;
+  min-width: 120px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.w-tag-input .w-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.w-tag-input .ant-btn {
+  flex-shrink: 0;
+}
+
+.w-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--w-radius-sm);
+  background: var(--w-bg-soft);
+  color: var(--w-text-2);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.w-tag-x {
+  border: none;
+  background: transparent;
+  color: var(--w-text-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
+}
+
+.w-tag-x:hover {
+  opacity: 1;
+}
+
+.w-tag-field {
+  flex: 1;
+  min-width: 120px;
+  height: 26px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--w-text-1);
+}
+
+.w-comp-card {
+  padding: 16px 18px;
+  margin-bottom: 12px;
+  border: 1px solid var(--w-border-1);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-soft);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.w-comp-card:hover {
+  border-color: var(--w-border-2);
+  box-shadow: var(--w-shadow-1);
+}
+
+.w-comp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--w-text-1);
+}
+
+.w-comp-del {
+  color: var(--w-error);
+  cursor: pointer;
+  font-size: 13px;
+  transition: opacity 0.15s ease;
+}
+
+.w-comp-del:hover {
+  opacity: 0.7;
+}
+
+/* ---------- Step 4:模型选择 ---------- */
+.w-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.w-model-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 64px;
+  padding: 0 16px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--w-text-1);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.w-model-card:hover {
+  border-color: var(--w-brand);
+  transform: translateY(-1px);
+}
+
+.w-model-card.is-active {
+  border-color: var(--w-brand);
+  background: linear-gradient(180deg, var(--w-brand-soft) 0%, #ffffff 100%);
+  box-shadow: var(--w-ring);
+}
+
+.w-model-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.w-model-name {
+  flex: 1;
+  text-align: left;
+  font-weight: 600;
+}
+
+.w-model-check {
+  flex: 0 0 auto;
+  color: var(--w-brand);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+/* ---------- Step 5:监控配置 ---------- */
+.w-freq-grid {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 12px;
+  width: 100%;
+}
+
+.w-freq-grid .w-freq-card {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.w-freq-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 20px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.w-freq-card:hover {
+  border-color: var(--w-brand);
+  transform: translateY(-1px);
+}
+
+.w-freq-card.is-active {
+  border-color: var(--w-brand);
+  background: linear-gradient(180deg, var(--w-brand-soft) 0%, #ffffff 100%);
+  box-shadow: var(--w-ring);
+}
+
+.w-freq-label {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--w-text-1);
+}
+
+.w-freq-hint {
+  font-size: 12px;
+  color: var(--w-text-2);
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.freq-hint {
+  font-size: 12px;
+  color: var(--w-text-3);
+  margin-left: 6px;
+}
+
+/* 日期选择工具条 */
+.w-day-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.w-day-count {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--w-brand);
+}
+
+.w-day-count.is-full {
+  color: var(--w-warning);
+}
+
+.w-day-presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.w-day-preset {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-pill);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--w-text-2);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.w-day-preset:hover {
+  border-color: var(--w-brand);
+  color: var(--w-brand);
+  background: var(--w-brand-soft);
+}
+
+.w-day-group {
+  display: flex;
+  gap: 10px;
+  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.w-day-group .w-day-item {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.w-day-item {
+  min-width: 80px;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--w-border-2);
+  border-radius: var(--w-radius-pill);
+  background: var(--w-bg-container);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--w-text-1);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.w-day-item:hover {
+  border-color: var(--w-brand);
+  color: var(--w-brand);
+}
+
+.w-day-item.is-active {
+  border-color: var(--w-brand);
+  background: var(--w-brand);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: var(--w-ring);
+}
+
+/* ---------- Step 6:配置汇总 ---------- */
+.w-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 18px;
+}
+
+.w-sum-card {
+  padding: 24px 28px;
+  background: var(--w-bg-container);
+  border-radius: var(--w-radius-lg);
+  box-shadow: var(--w-shadow-1);
+  border: 1px solid var(--w-border-1);
+}
+
+.w-sum-head {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--w-border-1);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--w-text-1);
+  letter-spacing: 0.2px;
+}
+
+.w-sum-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 8px 0;
+  font-size: 14px;
+}
+
+.w-sum-label {
+  flex: 0 0 96px;
+  color: var(--w-text-2);
+}
+
+.w-sum-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--w-text-1);
+  word-break: break-word;
+  line-height: 1.7;
+}
+
+.w-sum-value .w-tag {
+  margin: 0 6px 6px 0;
+}
+
+.w-submit-note {
+  padding: 16px 20px;
+  margin-top: 18px;
+  background: var(--w-warning-soft);
+  border-radius: var(--w-radius-md);
+  border-left: 4px solid var(--w-warning);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--w-text-1);
+}
+
+.w-submit-note strong {
+  color: var(--w-warning);
+}
+
+/* ---------- 底部(固定贴在 body 下方,不滚动) ---------- */
+.wizard-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  background: var(--w-bg-container);
+  border-top: 1px solid var(--w-border-1);
+  flex: 0 0 auto;
+}
+
+.wizard-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.wizard-hint {
+  font-size: 14px;
+  color: var(--w-warning);
+}
+
+.wizard-footer-right {
+  display: flex;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+/* ---------- 兼容/遗留类(早期 preview-section) ---------- */
+.preview-section {
+  margin-bottom: 12px;
+  border: 1px solid var(--w-border-1);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-container);
+}
+
+.preview-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--w-text-3);
+  background: var(--w-bg-soft);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--w-border-1);
+  letter-spacing: 0.5px;
+}
+
+.preview-section-body {
+  padding: 10px 12px;
+}
+
+.preview-row {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.preview-row-label {
+  flex-shrink: 0;
+  width: 80px;
+  color: var(--w-text-3);
+}
+
+.preview-row-value {
+  flex: 1;
+  word-break: break-word;
+}
+
+.competitor-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.questions-table {
+  border: 1px solid var(--w-border-1);
+  border-radius: var(--w-radius-md);
+  overflow: hidden;
+}
+
+.questions-table-head,
+.questions-table-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.questions-table-head {
+  background: var(--w-bg-soft);
+  font-size: 12px;
+  color: var(--w-text-3);
+  font-weight: 500;
+}
+
+.questions-table-row + .questions-table-row {
+  border-top: 1px solid var(--w-border-1);
+}
+
+/* ---------- 窄屏适配 ---------- */
+@media (max-width: 1400px) {
+  .w-cat-item {
+    grid-template-columns: 32px minmax(0, 1fr) auto 140px;
+  }
+  .wizard-steps,
+  .wizard-footer {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+/* ---------- Step 6:提问位置 / 情感分析 / 语义监控 ---------- */
+.w-region-wrap {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px dashed var(--w-border-2);
+  border-radius: var(--w-radius-md);
+  background: var(--w-bg-soft);
+}
+
+.w-desc-warn {
+  margin-top: 8px;
+  color: var(--w-warning);
+  font-size: 12px;
+}
+
+.w-desc-sm {
+  margin: 6px 0 0;
+  color: var(--w-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 语义监控字段网格 —— 两列(标准字段)+ 全宽(selling_points / custom)。 */
+.w-sem-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+}
+.w-sem-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.w-sem-full {
+  grid-column: 1 / -1;
+}
+.w-sem-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--w-text-2);
+}
+
+.w-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* 汇总页里卖的子段(selling_points 等) */
+.w-sum-sub {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.w-sum-sub-k {
+  flex: 0 0 96px;
+  color: var(--w-text-3);
+}

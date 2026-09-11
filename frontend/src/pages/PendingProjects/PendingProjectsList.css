@@ -1,0 +1,26 @@
+/* 待审核详情 Drawer 内的样式 —— 一节一行的紧凑布局。 */
+
+.pending-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pending-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pending-detail-label {
+  font-size: 12px;
+  color: var(--text-tertiary, #6b7280);
+  font-weight: 500;
+}
+
+.pending-detail-value {
+  font-size: 14px;
+  color: var(--text-primary, #111827);
+  line-height: 1.7;
+  word-break: break-word;
+}
