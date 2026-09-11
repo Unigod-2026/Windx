@@ -26,7 +26,9 @@ class AdminStatus(str, Enum):
 
 
 class ProjectStatus(str, Enum):
+    PENDING = "pending"
     ACTIVE = "active"
+    REJECTED = "rejected"
     DISABLED = "disabled"
 
 

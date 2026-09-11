@@ -1,10 +1,16 @@
 """Project configuration ORM models.
 
 A project belongs to one customer and carries the full set of inputs that
-``MolizhishuClient.submit_task`` consumes: prompts, keywords, platforms. In
-v2 the per-day schedule (0, 1 or 2 slots) is embedded directly on the project
-row instead of living in separate ``geo_schedules`` / ``geo_schedule_slots``
-tables.
+``MolizhishuClient.submit_task`` consumes: prompts, keywords, platforms.
+
+Schedule state (``schedule_enabled``) is still on the project row, but the
+per-day slot columns (``slot1_hour`` / ``slot1_minute`` / ``slot2_hour`` /
+``slot2_minute``) were dropped in migration ``20260903_0003`` and replaced
+by a per-mode ``monitor_schedule`` JSON column. That new column lives in
+the DB but isn't declared on the ORM yet; the corresponding read/write
+helpers will land in a follow-up. Until then, ``scheduler_runtime`` is a
+no-op and the legacy ``schedule_slots`` / ``set_schedule_slots`` helpers
+are gone.
 """
 
 from __future__ import annotations
@@ -75,10 +81,6 @@ class Project(Base):
     schedule_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
-    slot1_hour: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    slot1_minute: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    slot2_hour: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    slot2_minute: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     # Monitoring extensions (需求文档 §3 / §4): sentiment + region strategy.
     sentiment_enabled: Mapped[bool] = mapped_column(
@@ -105,6 +107,12 @@ class Project(Base):
     # nullable JSON list so the API can return ``null`` (never populated)
     # distinct from ``[]`` (explicitly empty).
     aliases: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Wizard step 6 payload — operator-declared brand identity
+    # (website / phone / social handles / selling points / ...). Shape is
+    # owned by the frontend; read-side code should treat ``NULL`` and
+    # ``{}`` identically. See ``alembic/versions/20260908_0001_project_semantic_json.py``
+    # for the migration that introduced the column.
+    semantic_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Project-scoped taxonomy for prompt categories. Order in this list is
     # the order shown on 问题提及分析's subtabs and the order prompts can
     # pick from in 问题管理. ``NULL`` means "no taxonomy configured yet"
@@ -159,48 +167,22 @@ class Project(Base):
         viewonly=True,
     )
 
-    # ------------------------------------------------------------------
-    # Embedded-slot helpers
-    # ------------------------------------------------------------------
-
-    @property
-    def schedule_slots(self) -> list[dict]:
-        """Configured slots (0, 1 or 2) as ``[{"hour": ..., "minute": ...}, ...]``."""
-        slots: list[dict] = []
-        if self.slot1_hour is not None and self.slot1_minute is not None:
-            slots.append({"hour": self.slot1_hour, "minute": self.slot1_minute})
-        if self.slot2_hour is not None and self.slot2_minute is not None:
-            slots.append({"hour": self.slot2_hour, "minute": self.slot2_minute})
-        return slots
-
-    def set_schedule_slots(self, slots: list[dict]) -> None:
-        """Write up to 2 slots into the embedded columns.
-
-        Raises ``ValueError`` if more than 2 slots are supplied; this matches
-        the v2 spec (1-2 daily slots per project).
-        """
-        if len(slots) > 2:
-            raise ValueError("a project may have at most 2 schedule slots")
-        slot1 = slots[0] if len(slots) >= 1 else None
-        slot2 = slots[1] if len(slots) >= 2 else None
-        if slot1 is None:
-            self.slot1_hour = None
-            self.slot1_minute = None
-        else:
-            self.slot1_hour = int(slot1["hour"])
-            self.slot1_minute = int(slot1["minute"])
-        if slot2 is None:
-            self.slot2_hour = None
-            self.slot2_minute = None
-        else:
-            self.slot2_hour = int(slot2["hour"])
-            self.slot2_minute = int(slot2["minute"])
-
     def __repr__(self) -> str:
         return (
             f"<Project id={self.id} code={self.code!r} "
             f"customer_id={self.customer_id} status={self.status!r}>"
         )
+
+    # Stub for the old per-day ``slot1_hour`` / ``slot2_hour`` API surface
+    # (``api/projects.py`` / ``api/dashboard.py`` still call this). Real
+    # scheduling now lives on the ``monitor_schedule`` JSON column added
+    # by migration ``20260911_0001``; the ORM hasn't been wired up to it
+    # yet, so we return ``[]`` and let ``next_run_at`` produce ``None`` —
+    # callers already skip nulls. Delete this once ``monitor_schedule``
+    # lands on the model.
+    @property
+    def schedule_slots(self) -> list[dict]:
+        return []
 
 
 class ProjectPrompt(Base):
@@ -481,6 +463,15 @@ class BrandMention(Base):
     )
     extract_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_extraction: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # LLM-judged 「该回答是否与项目核心卖点一致」。三态:
+    #   None = 未判断 / 不适用(竞品行 / 历史未回填行 / LLM 三次失败)
+    #   True = 评判通过(回答与卖点相符,或项目未填卖点)
+    #   False = 评判不通过(回答与卖点不符,例如卖点说眼霜而答非眼霜)
+    # 仅对 ``is_self=true`` 行做判断;``is_self=false`` 始终保持 None。
+    # 由 ``extraction._populate_correctness_pass`` 在 LLM pass 之后写入,
+    # 独立于 ``extract_status`` —— 即使 LLM 失败也不影响
+    # rank/sentiment/is_recommended 的 SUCCESS 状态。
+    is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
