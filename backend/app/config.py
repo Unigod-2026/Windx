@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     jwt_algorithm: str = ""
     jwt_expire_days: int = 0
 
+    # ---- Billing ----------------------------------------------------------
+    # Per-call LLM price in CNY. Surfaced via ``GET /api/config/llm-pricing``
+    # so the edit-project modal's "预计费用" footer can show a live number
+    # without embedding a hardcoded rate in the bundle.
+    api_cost_per_call: float = 0.0
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -200,3 +200,26 @@ class MolizhishuClient:
     def get_task_result_sync(self, task_id: str) -> dict:
         """Sync wrapper around :meth:`get_task_result`."""
         return asyncio.run(self.get_task_result(task_id))
+
+    async def list_cities(self, url: str) -> list[dict]:
+        """``GET <url>`` (eip-edge/ports/city-info) — supported provinces.
+
+        ``url`` is the full ``MOLIZHISHU_CITY_URL`` env value, not a
+        relative path: the city-info endpoint lives under ``/eip-edge/``,
+        a different host-prefix from the ``/monitor/`` URLs the rest of
+        this client uses, so there's no sensible path to append here.
+
+        Returns the ``data`` block of the upstream envelope — a list of
+        ``{"code", "name", "level"}`` objects (provinces have level 1).
+        """
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(url, headers=self._auth_headers())
+        return _unwrap(response)
+
+    def list_cities_sync(self, url: str) -> list[dict]:
+        """Sync wrapper around :meth:`list_cities`.
+
+        The proxy endpoint (``app.api.molizhishu.list_cities``) runs in
+        a sync handler — no async event loop is available there.
+        """
+        return asyncio.run(self.list_cities(url))

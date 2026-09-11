@@ -14,7 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, customers, dashboard, projects, tasks
+from app.api import auth, config, customers, dashboard, molizhishu, projects, tasks
 from app.config import get_settings
 from app.logging_setup import configure_logging
 from app.services.scheduler_runtime import TIMEZONE, reload_jobs
@@ -62,10 +62,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="windx-backend", lifespan=lifespan)
 app.include_router(auth.router)
+app.include_router(config.router)
 app.include_router(customers.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(dashboard.router)
+app.include_router(molizhishu.router)
 
 
 @app.get("/health")
