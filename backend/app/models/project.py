@@ -9,12 +9,13 @@ tables.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -369,6 +370,43 @@ class ProjectCompetitor(Base):
         return (
             f"<ProjectCompetitor id={self.id} project_id={self.project_id} "
             f"name={self.name!r} origin={self.origin!r} status={self.status!r}>"
+        )
+
+
+class OwnArticle(Base):
+    """Brand's own articles declared for the "自有文章引用分析" page.
+
+    The user populates this table via xlsx import (URL / title / publish_date);
+    the API layer then joins each row against ``geo_subtasks.reference_list_json``
+    in the current toolbar window to compute cite counts, model coverage and
+    the most recent cite timestamp. ``remind`` is a boolean toggle persisted
+    per row — flipping it is the only mutation supported today (no real
+    notification dispatch, matching ``index.html:1316-1317`` which labels it
+    as a page-internal toast).
+    """
+
+    __tablename__ = "geo_own_articles"
+    __table_args__ = (
+        UniqueConstraint("project_id", "url", name="uq_own_articles_project_url"),
+        Index("ix_own_articles_project_id", "project_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # URL 长 512 —— MySQL InnoDB unique index 3072 byte 上限 = 4 字节/字符(utf8mb4)×
+    # 768 字符,扣掉 project_id (4 byte) 留余地,512 安全。Normalize 在 service 层做。
+    url: Mapped[str] = mapped_column(String(512), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    publish_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    remind: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = created_at_column()
+    updated_at: Mapped[datetime] = updated_at_column()
+
+    def __repr__(self) -> str:
+        return (
+            f"<OwnArticle id={self.id} project_id={self.project_id} "
+            f"url={self.url!r} remind={self.remind}>"
         )
 
 

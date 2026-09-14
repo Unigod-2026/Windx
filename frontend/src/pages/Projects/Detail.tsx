@@ -8,6 +8,7 @@ import QuestionTab from "./QuestionTab";
 import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
 import PlaceholderTab from "./PlaceholderTab";
+import SelfArticles from "./sourcePreferences/SelfArticles";
 import SourcePreferencesTab from "./SourcePreferencesTab";
 import EditProjectTab from "./EditProjectTab";
 
@@ -16,6 +17,7 @@ const VALID_TABS = [
   "question",
   "competitor",
   "source",
+  "self-articles",
   "citation",
   "answer",
   "edit",
@@ -108,6 +110,8 @@ export default function ProjectDetail() {
         return <CompetitorAnalysisTab projectId={projectId} />;
       case "source":
         return <SourcePreferencesTab projectId={projectId} />;
+      case "self-articles":
+        return <SelfArticles projectId={projectId} />;
       case "citation":
         return <CitationAnalysisTab projectId={projectId} />;
       case "answer":

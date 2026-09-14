@@ -33,9 +33,11 @@ from app.models.enums import (  # noqa: F401
     RunStatus,
     RunTrigger,
 )
+from app.models.media_dictionary import MediaDictionary  # noqa: F401
 from app.models.project import (  # noqa: F401
     BrandMention,
     Competitor,
+    OwnArticle,
     Project,
     ProjectCompetitor,
     ProjectKeyword,

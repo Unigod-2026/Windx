@@ -6,6 +6,7 @@ import {
   TeamOutlined,
   ApartmentOutlined,
   BarChartOutlined,
+  BookOutlined,
   BulbOutlined,
   ClusterOutlined,
   FileSearchOutlined,
@@ -46,6 +47,7 @@ type ProjectTabKey =
   | "question"
   | "competitor"
   | "source"
+  | "self-articles"
   | "citation"
   | "answer"
   | "prompts"
@@ -73,6 +75,11 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
   },
   competitor: { key: "competitor", label: "竞品分析", icon: <BarChartOutlined /> },
   source: { key: "source", label: "信源偏好", icon: <ApartmentOutlined /> },
+  "self-articles": {
+    key: "self-articles",
+    label: "自有文章引用分析",
+    icon: <BookOutlined />,
+  },
   citation: { key: "citation", label: "引用源分析", icon: <LinkOutlined /> },
   answer: { key: "answer", label: "AI 回答详情", icon: <FileSearchOutlined /> },
   prompts: { key: "prompts", label: "问题管理", icon: <BulbOutlined /> },
@@ -83,7 +90,7 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
 const PROJECT_GROUP_LAYOUT: { title: string; keys: ProjectTabKey[] }[] = [
   {
     title: "数据洞察",
-    keys: ["overview", "question", "competitor", "source", "citation"],
+    keys: ["overview", "question", "competitor", "source", "self-articles", "citation"],
   },
   { title: "数据中心", keys: ["answer", "prompts", "competitors"] },
   { title: "系统", keys: ["settings"] },
