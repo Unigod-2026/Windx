@@ -894,10 +894,11 @@ body.windx-new-project .app-content {
 }
 
 /* 模型下拉菜单 —— 用 AntD Dropdown(overlayClassName="gt-model-dropdown"),
-   样式与 问题 / 日期 下拉一致。宽度收紧到「应用」按钮同款 200px,
-   防止 Dropdown 默认宽度把一行 checkbox 拉得过宽。 */
+   样式与 问题 / 日期 下拉一致。宽度需容纳「中文名 + 网页版/移动版 +
+   快速/思考」两枚徽标,最长的 ChatGPT 一档约 230px,这里取 260px
+   留余量;再窄 ChatGPT 会换行。 */
 .gt-model-dropdown .ant-dropdown-menu {
-  width: 200px;
+  width: 260px;
   padding: 8px 4px;
 }
 /* 问题下拉 —— 同样的多选结构,但需要更宽以容纳 prompt 文本(超 50 字省略)。 */
@@ -988,6 +989,24 @@ body.windx-new-project .app-content {
 .gt-model-delivery[data-delivery="mobile"] {
   color: var(--brand-orange, #ff6b1a);
   border: 1px solid var(--brand-orange, #ff6b1a);
+}
+
+.gt-model-thinking {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+.gt-model-thinking[data-thinking="fast"] {
+  color: var(--brand-green, #00a870);
+  border: 1px solid var(--brand-green, #00a870);
+}
+.gt-model-thinking[data-thinking="think"] {
+  color: var(--brand-purple, #722ed1);
+  border: 1px solid var(--brand-purple, #722ed1);
 }
 
 .gt-model-menu-foot {

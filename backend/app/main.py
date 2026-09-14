@@ -14,7 +14,16 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, config, customers, dashboard, molizhishu, projects, tasks
+from app.api import (
+    admin_media_dictionary,
+    auth,
+    config,
+    customers,
+    dashboard,
+    molizhishu,
+    projects,
+    tasks,
+)
 from app.config import get_settings
 from app.logging_setup import configure_logging
 from app.services.scheduler_runtime import TIMEZONE, reload_jobs
@@ -68,6 +77,7 @@ app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(dashboard.router)
 app.include_router(molizhishu.router)
+app.include_router(admin_media_dictionary.router)
 
 
 @app.get("/health")

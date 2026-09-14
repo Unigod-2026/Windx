@@ -23,14 +23,18 @@ import {
 } from "@ant-design/icons";
 import { DatePicker } from "antd";
 import dayjs from "dayjs";
-import { getProject, type PromptOut } from "../api/projects";
-import type {
-  DeliveryMode,
-  ThinkingMode,
-  ToolbarDateRange,
-} from "./ToolbarFilterContext";
+import { getProject, type ProjectPlatform, type PromptOut } from "../api/projects";
+import type { ToolbarDateRange } from "./ToolbarFilterContext";
 import { WIZARD_MODELS } from "../pages/Projects/wizardConfig";
+import { rowKeyOfPlatform } from "../pages/Projects/platforms";
 import { useToolbarFilter } from "./ToolbarFilterContext";
+
+/** 模型下拉每档的合成 key —— ``platform_code`` × ``delivery`` × ``thinking``。
+ *  把三种维度编成一个字符串 key 让 Set<string> 处理多选;应用时再拆出
+ *  ``platform_code`` 去重成 selectedModels(后端只接 platforms)。 */
+type ModelRowKey = string;
+
+const rowKeyOf = rowKeyOfPlatform;
 
 interface GlobalToolbarProps {
   /** 工具栏只在项目详情页(/admin/projects/:id)显示。父组件负责传 true。 */
@@ -69,45 +73,122 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
     mobile: true,
   });
 
-  // 模式分桶 → 「应用」参数。两侧都勾选等价于「不筛」(null);
-  // 与 platforms / prompt_ids 的「全选即 null」语义一致,避免空字符串
-  // 带来的歧义。
-  const toggleMode = (k: "fast" | "think") => {
-    setModes((m) => {
-      const next = { ...m, [k]: !m[k] };
-      const list: ThinkingMode[] = [];
-      if (next.fast) list.push("fast");
-      if (next.think) list.push("think");
-      // 全选 → null(不筛);只选一个 → 单元素 list;全不选 → 空 list,
-      // 后端 SQL IN () 会返回 0 行,UI 收到 0 是预期结果。
-      toolbar.apply({
-        selectedThinkingMode: list.length === 2 ? null : list,
-      });
-      return next;
+  // 把当前 staged 选择应用到 context 并刷写各 Tab(由 OverviewTab 等
+  // useEffect 依赖 toolbar.version 触发)。
+  // 顶部「模式 / 终端」按钮 = 直接应用,closeMenu=false;下拉「应用」按钮
+  // = 应用后关闭下拉,closeMenu=true。
+  function applyModels(staged: Set<ModelRowKey>, closeMenu: boolean) {
+    const isFullSelection =
+      staged.size === projectModelRows.length && projectModelRows.length > 0;
+    setAppliedModels(new Set(staged));
+    // 同步 ``stagedModels`` —— ``toggleMode / toggleDevice`` 是从
+    // ``stagedModels`` 读初始值的(top 按钮路径不打开 dropdown,触发不到
+    // onOpenChange 里的 ``setStagedModels(new Set(appliedModels))``),
+    // 不同步会让连续点两个 top 按钮时第二次读到第一次之前的 staged,
+    // 反推回「另一个维度全选」的脏状态。典型 bug:全选 → 取消 思考 →
+    // 取消 快速,思考档被错位点亮。下拉编辑路径不受影响:开下拉时
+    // ``onOpenChange`` 会再次从 appliedModels 复制回 stagedModels。
+    setStagedModels(new Set(staged));
+    // 反推顶部 modes / devices —— AND 语义:
+    // 「模型选中框中所有的 XX 模式都选择了,XX 才亮」,即该维度所有 row
+    // 都被勾上时按钮亮,否则灭(包含任一没勾 + 全没勾)。语义跟「PC 亮
+    // = 全选所有 web 档」自洽:截图里千问-网页-思考 没勾 → PC 灭。
+    const newModes = { fast: false, think: false };
+    const newDevices = { pc: false, mobile: false };
+    const rowsByDim = {
+      web: projectModelRows.filter((r) => r.delivery_mode === "web"),
+      mobile: projectModelRows.filter((r) => r.delivery_mode === "mobile"),
+      fast: projectModelRows.filter((r) => !r.thinking_mode),
+      think: projectModelRows.filter((r) => r.thinking_mode),
+    };
+    if (
+      rowsByDim.web.length > 0 &&
+      rowsByDim.web.every((r) => staged.has(rowKeyOf(r)))
+    ) {
+      newDevices.pc = true;
+    }
+    if (
+      rowsByDim.mobile.length > 0 &&
+      rowsByDim.mobile.every((r) => staged.has(rowKeyOf(r)))
+    ) {
+      newDevices.mobile = true;
+    }
+    if (
+      rowsByDim.fast.length > 0 &&
+      rowsByDim.fast.every((r) => staged.has(rowKeyOf(r)))
+    ) {
+      newModes.fast = true;
+    }
+    if (
+      rowsByDim.think.length > 0 &&
+      rowsByDim.think.every((r) => staged.has(rowKeyOf(r)))
+    ) {
+      newModes.think = true;
+    }
+    setModes(newModes);
+    setDevices(newDevices);
+    // ``selectedModels`` 走 ``staged`` 完整集合(每个 entry = compound key
+    // ``${platform_code}__${delivery}__${thinking}``),不按 platform_code
+    // 去重。后端按 compound key 三元组精确匹配 ProjectPlatform row,确保
+    // 「只勾快速 / 只勾 PC / 子集选择」时 KPI / trend / ranking 都按实际
+    // 选中的档位过滤 —— 去重成 modelCode 会让同 code 的不同档位(快 vs
+    // 慢、网页 vs 手机)误带进来,工具栏 / 图表口径不一致。
+    toolbar.apply({
+      selectedModels: isFullSelection ? null : Array.from(staged),
     });
+    message.success(
+      isFullSelection
+        ? "已应用:全部模型"
+        : `已应用:${staged.size} 档`,
+    );
+    if (closeMenu) setModelMenuOpen(false);
+  }
+
+  // 顶部「模式 / 终端」= 下拉里对应档 checkbox 的批量联动 + 等同应用:
+  // 点快速熄灭 → 所有 fast 档 checkbox 自动取消勾(选项本身保留,
+  // 4 档都展示,用户能看到这一变化);点快速点亮 → fast 档自动勾上。
+  // 切完直接 toolbar.apply + setAppliedModels + 弹 message,
+  // 等同点下拉里的「应用」(关下拉这一步省略 —— 顶部按钮本来就没下拉)。
+  const toggleMode = (k: "fast" | "think") => {
+    const newModes = { ...modes, [k]: !modes[k] };
+    setModes(newModes);
+    const nextStaged = new Set(stagedModels);
+    for (const r of projectModelRows) {
+      const t: "fast" | "think" = r.thinking_mode ? "think" : "fast";
+      if (t !== k) continue;
+      const key = rowKeyOf(r);
+      if (newModes[k]) nextStaged.add(key);
+      else nextStaged.delete(key);
+    }
+    applyModels(nextStaged, false);
   };
   const toggleDevice = (k: "pc" | "mobile") => {
-    setDevices((d) => {
-      const next = { ...d, [k]: !d[k] };
-      const list: DeliveryMode[] = [];
-      if (next.pc) list.push("web");
-      if (next.mobile) list.push("mobile");
-      toolbar.apply({
-        selectedDeliveryMode: list.length === 2 ? null : list,
-      });
-      return next;
-    });
+    const newDevices = { ...devices, [k]: !devices[k] };
+    setDevices(newDevices);
+    const nextStaged = new Set(stagedModels);
+    for (const r of projectModelRows) {
+      const delivery: "pc" | "mobile" = r.delivery_mode === "web" ? "pc" : "mobile";
+      if (delivery !== k) continue;
+      const key = rowKeyOf(r);
+      if (newDevices[k]) nextStaged.add(key);
+      else nextStaged.delete(key);
+    }
+    applyModels(nextStaged, false);
   };
 
   // 项目当前配置的 modelCode 集合 —— 控制下拉里展示哪些模型,
   // 以及默认勾选状态。空数组时不下拉(显示「加载中…」占位)。
-  const [projectModels, setProjectModels] = useState<string[]>([]);
+  // 保留每个 ProjectPlatform row(同一 modelCode 的 web/fast /
+  // web/think / mobile/fast / mobile/think 是 4 个独立 row),每个
+  // row 一档,key 用 rowKeyOf() 合成。
+  const [projectModelRows, setProjectModelRows] = useState<ProjectPlatform[]>([]);
   // 已应用的模型选择 —— 写入 context 的最终值,按钮 label 据此渲染。
-  const [appliedModels, setAppliedModels] = useState<Set<string>>(new Set());
+  // Set 的元素是 rowKeyOf() 合成 key,不是原始 modelCode。
+  const [appliedModels, setAppliedModels] = useState<Set<ModelRowKey>>(new Set());
   // 草稿选择 —— dropdown 内正在勾选的状态。打开时从 applied 复制,
   // 关闭时无论路径都不主动重置 —— 下次打开会自动从 applied 复制,
   // 天然实现「点应用才保存,其他路径关闭即丢弃」语义。
-  const [stagedModels, setStagedModels] = useState<Set<string>>(new Set());
+  const [stagedModels, setStagedModels] = useState<Set<ModelRowKey>>(new Set());
   const [modelsLoading, setModelsLoading] = useState(false);
   // 模型下拉是否打开。点 trigger / 外部 / 应用 三种路径都能关,
   // 点 dropdown 内的 checkbox 不触发关闭。
@@ -122,7 +203,7 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
 
   useEffect(() => {
     if (!visible || projectId === null) {
-      setProjectModels([]);
+      setProjectModelRows([]);
       setAppliedModels(new Set());
       setStagedModels(new Set());
       setProjectPrompts([]);
@@ -136,16 +217,15 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
     getProject(projectId)
       .then((d) => {
         if (cancelled) return;
-        // 用 ``platform_code``(API code,如 ``qianwen`` / ``qianwen_mobile``)
-        // 去重 —— 同一逻辑模型(qianwen)的 web 行 + mobile 行是两个独立
-        // 平台 code,工具栏要把它们分开显示。否则用户只看到「通义千问」
-        // 一项,网页 / 移动数据混在一起没法按 (model, device) 维度筛选。
-        const codes = Array.from(new Set(d.platforms.map((p) => p.platform_code ?? p.platform)));
-        setProjectModels(codes);
-        const allModels = new Set(codes);
-        // 默认全选当前项目配的所有模型。
-        setAppliedModels(allModels);
-        setStagedModels(allModels);
+        // 每个 ProjectPlatform row 一档 —— 同一逻辑模型(qianwen)的
+        // web/fast + web/think + mobile/fast + mobile/think 是 4 个独立
+        // row,工具栏按 (platform_code × delivery × thinking_mode) 4 档
+        // 展开,跟 docs/模型名字.txt 一档一项对齐。
+        setProjectModelRows(d.platforms);
+        const allKeys = new Set(d.platforms.map(rowKeyOf));
+        // 默认全选当前项目配的所有档。
+        setAppliedModels(new Set(allKeys));
+        setStagedModels(new Set(allKeys));
         // prompts —— 监控问题集。archived 状态的不展示(已下线)。
         const activePrompts = d.prompts.filter((p) => p.status !== "archived");
         const promptIds = activePrompts.map((p) => p.id);
@@ -161,7 +241,7 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
       .catch(() => {
         if (!cancelled) {
           message.error("加载项目配置失败");
-          setProjectModels([]);
+          setProjectModelRows([]);
           setAppliedModels(new Set());
           setStagedModels(new Set());
           setProjectPrompts([]);
@@ -182,51 +262,74 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, projectId]);
 
-  // 配了 N 个 modelCode,白名单过滤后是真正展示在 UI 上的选项。
-  // 白名单防止后端多出未支持的 code 时误显示。
-  // 下拉项以 ``platform_code`` 为 key —— 同一逻辑模型(qianwen)的 web
-  // 行 + mobile 行是两个独立项,UI 上挂「网页版 / 移动版」徽标区分。
+  // 下拉里所有 row 都展示 —— 顶部「模式 / 终端」只联动 checkbox 状态,
+  // 不再隐藏选项。原始 projectModelRows 直接进 modelOptions。
   // ``known`` 复用 ``WIZARD_MODELS`` 取颜色 + 中文名;``unknown`` 兜底
   // 兜那些后端多出但前端未支持的 code,raw 显示。
   const modelOptions = useMemo(() => {
-    const known: { code: string; name: string; color: string; delivery: "web" | "mobile" }[] = [];
-    const unknown: string[] = [];
-    const seen = new Set<string>();
-    for (const code of projectModels) {
-      if (seen.has(code)) continue;
-      seen.add(code);
+    const known: {
+      key: ModelRowKey;
+      code: string;
+      name: string;
+      color: string;
+      delivery: "web" | "mobile";
+      thinking: "fast" | "think";
+    }[] = [];
+    const unknown: {
+      key: ModelRowKey;
+      code: string;
+      delivery: "web" | "mobile";
+      thinking: "fast" | "think";
+    }[] = [];
+    const seen = new Set<ModelRowKey>();
+    for (const r of projectModelRows) {
+      const code = r.platform_code ?? r.platform;
+      const delivery = r.delivery_mode;
+      const thinking: "fast" | "think" = r.thinking_mode ? "think" : "fast";
+      const key = rowKeyOf(r);
+      if (seen.has(key)) continue;
+      seen.add(key);
       const entry = WIZARD_MODELS.find(
         (m) => m.value === code || m.mobileCode === code,
       );
       if (entry) {
         known.push({
+          key,
           code,
           name: entry.name,
           color: entry.color,
-          delivery: code === entry.mobileCode ? "mobile" : "web",
+          delivery,
+          thinking,
         });
       } else {
-        unknown.push(code);
+        unknown.push({ key, code, delivery, thinking });
       }
     }
     return { known, unknown };
-  }, [projectModels]);
+  }, [projectModelRows]);
 
-  if (!visible) return null;
-
-  const toggleModel = (code: string) =>
+  const toggleModel = (key: ModelRowKey) =>
     setStagedModels((s) => {
       const next = new Set(s);
-      if (next.has(code)) next.delete(code);
-      else next.add(code);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
 
-  const allModelCodes = projectModels;
+  // 「全部」按 row 数判定 —— 顶部按钮切换可见性不影响勾选状态。
+  const allModelKeys = useMemo(
+    () => projectModelRows.map(rowKeyOf),
+    [projectModelRows],
+  );
   const allSelected =
-    allModelCodes.length > 0 && allModelCodes.every((c) => stagedModels.has(c));
+    allModelKeys.length > 0 && allModelKeys.every((k) => stagedModels.has(k));
   const partialSelected =
-    !allSelected && allModelCodes.some((c) => stagedModels.has(c));
+    !allSelected && allModelKeys.some((k) => stagedModels.has(k));
+
+  // 早期返回必须放在所有 hook 之后 —— visible=false 时不要渲染菜单,
+  // 但 hook 数量必须保持稳定,否则 React 会报「Rendered fewer hooks
+  // than expected」。
+  if (!visible) return null;
 
   // AntD Menu 的 items —— Header 是 group(纯展示),模型复选框是普通项,
   // 「应用」放在 group 里。MenuProps["items"] 类型与渲染均交给 AntD,
@@ -242,7 +345,7 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             indeterminate={partialSelected}
             onChange={(e) => {
               if (e.target.checked) {
-                setStagedModels(new Set(allModelCodes));
+                setStagedModels(new Set(allModelKeys));
               } else {
                 setStagedModels(new Set());
               }
@@ -251,21 +354,21 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             全选
           </Checkbox>
           <span className="gt-model-menu-count">
-            {stagedModels.size}/{allModelCodes.length}
+            {stagedModels.size}/{allModelKeys.length}
           </span>
         </div>
       ),
     },
     { type: "divider" },
     ...modelOptions.known.map((m) => ({
-      key: m.code,
+      key: m.key,
       // 让 label 区域点击不冒泡到 Menu 的 item click —— 避免触发 menu 源关闭
       // (checkbox 自带 onClick 会被 Menu 视为 menu click)
       label: (
         <div onClick={(e) => e.stopPropagation()}>
           <Checkbox
-            checked={stagedModels.has(m.code)}
-            onChange={() => toggleModel(m.code)}
+            checked={stagedModels.has(m.key)}
+            onChange={() => toggleModel(m.key)}
           >
             <span
               className="gt-model-dot"
@@ -279,6 +382,12 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             <span className="gt-model-delivery" data-delivery={m.delivery}>
               {m.delivery === "mobile" ? "移动版" : "网页版"}
             </span>
+            {/* 「快速 / 思考」徽标:同一 modelCode 下可能并存 fast + think
+                两档(由后端 ProjectPlatform.thinking_mode 字段决定),
+                UI 上挂徽标区分,跟 docs/模型名字.txt 的 4 档展开对齐。 */}
+            <span className="gt-model-thinking" data-thinking={m.thinking}>
+              {m.thinking === "think" ? "思考" : "快速"}
+            </span>
           </Checkbox>
         </div>
       ),
@@ -291,15 +400,21 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             type: "group" as const,
             label: <span className="gt-model-menu-unknown">未识别 code</span>,
           },
-          ...modelOptions.unknown.map((code) => ({
-            key: `unknown-${code}`,
+          ...modelOptions.unknown.map((u) => ({
+            key: `unknown-${u.key}`,
             label: (
               <div onClick={(e) => e.stopPropagation()}>
                 <Checkbox
-                  checked={stagedModels.has(code)}
-                  onChange={() => toggleModel(code)}
+                  checked={stagedModels.has(u.key)}
+                  onChange={() => toggleModel(u.key)}
                 >
-                  <code>{code}</code>
+                  <code>{u.code}</code>
+                  <span className="gt-model-delivery" data-delivery={u.delivery}>
+                    {u.delivery === "mobile" ? "移动版" : "网页版"}
+                  </span>
+                  <span className="gt-model-thinking" data-thinking={u.thinking}>
+                    {u.thinking === "think" ? "思考" : "快速"}
+                  </span>
                 </Checkbox>
               </div>
             ),
@@ -319,20 +434,8 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             onClick={() => {
               // 「全部勾选」等价于「不筛选」(后端 null 路径),与
               // 不传 platforms 参数同口径,避免空字符串带来的歧义。
-              const isFullSelection =
-                stagedModels.size === allModelCodes.length &&
-                allModelCodes.length > 0;
-              setAppliedModels(new Set(stagedModels));
-              toolbar.apply({
-                selectedModels: isFullSelection ? null : Array.from(stagedModels),
-              });
-              message.success(
-                isFullSelection
-                  ? "已应用:全部模型"
-                  : `已应用:已选 ${stagedModels.size} 个模型`,
-              );
-              // 关掉下拉,触发各 Tab 重拉(由 context version++ 驱动)。
-              setModelMenuOpen(false);
+              // 应用后关闭下拉,触发各 Tab 重拉(由 context version++ 驱动)。
+              applyModels(stagedModels, true);
             }}
           >
             应用
@@ -344,9 +447,9 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
 
   const modelValueLabel = modelsLoading
     ? "加载中…"
-    : projectModels.length === 0
+    : projectModelRows.length === 0
       ? "未配置"
-      : appliedModels.size === projectModels.length
+      : appliedModels.size === projectModelRows.length
         ? "全部"
         : appliedModels.size === 0
           ? "未选"
@@ -547,7 +650,7 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
             setModelMenuOpen(next);
           }}
           trigger={["click"]}
-          disabled={projectModels.length === 0}
+          disabled={projectModelRows.length === 0}
           overlayClassName="gt-model-dropdown"
           placement="bottomLeft"
         >

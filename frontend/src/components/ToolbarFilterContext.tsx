@@ -27,13 +27,14 @@ export type ToolbarDateRange =
   | { start: string; end: string; days?: undefined };
 
 /** 模式分桶 —— 全局工具栏下「模式」分段控件对外的最终口径。
- *  - ``"fast"``  : 快速 (Subtask.mode IN 'standard'/'search'/'web')
- *  - ``"think"`` : 思考 (Subtask.mode IN 'reasoning'/'reasoning_search')
- *  UI 用 Set<"fast" | "think"> 维护「勾选状态」;应用时把全选状态映射成
- *  ``null``(不筛),与 platforms / prompt_ids 同款「全选即 null」语义。 */
+ *  工具栏顶部按钮直接改写 ``selectedModels`` 里的 compound key(每个
+ *  entry 已经是 ``${code}__${delivery}__${thinking}``),无需单独的
+ *  ``selectedThinkingMode`` 槽位。后端 ``thinking_mode`` query param 也
+ *  是历史参数,GlobalToolbar 不再发送。 */
 export type ThinkingMode = "fast" | "think";
 
-/** 终端分桶 —— 全局工具栏下「终端」分段控件对外的最终口径。 */
+/** 终端分桶 —— 全局工具栏下「终端」分段控件对外的最终口径。
+ *  同上:工具栏顶部按钮通过 compound key 携带终端维度。 */
 export type DeliveryMode = "web" | "mobile";
 
 export interface ToolbarFilterState {
@@ -43,10 +44,6 @@ export interface ToolbarFilterState {
   selectedPromptIds: number[] | null;
   /** 日期区间 —— null 表示「未选」(由 Tab 自己用本地默认值)。 */
   selectedDateRange: ToolbarDateRange | null;
-  /** 模式筛选 —— null 表示「全部」(不筛)。 */
-  selectedThinkingMode: ThinkingMode[] | null;
-  /** 终端筛选 —— null 表示「全部」(不筛)。 */
-  selectedDeliveryMode: DeliveryMode[] | null;
   /** 「应用」按钮触发 +1;Tab 把这个加进 useEffect 依赖即可强制刷新。 */
   version: number;
 }
@@ -57,8 +54,6 @@ export interface ToolbarFilterContextValue extends ToolbarFilterState {
     selectedModels?: string[] | null;
     selectedPromptIds?: number[] | null;
     selectedDateRange?: ToolbarDateRange | null;
-    selectedThinkingMode?: ThinkingMode[] | null;
-    selectedDeliveryMode?: DeliveryMode[] | null;
   }) => void;
 }
 
@@ -76,12 +71,6 @@ export function ToolbarFilterProvider({
   );
   const [selectedDateRange, setSelectedDateRange] =
     useState<ToolbarDateRange | null>(null);
-  const [selectedThinkingMode, setSelectedThinkingMode] = useState<
-    ThinkingMode[] | null
-  >(null);
-  const [selectedDeliveryMode, setSelectedDeliveryMode] = useState<
-    DeliveryMode[] | null
-  >(null);
   const [version, setVersion] = useState(1);
 
   const apply = useCallback(
@@ -89,8 +78,6 @@ export function ToolbarFilterProvider({
       selectedModels?: string[] | null;
       selectedPromptIds?: number[] | null;
       selectedDateRange?: ToolbarDateRange | null;
-      selectedThinkingMode?: ThinkingMode[] | null;
-      selectedDeliveryMode?: DeliveryMode[] | null;
     }) => {
       if (next.selectedModels !== undefined) {
         setSelectedModels(next.selectedModels);
@@ -100,12 +87,6 @@ export function ToolbarFilterProvider({
       }
       if (next.selectedDateRange !== undefined) {
         setSelectedDateRange(next.selectedDateRange);
-      }
-      if (next.selectedThinkingMode !== undefined) {
-        setSelectedThinkingMode(next.selectedThinkingMode);
-      }
-      if (next.selectedDeliveryMode !== undefined) {
-        setSelectedDeliveryMode(next.selectedDeliveryMode);
       }
       setVersion((v) => v + 1);
     },
@@ -117,20 +98,10 @@ export function ToolbarFilterProvider({
       selectedModels,
       selectedPromptIds,
       selectedDateRange,
-      selectedThinkingMode,
-      selectedDeliveryMode,
       version,
       apply,
     }),
-    [
-      selectedModels,
-      selectedPromptIds,
-      selectedDateRange,
-      selectedThinkingMode,
-      selectedDeliveryMode,
-      version,
-      apply,
-    ],
+    [selectedModels, selectedPromptIds, selectedDateRange, version, apply],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -145,8 +116,6 @@ export function useToolbarFilter(): ToolbarFilterContextValue {
       selectedModels: null,
       selectedPromptIds: null,
       selectedDateRange: null,
-      selectedThinkingMode: null,
-      selectedDeliveryMode: null,
       version: 0,
       apply: () => {},
     };

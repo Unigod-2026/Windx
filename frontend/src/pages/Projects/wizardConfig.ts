@@ -57,10 +57,10 @@ export interface WizardModelOption {
 export const WIZARD_MODELS: WizardModelOption[] = [
   { value: "doubao", name: "豆包", color: "#1a55e8", hasMobile: true, mobileCode: "doubao_mobile" },
   { value: "yuanbao", name: "元宝", color: "#ff6b1a", hasMobile: true, mobileCode: "yuanbao_mobile" },
-  { value: "qianwen", name: "通义千问", color: "#00a870", hasMobile: true, mobileCode: "qianwen_mobile" },
+  { value: "qianwen", name: "千问", color: "#00a870", hasMobile: true, mobileCode: "qianwen_mobile" },
   { value: "kimi", name: "Kimi", color: "#722ed1", hasMobile: false, mobileCode: null },
   { value: "deepseek", name: "DeepSeek", color: "#13c2c2", hasMobile: true, mobileCode: "deepseek_mobile" },
-  { value: "baiduai", name: "百度文心", color: "#eb2f96", hasMobile: true, mobileCode: "baidu_mobile" },
+  { value: "baiduai", name: "文心", color: "#eb2f96", hasMobile: true, mobileCode: "baidu_mobile" },
   { value: "antafu", name: "蚂蚁阿福", color: "#ed7b2f", hasMobile: false, mobileCode: null },
   // 2026-09-11 远端 GET /api/business/system/models 新增 chatgpt;无 mobile 版。
   { value: "chatgpt", name: "ChatGPT", color: "#10a37f", hasMobile: false, mobileCode: null },

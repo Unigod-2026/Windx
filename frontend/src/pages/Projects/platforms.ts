@@ -15,6 +15,7 @@
  */
 
 import { WIZARD_MODELS } from "./wizardConfig";
+import type { ProjectPlatform } from "../../api/projects";
 
 export interface ModelCardMeta {
   key: string;
@@ -72,20 +73,88 @@ export function platformMeta(raw: string): ModelCardMeta | undefined {
  *  返回 ``{name, color, mobile}``,便于渲染时挂「网页版 / 移动版」后缀。
  *  找不到时返回 ``undefined``,由调用方走 ``PLATFORM_CATALOG`` 兜底。 */
 function wizardByCode(code: string) {
-  const web = WIZARD_MODELS.find((m) => m.value === code);
+  const aliased = PLATFORM_CODE_ALIASES[code] ?? code;
+  const web = WIZARD_MODELS.find((m) => m.value === aliased);
   if (web) return { entry: web, mobile: false };
-  const mobile = WIZARD_MODELS.find((m) => m.mobileCode === code);
+  const mobile = WIZARD_MODELS.find((m) => m.mobileCode === aliased);
   if (mobile) return { entry: mobile, mobile: true };
   return undefined;
 }
 
+/** OverviewTab trend / ranking / model-dimension 的 ``platform`` 字段是
+ *  后端拼的 compound key —— ``${platform_code}__${delivery_mode}__${thinking}``
+ *  (例 ``qianwen__web__fast`` / ``kimi__mobile__think``)。拆分后用
+ *  ``wizardByCode`` 拿 name + color,再补终端 / 模式档位,渲染对齐
+ *  docs/模型名字.txt 的「<name>-<终端>-<模式>」格式。 */
+const OVERVIEW_KEY_RE = /^(.+?)__(web|mobile)__(fast|think)$/;
+
+export function parseOverviewKey(raw: string):
+  | { code: string; delivery: "web" | "mobile"; thinking: "fast" | "think" }
+  | null {
+  const m = OVERVIEW_KEY_RE.exec(raw);
+  if (!m) return null;
+  return { code: m[1], delivery: m[2] as "web" | "mobile", thinking: m[3] as "fast" | "think" };
+}
+
+/** ``ProjectPlatform`` row → compound key,与后端 ``_compound_platform`` 拼出的
+ *  key 完全一致(``${base}__${delivery}__${thinking}``,其中 ``base`` 是剥掉
+ *  ``_mobile`` 后缀的 ``platform_code``)。GlobalToolbar 拼 dropdown 选项、
+ *  AllSources 拼全集回填都用同一函数,避免漂移。
+ *
+ *  ``platform_code`` 在 mobile 档形如 ``qianwen_mobile`` / ``baidu_mobile``,
+ *  直接拼接会产出 ``qianwen_mobile__mobile__fast`` —— 后端却把 ``_mobile``
+ *  后缀当作 delivery 信号,产出 ``qianwen__mobile__fast``。两侧格式不一致
+ *  会让 post-filter 用 ``_compound_platform(plat, mode) in selected_set``
+ *  做相等判断时,行被全丢(by_model_top 出现 3 张空 mobile 卡、勾部分档
+ *  时显示数量对不上)。所以前端这边也要先剥 ``_mobile``,再按 delivery
+ *  拼,与后端 ``_compound_platform`` 对齐。 */
+export function rowKeyOfPlatform(r: ProjectPlatform): string {
+  const rawCode = r.platform_code ?? r.platform;
+  const code = rawCode.endsWith("_mobile")
+    ? rawCode.slice(0, -"_mobile".length)
+    : rawCode;
+  const delivery = r.delivery_mode;
+  const thinking = r.thinking_mode ? "think" : "fast";
+  return `${code}__${delivery}__${thinking}`;
+}
+
+const DELIVERY_LABEL: Record<"web" | "mobile", string> = {
+  web: "网页",
+  mobile: "手机",
+};
+const THINKING_LABEL: Record<"fast" | "think", string> = {
+  fast: "快速",
+  think: "思考",
+};
+
+// 后端 ``_compound_platform`` 把 ``baidu_mobile`` 剥成 ``baidu`` 写入 compound key,
+// 但 WIZARD_MODELS 的 ``value`` 是 ``baiduai``(前后缀不一致的历史命名),
+// 导致 ``wizardByCode("baidu")`` 查不到中文名,fallback 显示 raw ``baidu-手机-快速``。
+// 这里把剥离后的 base code 回填成能在 WIZARD_MODELS 里命中的 code,保证
+// ``platformLabel`` 与工具栏 dropdown 显示对齐(都展示「文心-手机-快速」)。
+const PLATFORM_CODE_ALIASES: Record<string, string> = {
+  baidu: "baiduai",
+};
+
 /** ``platformLabel`` 输出供 OverviewTab 各图表 / tooltip 使用的展示名:
- *  - WIZARD_MODELS 命中的 code:`<name> 网页版` / `<name> 移动版`,
- *    让用户清楚这条 series 对应哪一档设备;
+ *  - compound key(后端 trend / ranking / model_dimensions 发来的):
+ *    ``<name>-<终端>-<模式>``,严格对齐 docs/模型名字.txt;
+ *  - WIZARD_MODELS 命中的 raw code:`<name> 网页版` / `<name> 移动版`,
+ *    兼容老路径(直接拿 modelCode 调用 platformLabel 的场景);
  *  - PLATFORM_CATALOG 兜底(老 code):用历史 ``name``(不再加后缀,
  *    因为 catalog 本来就没区分 web / mobile,加上反而误导);
  *  - 都找不到:原样回传 code,避免静默丢失。 */
 export function platformLabel(raw: string): string {
+  const compound = parseOverviewKey(raw);
+  if (compound) {
+    const w = wizardByCode(compound.code);
+    if (w) {
+      return `${w.entry.name}-${DELIVERY_LABEL[compound.delivery]}-${THINKING_LABEL[compound.thinking]}`;
+    }
+    // compound 形式但 base code 不在 WIZARD_MODELS:仍按格式渲染,让
+    // 后端来的未知 code 也走统一布局而不是只剩 code 字符串。
+    return `${compound.code}-${DELIVERY_LABEL[compound.delivery]}-${THINKING_LABEL[compound.thinking]}`;
+  }
   const w = wizardByCode(raw);
   if (w) return `${w.entry.name} ${w.mobile ? "移动版" : "网页版"}`;
   const meta = PLATFORM_CATALOG.find((m) => m.key === platformToKey(raw));
@@ -101,9 +170,12 @@ const FALLBACK_PALETTE = ["#1a55e8", "#ff6b1a", "#52c41a", "#722ed1", "#13c2c2",
  *  WIZARD_MODELS 命中的 web 与 mobile 同色 —— 与模型卡片编辑器的同色
  *  规则一致,避免同一逻辑模型在 trend / ranking 里出现两种颜色。 */
 export function platformColor(raw: string, index = 0): string {
-  const w = wizardByCode(raw);
+  // compound key → 拆出 base code,与 WIZARD_MODELS / PLATFORM_CATALOG 同色
+  const compound = parseOverviewKey(raw);
+  const base = compound ? compound.code : raw;
+  const w = wizardByCode(base);
   if (w) return w.entry.color;
-  const meta = PLATFORM_CATALOG.find((m) => m.key === platformToKey(raw));
+  const meta = PLATFORM_CATALOG.find((m) => m.key === platformToKey(base));
   if (meta) return meta.chartColor;
   return FALLBACK_PALETTE[index % FALLBACK_PALETTE.length];
 }

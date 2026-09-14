@@ -28,7 +28,7 @@ import {
   type QuestionSummaryOut,
 } from "../../api/projects";
 import { cachedFetch, cacheKey } from "./questionTabCache";
-import { platformColor, platformLabel } from "./platforms";
+import { parseOverviewKey, platformColor, platformLabel } from "./platforms";
 import { useToolbarFilter } from "../../components/ToolbarFilterContext";
 
 interface Props {
@@ -414,6 +414,15 @@ export default function QuestionTab({ projectId, detail }: Props) {
   // render). Used by every effect that depends on the window.
   const dateQueryKey = useMemo(() => JSON.stringify(dateQuery), [dateQuery]);
 
+  // Toolbar 模型切档 → wire 上的 compound key 列表。null = 「全选」,
+  // [] = 「全部未选」。4 个 fetch 都把 toolbar.selectedModels 直接透到
+  // 后端的 ``platforms`` query param(2026-09 改造后端已支持)。
+  const platformsQuery = toolbar.selectedModels;
+  const platformsKey = useMemo(
+    () => (platformsQuery ? [...platformsQuery].sort().join("|") : "all"),
+    [platformsQuery],
+  );
+
   // Competitor list — independent of the analytics endpoints. The project
   // detail itself is provided as a prop by Detail.tsx (which already
   // fetched it), so we only need to populate platforms (sync, from the
@@ -450,8 +459,8 @@ export default function QuestionTab({ projectId, detail }: Props) {
     const ac = new AbortController();
     setLoading(true);
     cachedFetch<QuestionSummaryOut>(
-      cacheKey(["summary", projectId, dateQueryKey]),
-      () => getQuestionSummary(projectId, dateQuery),
+      cacheKey(["summary", projectId, dateQueryKey, platformsKey]),
+      () => getQuestionSummary(projectId, { ...dateQuery, platforms: platformsQuery ?? undefined }),
     )
       .then((data) => {
         if (ac.signal.aborted) return;
@@ -473,7 +482,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
     // ``selectedPromptId`` is read for the auto-select default; not
     // listed so changing the selection doesn't refetch summary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, dateQueryKey]);
+  }, [projectId, dateQueryKey, platformsKey]);
 
   // ``productDetail`` — single-prompt KPIs + model breakdown + excerpts.
   // Fires when the product pane is active AND a prompt is selected.
@@ -483,8 +492,8 @@ export default function QuestionTab({ projectId, detail }: Props) {
     if (!selectedPromptId || paneTab !== "product") return;
     const ac = new AbortController();
     cachedFetch<QuestionProductAnalyticsOut>(
-      cacheKey(["product", projectId, selectedPromptId, dateQueryKey]),
-      () => getQuestionProductAnalytics(projectId, selectedPromptId, dateQuery),
+      cacheKey(["product", projectId, selectedPromptId, dateQueryKey, platformsKey]),
+      () => getQuestionProductAnalytics(projectId, selectedPromptId, { ...dateQuery, platforms: platformsQuery ?? undefined }),
     )
       .then((data) => {
         if (ac.signal.aborted) return;
@@ -496,7 +505,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
         setProductDetail(null);
       });
     return () => ac.abort();
-  }, [paneTab, selectedPromptId, projectId, dateQueryKey]);
+  }, [paneTab, selectedPromptId, projectId, dateQueryKey, platformsKey]);
 
   // ``competitorDetail`` — single-prompt competitor brands breakdown.
   // Fires ONLY on the competitor pane, otherwise the round-trip is
@@ -505,8 +514,8 @@ export default function QuestionTab({ projectId, detail }: Props) {
     if (!selectedPromptId || paneTab !== "competitor") return;
     const ac = new AbortController();
     cachedFetch<QuestionCompetitorAnalyticsOut>(
-      cacheKey(["competitor", projectId, selectedPromptId, dateQueryKey]),
-      () => getQuestionCompetitorAnalytics(projectId, selectedPromptId, dateQuery),
+      cacheKey(["competitor", projectId, selectedPromptId, dateQueryKey, platformsKey]),
+      () => getQuestionCompetitorAnalytics(projectId, selectedPromptId, { ...dateQuery, platforms: platformsQuery ?? undefined }),
     )
       .then((data) => {
         if (ac.signal.aborted) return;
@@ -518,7 +527,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
         setCompetitorDetail(null);
       });
     return () => ac.abort();
-  }, [paneTab, selectedPromptId, projectId, dateQueryKey]);
+  }, [paneTab, selectedPromptId, projectId, dateQueryKey, platformsKey]);
 
   // ``stableChanges`` — 2×2 grid quadrants. Fires ONLY on the stable
   // pane.
@@ -526,8 +535,8 @@ export default function QuestionTab({ projectId, detail }: Props) {
     if (paneTab !== "stable") return;
     const ac = new AbortController();
     cachedFetch<QuestionStatusChangesOut>(
-      cacheKey(["stable", projectId, dateQueryKey]),
-      () => getQuestionStatusChanges(projectId, dateQuery),
+      cacheKey(["stable", projectId, dateQueryKey, platformsKey]),
+      () => getQuestionStatusChanges(projectId, { ...dateQuery, platforms: platformsQuery ?? undefined }),
     )
       .then((data) => {
         if (ac.signal.aborted) return;
@@ -539,7 +548,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
         setStableChanges(null);
       });
     return () => ac.abort();
-  }, [paneTab, projectId, dateQueryKey]);
+  }, [paneTab, projectId, dateQueryKey, platformsKey]);
 
   // Per-platform ``QuestionPlatformStat`` for the currently-selected
   // prompt. Sourced from ``productDetail.platforms`` (which is the only
@@ -762,7 +771,13 @@ export default function QuestionTab({ projectId, detail }: Props) {
   }, [answersOpen, answersTarget, projectId, dateQuery]);
 
   const openAnswers = (promptId: number, platform: string) => {
-    setAnswersTarget({ promptId, platform });
+    // 模型对比表 / 摘录 现在传的是 compound key(${code}__${delivery}__${thinking})。
+    // ``listPromptAnswers`` 后端只按 raw modelCode(Subtask.platform)过滤,
+    // 这里把 compound key 还原成平台 code;非 compound key 直接透传,
+    // 兼容旧路径。
+    const compound = parseOverviewKey(platform);
+    const platformCode = compound ? compound.code : platform;
+    setAnswersTarget({ promptId, platform: platformCode });
     setAnswersOpen(true);
   };
 
@@ -860,7 +875,7 @@ export default function QuestionTab({ projectId, detail }: Props) {
                       )}
                       <span>{num(s.totalMentions)} 次提及</span>
                       <span>
-                        {s.coverage}/{platforms.length || 7} 模型覆盖
+                        {s.coverage}/{platforms.length || 7} 模型档位
                       </span>
                     </div>
                     <div className="qt-list-metrics">
@@ -889,7 +904,6 @@ export default function QuestionTab({ projectId, detail }: Props) {
                 stat={selected}
                 item={effectiveCompetitorItem}
                 brands={competitorDetail?.brands ?? []}
-                platforms={platforms.map((entry) => entry.platform)}
               />
             ) : (
               <QuestionDetail
@@ -1944,9 +1958,9 @@ function StablePane({
           title="掉落分析"
           caption="上一窗口被提及,本窗口掉出 Top3 或消失(按事件)"
           items={data.drops.map((d) => ({
-            key: `drop-${d.prompt_id}-${d.platform}-${d.dropped_day}`,
+            key: `drop-${d.prompt_id}-${d.triple}-${d.dropped_day}`,
             label: d.prompt,
-            sub: `${_platformLabel(d.platform)} · ${d.dropped_day} · ${d.reason ?? ""}`,
+            sub: `${_platformLabel(d.triple)} · ${d.dropped_day} · ${d.reason ?? ""}`,
           }))}
         />
         <StableQuadrant
@@ -2012,19 +2026,20 @@ function CompetitorDetail({
   stat,
   item,
   brands,
-  platforms,
 }: {
   stat: QuestionStat;
   item: QuestionAnalyticsItem | null;
   brands: CompetitorBrandStat[];
-  platforms: string[];
 }) {
   const toolbar = useToolbarFilter();
-  // Toolbar 「模型」 filter — null = 全部. Intersected against the union
-  // of project platforms + the model_ranks keys so columns the operator
-  // excluded never render.
+  // Toolbar 「模型」 filter — null = 全部. ``model_ranks`` 的 key 已经是
+  // 后端按 ``${platform_code}__${delivery_mode}__${thinking_mode}`` 拆
+  // 出来的 compound key,与 toolbar 下发的 ``selectedModels`` 同口径,直
+  // 接 union 即可 —— 不再与 ``ProjectPlatform.platform``(raw modelCode)
+  // 做 union,后者会引入 raw code 与 compound key 不匹配的列(渲染成「—
+  // 」占位,看起来像「多出几列」)。
   const filteredModelColumns = useMemo(() => {
-    const keys = new Set(platforms);
+    const keys = new Set<string>();
     brands.forEach((brand) => {
       Object.keys(brand.model_ranks).forEach((platform) => keys.add(platform));
     });
@@ -2032,7 +2047,7 @@ function CompetitorDetail({
     if (toolbar.selectedModels === null) return all;
     const allowed = new Set(toolbar.selectedModels);
     return all.filter((p) => allowed.has(p));
-  }, [brands, platforms, toolbar.selectedModels]);
+  }, [brands, toolbar.selectedModels]);
   const rankedBrands = useMemo(
     () =>
       [...brands].sort(
@@ -2196,7 +2211,7 @@ function QuestionDetail({
         <div className="qt-detail-meta">
           {stat.category && <Tag color={colorFor(stat.category)}>{stat.category}</Tag>}
           <span>
-            共 {num(stat.totalMentions)} 次提及 · 覆盖 {stat.coverage}/{totalPlatforms || 7} 个模型
+            共 {num(stat.totalMentions)} 次提及 · 覆盖 {stat.coverage}/{totalPlatforms || 7} 个模型档位
           </span>
           <span>状态:{stat.status}</span>
         </div>
@@ -2247,7 +2262,7 @@ function QuestionDetail({
       <div className="qt-section qt-table-wrap">
         <h3>
           模型对比
-          <span className="badge">{stat.models.length} 个模型</span>
+          <span className="badge">{stat.models.length} 个档位</span>
         </h3>
         {stat.models.length === 0 ? (
           <Empty description="该问题暂未被任何模型提及" style={{ padding: 24 }} />
@@ -2337,7 +2352,7 @@ function QuestionDetail({
       <div className="qt-section qt-ai-excerpts" style={{ marginTop: 18 }}>
         <h3>
           AI 回答原文摘录
-          <span className="badge">{excerptPlatforms.length} 个模型 · 截取前 200 字</span>
+          <span className="badge">{excerptPlatforms.length} 个档位 · 截取前 200 字</span>
         </h3>
         <AiExcerptsGrid
           excerpts={item?.excerpts ?? {}}

@@ -72,8 +72,6 @@ export default function OverviewTab({ projectId }: Props) {
       ...query,
       platforms: toolbar.selectedModels ?? undefined,
       prompt_ids: toolbar.selectedPromptIds ?? undefined,
-      thinking_mode: toolbar.selectedThinkingMode ?? undefined,
-      delivery_mode: toolbar.selectedDeliveryMode ?? undefined,
     })
       .then((o) => {
         if (cancelled) return;
@@ -95,8 +93,6 @@ export default function OverviewTab({ projectId }: Props) {
     toolbar.version,
     toolbar.selectedModels,
     toolbar.selectedPromptIds,
-    toolbar.selectedThinkingMode,
-    toolbar.selectedDeliveryMode,
   ]);
 
   return (

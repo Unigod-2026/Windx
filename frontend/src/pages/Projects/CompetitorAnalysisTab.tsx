@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Empty, Skeleton, Tabs, message } from "antd";
 import {
   getCompetitorAnalysis,
   type CompetitorAnalysisOut,
   type CompetitorKpi,
 } from "../../api/projects";
+import { useToolbarFilter } from "../../components/ToolbarFilterContext";
 import OverviewTable from "./competitorAnalysis/OverviewTable";
 import TrendFullPane from "./competitorAnalysis/TrendFullPane";
 import DiffPane from "./competitorAnalysis/DiffPane";
@@ -17,14 +18,44 @@ interface Props {
 type SubTab = "all" | "trend" | "diff";
 
 export default function CompetitorAnalysisTab({ projectId }: Props) {
+  const toolbar = useToolbarFilter();
   const [data, setData] = useState<CompetitorAnalysisOut | null>(null);
   const [loading, setLoading] = useState(true);
   const [sub, setSub] = useState<SubTab>("all");
 
+  // Toolbar 的 5 维筛选 —— 模型 / 问题 / 日期(同时驱动当前 + 上一窗口)。
+  // compound key / prompt_ids / date 任意变化都触发重新拉取。版本号 version
+  // 也加进 deps,让「应用」按钮按一下立即生效。
+  const platformsKey = useMemo(
+    () => (toolbar.selectedModels ? [...toolbar.selectedModels].sort().join("|") : "all"),
+    [toolbar.selectedModels],
+  );
+  const promptIdsKey = useMemo(
+    () => (toolbar.selectedPromptIds ? [...toolbar.selectedPromptIds].sort().join("|") : "all"),
+    [toolbar.selectedPromptIds],
+  );
+  const dateKey = useMemo(() => {
+    const r = toolbar.selectedDateRange;
+    if (!r) return "default";
+    if ("days" in r) return `days:${r.days}`;
+    return `range:${r.start}:${r.end}`;
+  }, [toolbar.selectedDateRange]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getCompetitorAnalysis(projectId)
+    const r = toolbar.selectedDateRange;
+    const params: Parameters<typeof getCompetitorAnalysis>[1] = {
+      platforms: toolbar.selectedModels ?? undefined,
+      prompt_ids: toolbar.selectedPromptIds ?? undefined,
+    };
+    if (r && "days" in r) {
+      params.days = r.days;
+    } else if (r && "start" in r) {
+      params.start = r.start;
+      params.end = r.end;
+    }
+    getCompetitorAnalysis(projectId, params)
       .then((analysis) => {
         if (cancelled) return;
         setData(analysis);
@@ -37,7 +68,7 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, platformsKey, promptIdsKey, dateKey, toolbar.version]);
 
   if (loading) return <Skeleton active paragraph={{ rows: 12 }} />;
   if (!data) return <Empty description="暂无可展示的竞品分析数据" />;
@@ -106,6 +137,15 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
           color: var(--text-tertiary);
         }
         .panel-body { padding: 16px 18px; }
+        .diff-legend-hint {
+          margin-left: 8px;
+          padding: 2px 8px;
+          font-size: 11px;
+          color: var(--text-tertiary);
+          background: var(--bg-page, #fafafa);
+          border-radius: 999px;
+          border: 1px solid var(--border-light, #f0f0f0);
+        }
         .data-table {
           width: 100%;
           border-collapse: collapse;

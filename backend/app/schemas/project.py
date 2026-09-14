@@ -672,20 +672,26 @@ class QuestionSummaryOut(BaseModel):
 
 
 class QuestionPlatformStat(BaseModel):
-    """Per-(prompt × platform) row used by the 模型对比 table.
+    """Per-(prompt × triple) row used by the 模型对比 table。
 
-    Every metric is aggregated from the self-brand rows in
-    ``geo_brand_mentions`` directly — the backend ``GROUP BY``s on
-    ``(prompt, platform)`` so the client doesn't need to pull a
-    paginated detail list and roll up counts on its own (which used
-    to drift when the page size capped at 100).
+    2026-09 与 Overview 对齐:``platform`` 字段是 compound key
+    ``${platform_code}__${delivery_mode}__${thinking}``,1 行 = 1 个
+    (platform_code, delivery, thinking) 三元组,与 ProjectPlatform 行一一
+    对应。fast/think 与 web/mobile 不再合并,模型对比表行数 = 项目配的档
+    位数(项目 38 = 8 行)。
+
+    ``prev_*`` 6 个字段是该档位在 prev 窗口的 KPI,让模型对比表每行可以
+    展示该档位自己的环比 pill —— 横向 4 张 metric 卡仍走项目级聚合
+    (``QuestionPrevStat``),不动。
     """
 
     platform: str
-    # Number of (prompt × platform × run) rows where the brand appeared.
+    delivery_mode: str = "web"
+    thinking_mode: bool = False
+    # Number of (prompt × triple × run) rows where the brand appeared.
     matched: int
-    # Total number of (prompt × platform × run) rows in the window —
-    # i.e. the "X / Y" denominator. Equals how many times this model
+    # Total number of (prompt × triple × run) rows in the window —
+    # i.e. the "X / Y" denominator. Equals how many times this triple
     # was asked this question in the window.
     total: int
     # Best (smallest) rank observed; null when no run produced a rank.
@@ -698,17 +704,26 @@ class QuestionPlatformStat(BaseModel):
     # Only filled when ``view=competitor``: which competitor brand
     # drove the aggregation. ``None`` for self-view rows.
     brand: str | None = None
+    # Per-triple prev-window numbers,供模型对比表行内环比 pill 用。
+    prev_matched: int = 0
+    prev_total: int = 0
+    prev_top1_rate: float = 0.0
+    prev_top3_rate: float = 0.0
+    prev_mention_rate: float = 0.0
 
 
 class PlatformExcerpt(BaseModel):
-    """One platform's latest AI answer excerpt for the selected prompt.
+    """One triple's latest AI answer excerpt for the selected prompt.
 
     Used by the 「AI 回答原文摘录」 section. ``excerpt`` is truncated to
     200 chars on the server (no markdown stripping, no word boundary —
     matches the design mockup). ``run_id`` is the latest matching
     ``Subtask.subtask_id`` so the client can open the full answer
     modal. ``rank`` is the best rank observed in the window for this
-    (prompt, platform) pair.
+    (prompt, triple) pair.
+
+    2026-09 改造:顶层 dict key 由 raw modelCode 改为 compound key
+    ``${code}__${delivery}__${thinking}``,与 Overview / 模型对比表同口径。
     """
 
     excerpt: str | None
@@ -717,7 +732,12 @@ class PlatformExcerpt(BaseModel):
 
 
 class QuestionPrevStat(BaseModel):
-    """Same KPI shape as the current window, for the prev-period delta row."""
+    """Same KPI shape as the current window, for the prev-period delta row.
+
+    项目级聚合(跨 triple)—— 4 张横向 metric 卡用,与 Overview 的 prev_kpis
+    一致。每个档位自己的 prev 数据在 ``QuestionPlatformStat.prev_*`` 字段
+    上,不在这里。
+    """
 
     total: int
     matched: int
@@ -745,7 +765,12 @@ class CategoryStat(BaseModel):
 
 
 class DropEvent(BaseModel):
-    """One (prompt × platform) drop event for the 稳定与掉落 pane.
+    """One (prompt × triple) drop event for the 稳定与掉落 pane.
+
+    2026-09 改造:``platform`` 字段重命名为 ``triple``,值是 compound key
+    ``${platform_code}__${delivery_mode}__${thinking}``,与 Overview /
+    模型对比表同口径。``delivery_mode`` / ``thinking_mode`` 单独提供,
+    方便前端按档位过滤 / 排序。
 
     Emitted when a prompt was mentioned in the prev window but the
     current window's latest run is either missing or has dropped out
@@ -756,7 +781,9 @@ class DropEvent(BaseModel):
     prompt_id: int
     prompt: str
     category: str | None
-    platform: str
+    triple: str
+    delivery_mode: str = "web"
+    thinking_mode: bool = False
     dropped_day: str
     from_rank: int | None
     to_rank: int | None
@@ -992,13 +1019,22 @@ class CompetitorTrendBlock(BaseModel):
 
 
 class QuadrantPoint(BaseModel):
+    # ``platform`` 是 ``${platform_code}__${delivery_mode}__${thinking}`` 复合 key,
+    # 与 Overview / 问题提及分析 tab 的 compound key 口径一致;前端用
+    # ``parseOverviewKey`` 解出 (code, delivery, thinking) 再渲染展示名。
+    # ``delivery_mode`` / ``thinking_mode`` 是冗余字段,方便前端直接读而不必
+    # 二次解析,跟 QuestionPlatformStat 字段设计对齐。
     platform: str
+    delivery_mode: str | None = None
+    thinking_mode: bool | None = None
     self_mention_rate: float
     competitor_avg_mention_rate: float
 
 
 class ModelDiff(BaseModel):
     platform: str
+    delivery_mode: str | None = None
+    thinking_mode: bool | None = None
     self_mention_rate: float
     self_top1_rate: float
     self_top3_rate: float
@@ -1252,6 +1288,70 @@ class SourcePreferenceItem(BaseModel):
     last_seen: datetime
 
 
+class SourceMediaTop(BaseModel):
+    """按 media_name 聚合的 top 信源 —— 同一媒体名下的多条 URL 合并计数。
+
+    卡片用 ``sample_url`` / ``sample_title`` 作为展示和跳转链接,
+    实际排名依据是 ``media_name`` 在该平台窗口内的总引用次数 ``count``。
+    """
+    media_name: str
+    count: int
+    type: str
+    sample_url: str
+    sample_title: str | None
+
+
+class SourceByModelTop(BaseModel):
+    """每个模型(细分到 delivery × thinking)的 top N 媒体名,
+    默认 top 3,前端展开到 top 10。
+
+    参考页 docs/风球GEO监控平台UI/index.html #tab-source 「按模型细分的
+    信源偏好」面板 —— 每个模型卡片显示引用最多的 3 条媒体,点击展开显示 10 条。
+    媒体名取自 ``reference_list_json`` 的 ``site`` 字段(中文显示名)。
+    ``platform`` 字段对齐前端 dropdown 的颗粒度,compound key
+    ``<code>__<delivery>__<thinking>``(例 ``qianwen__web__fast``)。
+    """
+    platform: str
+    items: list[SourceMediaTop]
+
+
+class SourceStableItem(BaseModel):
+    """跨模型稳定信源 —— 被 ≥ 2 个模型引用,按 (model_count, count) 排序。
+
+    参考页 #tab-source 「稳定信源（跨模型）」面板 —— 在所有模型中持续
+    被引用的信源,显示「N/M」标签(被 N 个模型引用 / 共 M 个模型)。
+    """
+    url: str
+    site: str
+    title: str | None
+    type: str
+    count: int
+    model_count: int
+    total_models: int
+    first_seen: datetime
+    last_seen: datetime
+
+
+class SourceTrendPlatform(BaseModel):
+    """每个模型的趋势 —— 与 SourceTrendDay 同构,加 platform 字段。
+
+    参考页 #tab-source 「信源变化趋势」面板 —— 顶部下拉切换模型,
+    后端一次性返回所有模型的 daily new/lost,前端按选择渲染。
+    """
+    platform: str
+    days: list[SourceTrendDay]
+
+
+class SourceSuggestion(BaseModel):
+    """优化建议条目 —— 参考页 #tab-source 「优化建议」面板。
+
+    icon / title / content 由后端规则驱动生成,前端只渲染。
+    """
+    icon: str  # "focus" / "chart-line" / "swap" / "warning"
+    title: str
+    content: str
+
+
 class SourcePreferenceOut(BaseModel):
     project_id: int
     start: date
@@ -1262,3 +1362,197 @@ class SourcePreferenceOut(BaseModel):
     platform_slices: list[SourcePlatformSlice]
     top_sources: list[SourcePreferenceItem]
     trend: list[SourceTrendDay]
+    # 4 个新增 panel 数据 —— 全部信源参考页 layout 要求
+    by_model_top: list[SourceByModelTop] = []
+    stable_sources: list[SourceStableItem] = []
+    trend_by_platform: list[SourceTrendPlatform] = []
+    suggestions: list[SourceSuggestion] = []
+
+
+class SourceDetailItem(BaseModel):
+    """单条信源明细 —— 参考页 #tab-source 「信源明细」sub-tab。
+
+    字段口径跟 ``SourcePreferenceItem`` 一致(同一份 buckets 数据),
+    区别是这里返回**全部**(不受 top 50 上限约束),供信源明细列表的
+    搜索 / 类型筛选 / 排序 / 选中 → iframe 预览。
+    """
+    url: str
+    site: str
+    title: str | None
+    type: str  # _CITATION_DOMAIN_RULES 分类结果
+    count: int
+    platforms: list[str]  # compound key 列表
+    first_seen: datetime
+    last_seen: datetime
+
+
+class SourceDetailOut(BaseModel):
+    """信源明细页响应 —— 一次返回窗口内全部 unique URL,前端再做筛选 / 排序。
+
+    数据量通常几十到几百条,JSON 体积可接受,不做分页。后续如出现
+    1000+ 单项目的极端情况再加 limit / offset。
+    """
+    project_id: int
+    start: date
+    end: date
+    items: list[SourceDetailItem]
+    total: int
+
+
+class VideoPlatformSlice(BaseModel):
+    """单个视频平台在窗口内的聚合切片 —— 参考页 #tab-source 「视频类信源」sub-tab
+    顶部平台卡片网格,每张卡对应一个 video platform(抖音 / B 站 / 快手 等)。
+
+    字段:
+    - name:平台中文名(用于 UI 卡片 title)
+    - color:平台品牌色(进度条 / chart 用)
+    - count:窗口内该平台所有信源被引用的总条数(per-subtask × per-url 累加)
+    - unique_urls:窗口内该平台出现过的 unique URL 数
+    - platforms:按 model compound key 分桶的 count(用于 UI 模型 tag 列表)
+    - sources:该平台下按 count desc 的前 N 个 site(中文显示名),用于 UI 信源
+      tag 列表 —— 仅作「代表性信源」预览,不参与排名,数量上限由 service 控制
+      (默认 5)
+    """
+    name: str
+    color: str
+    count: int
+    unique_urls: int
+    platforms: dict[str, int]
+    sources: list[str]
+
+
+class VideoSourceOut(BaseModel):
+    """视频类信源 sub-tab 响应。
+
+    - total:窗口内视频类信源的总引用条数(sum count across platforms)。
+    - platforms:按 count desc 排序的视频平台卡片数据。
+    - by_model:按模型 compound key 汇总的视频类引用条数(给底部 ranking chart
+      用)—— 字段口径与 ``SourcePlatformSlice`` 一致,直接复用。
+    """
+    project_id: int
+    start: date
+    end: date
+    total: int
+    platforms: list[VideoPlatformSlice]
+    by_model: list[SourcePlatformSlice]
+
+
+class SourceSelfKpi(BaseModel):
+    """自有文章引用分析 sub-tab 顶部 4 张 KPI 卡。
+
+    - unique_sources:窗口内被引用的「自媒体」类型 unique URL 数。
+    - total_citations:窗口内所有「自媒体」类型引用的总条数。
+    - model_count:窗口内引用过「自媒体」信源的模型 compound key 数。
+    - top_source_count:头部单源的最大引用次数(用于规则 2「头部占比」判断)。
+    """
+    unique_sources: int
+    total_citations: int
+    model_count: int
+    top_source_count: int
+
+
+class SourceSelfItem(BaseModel):
+    """自有文章信源列表里的一条 —— 参考页 #tab-source 「自有文章」sub-tab
+    「自有文章信源列表」面板。
+
+    字段口径跟 :class:`SourceDetailItem` 一致(url / site / title / count /
+    platforms / first_seen / last_seen),但只有「自媒体」类型的引用,且
+    没有 first/last_seen(自有文章 tab 不需要日趋势)。
+    """
+    url: str
+    site: str
+    title: str | None
+    count: int
+    platforms: list[str]  # compound key 列表
+
+
+class SourceSelfOut(BaseModel):
+    """自有文章引用分析 sub-tab 响应。
+
+    与 ``SourceDetailOut`` 的差异:
+      - 只统计 host 命中 ``_CITATION_DOMAIN_RULES`` 「自媒体」分类的引用
+        (抖音 / B 站 / 快手 / 西瓜 / YouTube / 优酷 / 腾讯视频 / 新浪视频);
+      - 顶部 4 张 KPI 卡 + by_model + 信源列表 + 运营建议。
+    """
+    project_id: int
+    start: date
+    end: date
+    kpi: SourceSelfKpi
+    by_model: list[SourcePlatformSlice]
+    items: list[SourceSelfItem]
+    suggestions: list[SourceSuggestion]
+
+
+# ----------------------------------------------------------------------
+# 自有文章引用分析(独立一级页面,表格视图)
+# ----------------------------------------------------------------------
+
+class OwnArticleIn(BaseModel):
+    """xlsx 单行解析 + 手动创建 / 更新共用入参。"""
+    url: str = Field(..., max_length=512)
+    title: str = Field("", max_length=512)
+    publish_date: date | None = None
+
+
+class OwnArticleOut(BaseModel):
+    """单条自有文章 + 服务端 join 出的引用统计。
+
+    - ``cited`` / ``cite_count`` / ``cite_models`` / ``last_cited`` 由
+      ``app.services.own_articles.compute_cite_stats`` 在 toolbar 过滤
+      窗口内注入;没有任何引用时分别落 ``False / 0 / [] / "—"``。
+    - ``created_at`` 来自 ORM 列;service 写入时设置,前端无需关心。
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    url: str
+    title: str
+    publish_date: date | None
+    remind: bool
+    created_at: datetime
+    cited: bool = False
+    cite_count: int = 0
+    cite_models: list[str] = []
+    last_cited: str = "—"
+
+
+class OwnArticleListOut(BaseModel):
+    """GET /projects/{id}/own-articles 响应。"""
+    items: list[OwnArticleOut]
+    total: int
+
+
+class OwnArticleInvalidRow(BaseModel):
+    """xlsx 解析失败的行 —— preview 阶段展示,实际不入库。"""
+    row: int
+    raw_url: str
+    reason: str  # "empty_url" / "invalid_url" / "duplicate_in_file"
+
+
+class OwnArticleImportPreview(BaseModel):
+    """POST .../import/preview 响应。
+
+    - ``entries`` 是去重 + 校验后的合法行,跟 ``new_urls`` / ``update_urls``
+      一起用于前端 preview 表格的「状态」列。
+    - ``invalid_rows`` 是空 URL / 无 scheme / 文件内重复等需要展示给用户
+      的失败行;不阻塞导入流程。
+    """
+    entries: list[OwnArticleIn]
+    new_urls: list[str]
+    update_urls: list[str]
+    invalid_rows: list[OwnArticleInvalidRow]
+
+
+class OwnArticleImportResult(BaseModel):
+    """POST .../import 响应 —— 整事务结果。
+
+    - ``inserted`` / ``updated`` 是本次 import 实际改动的行数。
+    - ``skipped`` 始终为 0(invalid_rows 已在 preview 阶段告知用户,本
+      次不再回写)。
+    - ``total_in_project`` 是导入完成后该项目的总行数,前端用来刷新
+      标题旁的「共 N 条」展示。
+    """
+    inserted: int
+    updated: int
+    skipped: int
+    total_in_project: int

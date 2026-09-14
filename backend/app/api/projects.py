@@ -19,13 +19,15 @@ swallowed by the int path converter.
 
 from __future__ import annotations
 
+import io
 import json
+import re
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from sqlalchemy import Integer, and_, case, func, select, update
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import Integer, and_, case, func, literal, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -44,6 +46,7 @@ from app.models.enums import (
 )
 from app.models.project import (
     BrandMention,
+    OwnArticle,
     Project,
     ProjectCompetitor,
     ProjectKeyword,
@@ -58,7 +61,13 @@ from app.services.competitor_analysis import (
     _resolve_competitor_window,
     compute_competitor_analysis,
 )
-from app.services.source_preferences import compute_source_preferences
+from app.services.source_preferences import (
+    compute_source_detail,
+    compute_source_preferences,
+    compute_source_self,
+    compute_source_video,
+)
+from app.services import own_articles
 from app.schemas.project import (
     BrandMentionListOut,
     BrandMentionOut,
@@ -115,8 +124,17 @@ from app.schemas.project import (
     SourcePreferenceItem,
     SourcePreferenceKpi,
     SourcePreferenceOut,
+    SourceDetailItem,
+    SourceDetailOut,
+    SourceSelfItem,
+    SourceSelfOut,
     SourceTrendDay,
     SourceTypeSlice,
+    VideoSourceOut,
+    OwnArticleImportPreview,
+    OwnArticleImportResult,
+    OwnArticleListOut,
+    OwnArticleOut,
     WizardModelConfig,
     WizardPayload,
     WizardSemantic,
@@ -196,6 +214,113 @@ def _resolve_window_inline(
     win_start_dt = datetime.combine(win_start, time.min)
     win_end_dt = datetime.combine(win_end, time.max)
     return win_start_dt, win_end_dt
+
+
+# --------------------------------------------------------------------------
+# Compound key helpers — ``${platform_code}__${delivery}__${thinking}``
+# 形如 ``qianwen__web__fast`` / ``baidu_mobile__mobile__think``,与
+# ``frontend/src/pages/Projects/platforms.ts`` 的 ``OVERVIEW_KEY_RE`` 与
+# ``parseOverviewKey`` 是 wire contract 双端。Overview / 问题提及分析两
+# 边共用,所以放在这里而不是 endpoint 内部:
+#  - trend / ranking / model_dimensions 在 Overview 已落地 compound key;
+#  - 问题提及分析 4 个端点现在也按 triple 拆分,避免 tab 之间口径错位;
+#  - GlobalToolbar 工具栏勾选 / 反选 通过 compound key 走 wire,后端解析
+#    后用 SQL ``tuple_(...).in_(triples)`` 一次性过滤三个列。
+# --------------------------------------------------------------------------
+
+_COMPOUND_KEY_RE = re.compile(r"^(.+)__(web|mobile)__(fast|think)$")
+
+
+def compound_key(
+    platform_code: str,
+    delivery_mode: str,
+    thinking_mode: bool | None,
+) -> str:
+    """``${platform_code}__${delivery_mode}__${thinking}`` —— ``thinking_mode``
+    缺省按 False 处理,避免与旧 fixture ``None`` 行拼出 ``__None__`` 这种坏
+    key。"""
+    thinking = "think" if thinking_mode else "fast"
+    return f"{platform_code}__{delivery_mode}__{thinking}"
+
+
+def parse_compound_key(
+    raw: str,
+) -> tuple[str, str, bool] | None:
+    """反向解出 ``(platform_code, delivery_mode, is_thinking)``;非法 token
+    返回 ``None``,调用方按「静默忽略」处理(Overview 用同一口径)。"""
+    m = _COMPOUND_KEY_RE.fullmatch(raw)
+    if not m:
+        return None
+    return m.group(1), m.group(2), m.group(3) == "think"
+
+
+def parse_platforms_param(
+    raw: str | None,
+) -> set[tuple[str, str, bool]] | None:
+    """``?platforms=qianwen__web__fast,baidu_mobile__mobile__think`` →
+    ``{(platform_code, delivery_mode, is_thinking)}``。
+
+    - 缺省 / 空字符串 → ``None``,调用方走「全选」分支;
+    - 任一 token 非法 → 静默忽略(与 Overview 一致);全部非法 → ``set()``
+      由调用方按「0 行」处理。
+    """
+    if raw is None:
+        return None
+    if not raw.strip():
+        return None
+    triples: set[tuple[str, str, bool]] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        parsed = parse_compound_key(tok)
+        if parsed is None:
+            continue
+        triples.add(parsed)
+    return triples
+
+
+def parse_prompt_ids_param(
+    raw: str | None,
+) -> list[int] | None:
+    """``?prompt_ids=12,34,56`` → ``[12, 34, 56]``。缺省 / 空字符串 → ``None``
+    (走「不筛」分支);任一非数字 token 静默丢弃。"""
+    if raw is None:
+        return None
+    if not raw.strip():
+        return None
+    ids: list[int] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            continue
+    return ids
+
+
+def project_platform_triples(
+    db: Session, project_id: int
+) -> set[tuple[str, str, bool]]:
+    """该项目配的 ``(platform_code, delivery_mode, is_thinking)`` 三元组集合,
+    作为「覆盖度分母」与图表 series 名空间。
+
+    注意:与 Overview 的 ``_overview_key`` / selected_triples 口径一致 —
+    都走 ``platform_code``(不是 ``platform``),mobile 档的真实 code 来自
+    这列。"""
+    rows = db.execute(
+        select(
+            ProjectPlatform.platform_code,
+            ProjectPlatform.delivery_mode,
+            ProjectPlatform.thinking_mode,
+        ).where(ProjectPlatform.project_id == project_id)
+    ).all()
+    return {
+        (r.platform_code, r.delivery_mode.value, bool(r.thinking_mode))
+        for r in rows
+    }
 
 
 def _next_run(p: Project):
@@ -1995,21 +2120,35 @@ def _compute_question_summary(
     *,
     start: datetime,
     end: datetime,
+    selected_triples: set[tuple[str, str, bool]] | None = None,
 ) -> QuestionSummaryOut:
     """按项目当前窗口聚合每个 prompt 的 KPI + 项目级 category summary。
 
-    单次 SELECT 取 per-(prompt, category, status, platform, rank) 行,
-    在 Python 中派生 per-prompt 和 per-category 两套聚合,严格遵守 spec
-    §4.1「从同一统计结果汇总,不再额外扫描 geo_brand_mentions」。
-    SQL 预算 = 1 条核心 SELECT。
+    单次 SELECT 取 per-(prompt, category, status, platform, delivery,
+    thinking, rank) 行,在 Python 中派生 per-prompt 和 per-category 两套
+    聚合,严格遵守 spec §4.1「从同一统计结果汇总,不再额外扫描
+    geo_brand_mentions」。SQL 预算 = 1 条核心 SELECT。
+
+    ``selected_triples`` 走 Overview 同款口径 —— toolbar 切档后只算
+    勾选 (platform_code, delivery_mode, is_thinking) 三元组对应的行;
+    缺省 = None 表示「全选」,空集合 = 视为 0 行(不留 N+1)。
+
+    Coverage 严格按 triple 匹配:ProjectPlatform 配置的 (platform_code,
+    delivery, thinking) 三元组集合是分母,窗口内 mention 行命中这些
+    三元组的去重数是分子 —— 与 Overview / 工具栏「N 个模型档位」
+    一致,不再让 mention platform 集合去重与 ProjectPlatform 行数错位。
     """
-    rows = db.execute(
+    configured_triples = project_platform_triples(db, project.id)
+
+    stmt = (
         select(
             ProjectPrompt.id,
             BrandMention.prompt,
             ProjectPrompt.category,
             ProjectPrompt.status,
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.rank_position,
         )
         .join(ProjectPrompt, ProjectPrompt.prompt == BrandMention.prompt)
@@ -2020,7 +2159,25 @@ def _compute_question_summary(
             BrandMention.created_at >= start,
             BrandMention.created_at < end,
         )
-    ).all()
+    )
+    if selected_triples is not None:
+        if not selected_triples:
+            # 「全部未选」直接返回空列表,避免 SQL IN () 语法错。
+            return QuestionSummaryOut(
+                project_id=project.id,
+                start=start,
+                end=end,
+                items=[],
+                category_summary=[],
+            )
+        stmt = stmt.where(
+            tuple_(
+                BrandMention.platform,
+                BrandMention.delivery_mode,
+                BrandMention.thinking_mode,
+            ).in_(selected_triples)
+        )
+    rows = db.execute(stmt).all()
 
     per_prompt: dict[int, dict] = {}
     cat_prompts: dict[str | None, set[int]] = defaultdict(set)
@@ -2042,11 +2199,13 @@ def _compute_question_summary(
                 "rank_count": 0,
                 "top1": 0,
                 "top3": 0,
-                "platforms": set(),
+                "covered_triples": set(),
             },
         )
         bucket["total"] += 1
-        bucket["platforms"].add(r.platform)
+        triple = (r.platform, r.delivery_mode, bool(r.thinking_mode))
+        if triple in configured_triples:
+            bucket["covered_triples"].add(triple)
         if r.rank_position is not None:
             bucket["matched"] += 1
             bucket["rank_sum"] += r.rank_position
@@ -2082,7 +2241,7 @@ def _compute_question_summary(
                 top1_rate=(b["top1"] / total) if total else 0.0,
                 top3_rate=(b["top3"] / total) if total else 0.0,
                 rank_avg=(b["rank_sum"] / b["rank_count"]) if b["rank_count"] else None,
-                coverage=len(b["platforms"]),
+                coverage=len(b["covered_triples"]),
             )
         )
 
@@ -2114,6 +2273,7 @@ def questions_summary(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    platforms: str | None = None,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ) -> QuestionSummaryOut:
@@ -2122,13 +2282,21 @@ def questions_summary(
     与旧 `/questions/analytics` 的差别:不返回平台明细、prev/long_prev、
     摘录、竞品矩阵;由后续 tasks 的 product-analytics / competitor-analytics
     端点按需加载。
+
+    ``platforms`` 是 compound key 子集(``${code}__${delivery}__${thinking}``),
+    缺省 = 走全选;非法 token 静默忽略,与 Overview 口径一致。
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
     win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
+    selected_triples = parse_platforms_param(platforms)
 
     return _compute_question_summary(
-        db, project, start=win_start_dt, end=win_end_dt
+        db,
+        project,
+        start=win_start_dt,
+        end=win_end_dt,
+        selected_triples=selected_triples,
     )
 
 
@@ -2148,19 +2316,37 @@ def _compute_question_product_analytics(
     *,
     start: datetime,
     end: datetime,
+    selected_triples: set[tuple[str, str, bool]] | None = None,
 ) -> QuestionProductAnalyticsOut:
-    """单问题产品分析:per-platform 统计 + prev + long_prev + 摘录。
+    """单问题产品分析:per-triple 统计 + prev + long_prev + 摘录。
 
     SQL 预算 = 2 条核心 SELECT:
-      1) stats:扫 long_prev → end 期间的所有 (platform, created_at, rank)
-         行,在 Python 中按窗口分桶(current / prev / long_prev),避免
-         ``CASE WHEN`` 三遍重复 GROUP BY。
-      2) excerpts:每个 platform 取窗口内最新 Subtask + 对应 rank,join
+      1) stats:扫 long_prev → end 期间的 (platform, delivery, thinking,
+         created_at, rank) 行,Python 按窗口分桶(current / prev /
+         long_prev)。聚合 key 是 ``(platform_code, delivery_mode,
+         is_thinking)`` triple(Overview 同款 compound key 拆分),不再是
+         单 modelCode —— 模型对比表每个 ProjectPlatform row 各占一行。
+      2) excerpts:每个 triple 取窗口内最新 Subtask + 对应 rank;join
          Task 用 project_id 防御(同一 prompt 文本可能跨项目存在)。
 
     与 ``questions_status_changes`` / ``questions_competitor_analytics`` 的差别:
     本端点不扫全项目竞品矩阵,只看指定 prompt。
+
+    ``selected_triples`` 是 GlobalToolbar 切档:None = 全选;空 set = 视为
+    「全部未选」,直接返回空响应,避免 SQL IN () 语法错。
     """
+    if selected_triples is not None and not selected_triples:
+        return QuestionProductAnalyticsOut(
+            project_id=project.id,
+            prompt_id=prompt.id,
+            start=start,
+            end=end,
+            platforms=[],
+            prev=None,
+            long_prev=None,
+            excerpts={},
+        )
+
     length = (end.date() - start.date()).days + 1
     prev_end = start - timedelta(days=1)
     prev_start = prev_end - timedelta(days=length - 1)
@@ -2171,11 +2357,15 @@ def _compute_question_product_analytics(
     long_prev_end_dt = datetime.combine(long_prev_end.date(), time.max)
     long_prev_start_dt = datetime.combine(long_prev_start.date(), time.min)
 
-    rows = db.execute(
+    stats_stmt = (
         select(
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.created_at,
             BrandMention.rank_position,
+            BrandMention.sentiment,
+            BrandMention.is_recommended,
         )
         .where(
             BrandMention.project_id == project.id,
@@ -2185,38 +2375,68 @@ def _compute_question_product_analytics(
             BrandMention.created_at < end,
         )
         .order_by(BrandMention.platform, BrandMention.created_at)
-    ).all()
+    )
+    if selected_triples is not None:
+        stats_stmt = stats_stmt.where(
+            tuple_(
+                BrandMention.platform,
+                BrandMention.delivery_mode,
+                BrandMention.thinking_mode,
+            ).in_(selected_triples)
+        )
+    rows = db.execute(stats_stmt).all()
 
-    by_window: dict[tuple[str, str], list[tuple[datetime, int | None]]] = defaultdict(list)
+    by_window: dict[
+        tuple[str, str, bool, str],
+        list[tuple[datetime, int | None, str | None, bool | None]],
+    ] = defaultdict(list)
     for r in rows:
+        triple = (r.platform, r.delivery_mode, bool(r.thinking_mode))
         if r.created_at >= start:
             bucket = "current"
         elif r.created_at >= prev_start_dt:
             bucket = "prev"
         else:
             bucket = "long_prev"
-        by_window[(r.platform, bucket)].append((r.created_at, r.rank_position))
+        by_window[(*triple, bucket)].append(
+            (r.created_at, r.rank_position, r.sentiment, bool(r.is_recommended))
+        )
 
-    def _agg(buckets: list[tuple[datetime, int | None]]) -> dict:
+    def _agg(
+        buckets: list[tuple[datetime, int | None, str | None, bool | None]],
+    ) -> dict:
         total = len(buckets)
-        ranks = [rk for _, rk in buckets if rk is not None]
+        ranks = [rk for _, rk, _, _ in buckets if rk is not None]
         matched = len(ranks)
         top1 = sum(1 for rk in ranks if rk == 1)
         top3 = sum(1 for rk in ranks if rk <= 3)
+        # 情感倾向:仅算有 rank 的行(rank 缺失说明该行没被抽过 LLM,没
+        # sentiment 标签);Molizhishu API 标签 positive=1.0 / neutral=0.5 /
+        # negative=0.0,前端再翻译回「正面 / 中性 / 负面」。
+        sent_scores = [
+            {"positive": 1.0, "neutral": 0.5, "negative": 0.0}.get(s)
+            for _, _, s, _ in buckets
+            if s in ("positive", "neutral", "negative")
+        ]
+        avg_sentiment = (sum(sent_scores) / len(sent_scores)) if sent_scores else None
+        # 推荐状态:只要至少 1 行 ``is_recommended`` 为真,该档位算「推荐」。
+        recommend_yes = any(rec for _, _, _, rec in buckets if rec is True)
         return {
             "total": total,
             "matched": matched,
             "top1": top1,
             "top3": top3,
             "rank_avg": (sum(ranks) / len(ranks)) if ranks else None,
+            "avg_sentiment": avg_sentiment,
+            "recommend_yes": recommend_yes,
         }
 
     def _prev_stat_for(bucket: str) -> QuestionPrevStat | None:
-        # Aggregate across ALL platforms for that window so the prev
+        # Aggregate across ALL triples for that window so the prev
         # block is a project-level KPI, not per-platform.
         all_rows: list[tuple[datetime, int | None]] = []
-        for (plat, b), items in by_window.items():
-            if b == bucket:
+        for key, items in by_window.items():
+            if key[3] == bucket:
                 all_rows.extend(items)
         agg = _agg(all_rows)
         if agg["total"] == 0:
@@ -2231,56 +2451,89 @@ def _compute_question_product_analytics(
             rank_avg=agg["rank_avg"],
         )
 
+    # 模型对比表按 compound key 拆分:每个 (platform_code, delivery,
+    # thinking) triple 一行,排序按 ProjectPlatform id 顺序,让卡片行序
+    # 与 ProjectPlatform 配置保持一致。窗口里没数据的档位也占一行
+    # (matched=0, total=0, best_rank=null),跟 ProjectPlatform 行对齐,
+    # 避免「勾了 8 个 = 表 5 行」的口径错位。
+    configured_triples = project_platform_triples(db, project.id)
+    if selected_triples is not None:
+        ordered_triples = sorted(
+            selected_triples,
+            key=lambda t: (
+                t[1] == "mobile",
+                bool(t[2]),
+                t[0],
+            ),
+        )
+    else:
+        ordered_triples = sorted(
+            configured_triples,
+            key=lambda t: (
+                t[1] == "mobile",
+                bool(t[2]),
+                t[0],
+            ),
+        )
+
     platforms_out: list[QuestionPlatformStat] = []
-    platform_keys = sorted({plat for (plat, _) in by_window.keys()})
-    for plat in platform_keys:
-        cur = by_window.get((plat, "current"), [])
-        prev = by_window.get((plat, "prev"), [])
+    for plat, delivery, is_thinking in ordered_triples:
+        cur = by_window.get((plat, delivery, is_thinking, "current"), [])
+        prev = by_window.get((plat, delivery, is_thinking, "prev"), [])
         cur_agg = _agg(cur)
         prev_agg = _agg(prev)
-        # best_rank + mention_rate + recommend derived from current only
-        cur_ranks = [rk for _, rk in cur if rk is not None]
+        # best_rank derived from current only
+        cur_ranks = [rk for _, rk, _, _ in cur if rk is not None]
         best_rank = min(cur_ranks) if cur_ranks else None
-        # The plan reuses the same QuestionPlatformStat shape as the
-        # analytics endpoint (matched / total / best_rank /
-        # avg_sentiment / recommend_yes). self view → is_self filter
-        # already applied, brand stays None.
+        # avg_sentiment / recommend_yes 从 current 窗口聚合 — 模型对比表
+        # 每行需要展示该档位的「情感倾向」与「推荐状态」,所以这里填上
+        # current 的聚合值;没有匹配行时 avg_sentiment=None /
+        # recommend_yes=False,前端会显示「—」与「未推荐」占位。
         platforms_out.append(
             QuestionPlatformStat(
-                platform=plat,
+                platform=compound_key(plat, delivery, is_thinking),
+                delivery_mode=delivery,
+                thinking_mode=is_thinking,
                 matched=cur_agg["matched"],
                 total=cur_agg["total"],
                 best_rank=best_rank,
-                # Sentiment is intentionally None here: this endpoint
-                # is the lazy-loaded detail view (the lightweight
-                # product-analytics pane), and sentiment requires
-                # joining geo_brand_mentions.sentiment which
-                # we deliberately omit to keep the row scan narrow.
-                # The summary endpoint covers sentiment for the list view.
-                avg_sentiment=None,
-                # No LLM-extracted recommendation bit in this scan —
-                # same reason. UI falls back to "—" when null.
-                recommend_yes=False,
+                avg_sentiment=cur_agg["avg_sentiment"],
+                recommend_yes=cur_agg["recommend_yes"],
                 brand=None,
+                # 每档自己的 prev 窗口数据,让模型对比表可以展示该档位的
+                # 环比 pill(横卡片保留项目级 prev)。prev_* 与 _agg 输出对
+                # 齐,total=0 时全填 0 而不是 None,前端不再做 null 分支。
+                prev_matched=prev_agg["matched"],
+                prev_total=prev_agg["total"],
+                prev_top1_rate=(prev_agg["top1"] / prev_agg["total"])
+                if prev_agg["total"]
+                else 0.0,
+                prev_top3_rate=(prev_agg["top3"] / prev_agg["total"])
+                if prev_agg["total"]
+                else 0.0,
+                prev_mention_rate=(prev_agg["matched"] / prev_agg["total"])
+                if prev_agg["total"]
+                else 0.0,
             )
         )
 
     prev_stat = _prev_stat_for("prev")
     long_prev_stat = _prev_stat_for("long_prev")
 
-    # 摘录:窗口内每个 platform 取最新 subtask 的 answer_content。
-    # LEFT JOIN to Task — production data always has a matching Task
-    # row (Subtask.task_id is set on insert), but legacy / test
-    # fixtures may not. Filtering by Task.project_id isolates this
-    # project's subtasks from same-prompt-text rows of other
-    # customers' projects; an outer join keeps the response populated
-    # for orphan subtasks instead of dropping them silently.
-    excerpt_rows = db.execute(
+    # 摘录:窗口内每个 triple 取最新 subtask 的 answer_content。
+    # 优先用 BrandMention 行的 delivery / thinking(因为 Subtask 没这两
+    # 列);Subtask 行没匹配到 BrandMention 的孤儿,delivery / thinking 走
+    # None fallback,仍能命中一个 compound key(以 Subtask.platform 为
+    # base code,默认 web/fast)。LEFT JOIN to Task —— 生产数据总有匹配
+    # Task 行,历史 fixture 走外连接兜底。
+    excerpt_stmt = (
         select(
             Subtask.platform,
             Subtask.subtask_id,
             Subtask.answer_content,
             Subtask.updated_at,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.rank_position,
         )
         .outerjoin(Task, Task.task_id == Subtask.task_id)
@@ -2299,17 +2552,28 @@ def _compute_question_product_analytics(
             Subtask.updated_at < end,
         )
         .order_by(Subtask.platform, Subtask.updated_at.desc())
-    ).all()
+    )
+    excerpt_rows = db.execute(excerpt_stmt).all()
 
-    latest_by_platform: dict[str, PlatformExcerpt] = {}
+    latest_by_triple: dict[str, PlatformExcerpt] = {}
     for r in excerpt_rows:
-        if r.platform in latest_by_platform:
+        delivery = r.delivery_mode or "web"
+        thinking = bool(r.thinking_mode)
+        triple_key = compound_key(r.platform, delivery, thinking)
+        # 若 toolbar 切档过滤,只保留被选中的档位摘录(保持分子 / 分母
+        # 口径一致:工具栏勾了哪几条,右卡片就显示哪几条 excerpt)。
+        if (
+            selected_triples is not None
+            and (r.platform, delivery, thinking) not in selected_triples
+        ):
+            continue
+        if triple_key in latest_by_triple:
             continue
         text = r.answer_content or ""
         excerpt = text[:200]
         if not excerpt:
             continue
-        latest_by_platform[r.platform] = PlatformExcerpt(
+        latest_by_triple[triple_key] = PlatformExcerpt(
             excerpt=excerpt,
             rank=r.rank_position,
             run_id=r.subtask_id,
@@ -2323,7 +2587,7 @@ def _compute_question_product_analytics(
         platforms=platforms_out,
         prev=prev_stat,
         long_prev=long_prev_stat,
-        excerpts=latest_by_platform,
+        excerpts=latest_by_triple,
     )
 
 
@@ -2337,6 +2601,7 @@ def questions_product_analytics(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    platforms: str | None = None,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ) -> QuestionProductAnalyticsOut:
@@ -2351,9 +2616,15 @@ def questions_product_analytics(
         db, project_id=project.id, prompt_id=prompt_id
     )
     win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
+    selected_triples = parse_platforms_param(platforms)
 
     return _compute_question_product_analytics(
-        db, project, prompt, start=win_start_dt, end=win_end_dt
+        db,
+        project,
+        prompt,
+        start=win_start_dt,
+        end=win_end_dt,
+        selected_triples=selected_triples,
     )
 
 
@@ -2364,28 +2635,45 @@ def _compute_question_competitor_analytics(
     *,
     start: datetime,
     end: datetime,
+    selected_triples: set[tuple[str, str, bool]] | None = None,
 ) -> QuestionCompetitorAnalyticsOut:
-    """单问题竞品分析:按 brand × platform 聚合,SQL 预算 ≤ 2。
+    """单问题竞品分析:按 brand × triple 聚合,SQL 预算 ≤ 2。
 
-    与产品分析的差别:产品分析走 ``is_self=true`` + per-platform stats +
-    prev/long_prev;这里按 brand × platform 聚合,既包括自身品牌也包括
+    与产品分析的差别:产品分析走 ``is_self=true`` + per-triple stats +
+    prev/long_prev;这里按 brand × triple 聚合,既包括自身品牌也包括
     竞品,自身品牌始终排在最前,方便对比。只取当前窗口(竞品面板不显示
     prev delta,UI 在 OverviewTab 已经有 delta 行)。
 
     SQL 预算 = 2 条核心 SELECT:
       1) brand aggregation:扫 ``BrandMention``,在 Python 中按
-         (is_self, brand, platform) 汇总 ranks。
-      2) excerpts:每个 platform 取窗口内最新 Subtask + 对应
+         (is_self, brand, triple) 汇总 ranks。triple = (platform_code,
+         delivery_mode, is_thinking),与产品分析同口径 —— 竞品矩阵的
+         「各模型中的品牌位次」列展开到 compound key,不再合并 fast/think
+         或 web/mobile。
+      2) excerpts:每个 triple 取窗口内最新 Subtask + 对应
          (is_self=false) rank,join ``Task`` 用 project_id 防御
-         (同一 prompt 文本可能跨项目存在)。左连接 ``BrandMention`` —
-         生产数据总是有 ``BrandMention`` 行,孤儿 subtask(测试 fixture
-         可能没有)走外连接以避免静默丢失。
+         (同一 prompt 文本可能跨项目存在)。
+
+    ``selected_triples`` 跟产品分析同口径:None = 全选,空 set = 视为「全
+    部未选」直接返回空响应,避免 SQL IN () 语法错。
     """
-    rows = db.execute(
+    if selected_triples is not None and not selected_triples:
+        return QuestionCompetitorAnalyticsOut(
+            project_id=project.id,
+            prompt_id=prompt.id,
+            start=start,
+            end=end,
+            brands=[],
+            excerpts={},
+        )
+
+    agg_stmt = (
         select(
             BrandMention.is_self,
             BrandMention.brand,
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.rank_position,
         ).where(
             BrandMention.project_id == project.id,
@@ -2393,17 +2681,33 @@ def _compute_question_competitor_analytics(
             BrandMention.created_at >= start,
             BrandMention.created_at < end,
         )
-    ).all()
+    )
+    if selected_triples is not None:
+        agg_stmt = agg_stmt.where(
+            tuple_(
+                BrandMention.platform,
+                BrandMention.delivery_mode,
+                BrandMention.thinking_mode,
+            ).in_(selected_triples)
+        )
+    rows = db.execute(agg_stmt).all()
 
-    grouped: dict[tuple[bool, str, str], list[int | None]] = defaultdict(list)
+    grouped: dict[
+        tuple[bool, str, str, str, bool], list[int | None]
+    ] = defaultdict(list)
     total_per_brand: dict[tuple[bool, str], int] = defaultdict(int)
     for r in rows:
-        grouped[(r.is_self, r.brand, r.platform)].append(r.rank_position)
+        triple = (r.platform, r.delivery_mode, bool(r.thinking_mode))
+        grouped[(r.is_self, r.brand, *triple)].append(r.rank_position)
         total_per_brand[(r.is_self, r.brand)] += 1
 
-    by_brand: dict[tuple[bool, str], dict[str, list[int | None]]] = defaultdict(dict)
-    for (is_self, brand, platform), ranks in grouped.items():
-        by_brand[(is_self, brand)][platform] = ranks
+    by_brand: dict[
+        tuple[bool, str], dict[str, list[int | None]]
+    ] = defaultdict(dict)
+    for (is_self, brand, plat, delivery, is_thinking), ranks in grouped.items():
+        by_brand[(is_self, brand)][
+            compound_key(plat, delivery, is_thinking)
+        ] = ranks
 
     # Fixed palette for the competitor panel — same slot cycle as the
     # analytics endpoint's competitor matrix so the visual layout is
@@ -2428,8 +2732,8 @@ def _compute_question_competitor_analytics(
     sorted_keys: list[tuple[bool, str]] = [*self_keys, *comp_keys]
 
     for slot, (is_self, brand) in enumerate(sorted_keys):
-        platforms = by_brand[(is_self, brand)]
-        all_ranks = [r for rs in platforms.values() for r in rs if r is not None]
+        triples_map = by_brand[(is_self, brand)]
+        all_ranks = [r for rs in triples_map.values() for r in rs if r is not None]
         matched = len(all_ranks)
         total = total_per_brand[(is_self, brand)]
         comp_slot = max(0, slot - len(self_keys))
@@ -2444,18 +2748,23 @@ def _compute_question_competitor_analytics(
                 top3_rate=(sum(1 for r in all_ranks if r <= 3) / total) if total else 0.0,
                 avg_rank=(sum(all_ranks) / len(all_ranks)) if all_ranks else None,
                 model_ranks={
-                    platform: min((r for r in ranks if r is not None), default=None)
-                    for platform, ranks in platforms.items()
+                    plat_key: min((r for r in ranks if r is not None), default=None)
+                    for plat_key, ranks in triples_map.items()
                 },
             )
         )
 
-    # 摘录:竞品面板也展示 6 平台原文,SQL 一次 join Task 限定项目
-    excerpt_rows = db.execute(
+    # 摘录:竞品面板也按 triple 拆,SQL 一次 join Task 限定项目。
+    # 用 BrandMention 行的 delivery / thinking 拼 compound key;Subtask 行
+    # 没匹配 BrandMention 的孤儿走 default web/fast。
+    excerpt_stmt = (
         select(
             Subtask.platform,
             Subtask.answer_content,
             Subtask.subtask_id,
+            Subtask.updated_at,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.rank_position,
         )
         .outerjoin(Task, Task.task_id == Subtask.task_id)
@@ -2474,16 +2783,25 @@ def _compute_question_competitor_analytics(
             Subtask.updated_at < end,
         )
         .order_by(Subtask.platform, Subtask.updated_at.desc())
-    ).all()
+    )
+    excerpt_rows = db.execute(excerpt_stmt).all()
 
-    latest_by_platform: dict[str, PlatformExcerpt] = {}
+    latest_by_triple: dict[str, PlatformExcerpt] = {}
     for r in excerpt_rows:
-        if r.platform in latest_by_platform:
+        delivery = r.delivery_mode or "web"
+        thinking = bool(r.thinking_mode)
+        if (
+            selected_triples is not None
+            and (r.platform, delivery, thinking) not in selected_triples
+        ):
+            continue
+        triple_key = compound_key(r.platform, delivery, thinking)
+        if triple_key in latest_by_triple:
             continue
         excerpt = (r.answer_content or "")[:200]
         if not excerpt:
             continue
-        latest_by_platform[r.platform] = PlatformExcerpt(
+        latest_by_triple[triple_key] = PlatformExcerpt(
             excerpt=excerpt,
             rank=r.rank_position,
             run_id=r.subtask_id,
@@ -2495,7 +2813,7 @@ def _compute_question_competitor_analytics(
         start=start,
         end=end,
         brands=brands_out,
-        excerpts=latest_by_platform,
+        excerpts=latest_by_triple,
     )
 
 
@@ -2509,6 +2827,7 @@ def questions_competitor_analytics(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    platforms: str | None = None,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ) -> QuestionCompetitorAnalyticsOut:
@@ -2523,9 +2842,15 @@ def questions_competitor_analytics(
         db, project_id=project.id, prompt_id=prompt_id
     )
     win_start_dt, win_end_dt = _resolve_window_inline(days, start, end)
+    selected_triples = parse_platforms_param(platforms)
 
     return _compute_question_competitor_analytics(
-        db, project, prompt, start=win_start_dt, end=win_end_dt
+        db,
+        project,
+        prompt,
+        start=win_start_dt,
+        end=win_end_dt,
+        selected_triples=selected_triples,
     )
 
 
@@ -2538,6 +2863,7 @@ def questions_status_changes(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    platforms: str | None = None,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
@@ -2553,9 +2879,9 @@ def questions_status_changes(
     Four sets (NOT a 2x2 cross-tab):
       - ``stable``: prev_window had a mention AND current_window has
         at least one mention → kept being mentioned.
-      - ``drops``: per (prompt, platform) loss-of-mention events.
-        Emitted when prev had a mention and current has either no
-        mention or a rank_position that's worse than Top-3.
+      - ``drops``: per (prompt, triple) loss-of-mention events。triple =
+        ``${platform_code}__${delivery_mode}__${thinking}`` 与 Overview
+        同口径,fast/think 与 web/mobile 不再合并。
       - ``never_listed``: no mention in either window.
       - ``listed``: at least one mention in the current window
         (regardless of prev).
@@ -2563,6 +2889,9 @@ def questions_status_changes(
     Drops carry a ``reason`` for the UI badge: "从排名 N 跌出 Top3"
     when the rank went from in-range to out-of-range, "从上榜掉出"
     when the mention disappeared entirely.
+
+    ``platforms`` query param 是 toolbar 切档,与 Overview / summary /
+    product-analytics 同口径。空集 → 直接返回空响应。
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
@@ -2590,6 +2919,19 @@ def questions_status_changes(
         win_start - timedelta(days=length_days), time.min
     )
 
+    selected_triples = parse_platforms_param(platforms)
+    if selected_triples is not None and not selected_triples:
+        # 「全部未选」直接返回空响应,与 summary / product / competitor 同款
+        return QuestionStatusChangesOut(
+            project_id=project_id,
+            start=win_start.isoformat(),
+            end=win_end.isoformat(),
+            stable=[],
+            drops=[],
+            never_listed=[],
+            listed=[],
+        )
+
     # Pull the catalogue — monitoring prompts only, in the operator's
     # configured order.
     prompt_rows = db.execute(
@@ -2609,13 +2951,17 @@ def questions_status_changes(
         for pid, prompt, cat in prompt_rows
     }
 
-    # Per-(prompt, platform) presence in each window, plus the best
-    # rank observed. One row per (prompt, platform) that has at least
-    # one mention in either window.
-    presence_rows = db.execute(
+    # Per-(prompt, triple) presence in each window, plus the best
+    # rank observed。GROUP BY 加上 delivery_mode / thinking_mode 后,
+    # 「同一 modelCode 但不同档位」不再合并:快思 / 网页 / 手机 各自独
+    # 立成行,与 Overview 同口径。triple 拼成 ``compound_key`` 字符串
+    # 给 UI,沿用前端 parseOverviewKey 解码展示。
+    presence_stmt = (
         select(
             BrandMention.prompt,
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             func.max(
                 case(
                     (
@@ -2673,19 +3019,34 @@ def questions_status_changes(
             BrandMention.project_id == project_id,
             BrandMention.is_self.is_(True),
         )
-        .group_by(BrandMention.prompt, BrandMention.platform)
-    ).all()
+        .group_by(
+            BrandMention.prompt,
+            BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
+        )
+    )
+    if selected_triples is not None:
+        presence_stmt = presence_stmt.where(
+            tuple_(
+                BrandMention.platform,
+                BrandMention.delivery_mode,
+                BrandMention.thinking_mode,
+            ).in_(selected_triples)
+        )
+    presence_rows = db.execute(presence_stmt).all()
 
-    # Per-prompt current platform list — for the 上榜 quadrant the
-    # UI shows the platforms that drove the mention. Cache once.
-    cur_platforms: dict[str, set[str]] = {}
-    for prompt, platform, _p, in_cur, _bp, _bc in presence_rows:
+    # Per-prompt current / prev triple list — for the 上榜 quadrant the
+    # UI shows the triples that drove the mention,展开到 compound key,
+    # 让「上榜 N 个模型档位」与 Overview / 模型对比表口径对齐。
+    cur_triples: dict[str, set[str]] = {}
+    prev_triples: dict[str, set[str]] = {}
+    for prompt, plat, delivery, is_thinking, in_prev, in_cur, _bp, _bc in presence_rows:
+        triple_key = compound_key(plat, delivery, bool(is_thinking))
         if in_cur:
-            cur_platforms.setdefault(prompt or "(空问题)", set()).add(platform)
-    prev_platforms: dict[str, set[str]] = {}
-    for prompt, platform, in_prev, _c, _bp, _bc in presence_rows:
+            cur_triples.setdefault(prompt or "(空问题)", set()).add(triple_key)
         if in_prev:
-            prev_platforms.setdefault(prompt or "(空问题)", set()).add(platform)
+            prev_triples.setdefault(prompt or "(空问题)", set()).add(triple_key)
 
     # Build the 4 sets.
     stable: list[QuestionStableItem] = []
@@ -2696,13 +3057,15 @@ def questions_status_changes(
     # Track which prompts have already been emitted into listed/
     # stable so the loop below doesn't double-emit.
     emitted: set[str] = set()
-    # Per-prompt mention count for stable sort (most-mentioned first).
+    # Per-prompt triple count for stable sort (most-mentioned first)。
+    # 注意:这里用 triple 数,与 ProjectPlatform 配的档位数对齐(改前是
+    # platform 数,与 Overview 错位)。
     stable_mentions: dict[str, int] = {}
     listed_mentions: dict[str, int] = {}
 
     for prompt, meta in prompt_meta.items():
-        in_cur_set = cur_platforms.get(prompt, set())
-        in_prev_set = prev_platforms.get(prompt, set())
+        in_cur_set = cur_triples.get(prompt, set())
+        in_prev_set = prev_triples.get(prompt, set())
         if in_cur_set and in_prev_set:
             stable.append(
                 QuestionStableItem(
@@ -2726,9 +3089,18 @@ def questions_status_changes(
             listed_mentions[prompt] = len(in_cur_set)
             emitted.add(prompt)
 
-    # Drops — per (prompt, platform) row that was in prev but is
-    # either missing in current or fell out of Top-3.
-    for prompt, platform, in_prev, in_cur, best_prev, best_cur in presence_rows:
+    # Drops — per (prompt, triple) row that was in prev but is
+    # either missing in current or fell out of Top-3。
+    for (
+        prompt,
+        plat,
+        delivery,
+        is_thinking,
+        in_prev,
+        in_cur,
+        best_prev,
+        best_cur,
+    ) in presence_rows:
         if not in_prev or in_cur:
             continue
         meta = prompt_meta.get(prompt or "(空问题)")
@@ -2742,12 +3114,15 @@ def questions_status_changes(
             reason = f"从排名 {best_prev} 跌出 Top3"
         else:
             reason = f"从排名 {best_prev} 跌出 Top3"
+        triple_key = compound_key(plat, delivery, bool(is_thinking))
         drops.append(
             DropEvent(
                 prompt_id=meta["id"],
                 prompt=prompt,
                 category=meta["category"],
-                platform=platform,
+                triple=triple_key,
+                delivery_mode=delivery,
+                thinking_mode=bool(is_thinking),
                 dropped_day=win_end.isoformat(),
                 from_rank=best_prev,
                 to_rank=best_cur,
@@ -2761,7 +3136,7 @@ def questions_status_changes(
     for prompt, meta in prompt_meta.items():
         if prompt in emitted:
             continue
-        if not cur_platforms.get(prompt) and not prev_platforms.get(prompt):
+        if not cur_triples.get(prompt) and not prev_triples.get(prompt):
             never_listed.append(
                 QuestionStableItem(
                     prompt_id=meta["id"],
@@ -2771,10 +3146,11 @@ def questions_status_changes(
                 )
             )
 
-    # Sort for stable UI rendering.
+    # Sort for stable UI rendering。dropped_day → triple → prompt_id,
+    # 同档位的多条 drop 按 prompt 顺序。
     stable.sort(key=lambda x: (-stable_mentions.get(x.prompt, 0), x.prompt_id))
     listed.sort(key=lambda x: (-listed_mentions.get(x.prompt, 0), x.prompt_id))
-    drops.sort(key=lambda x: (x.dropped_day, x.platform, x.prompt_id))
+    drops.sort(key=lambda x: (x.dropped_day, x.triple, x.prompt_id))
     never_listed.sort(key=lambda x: x.prompt_id)
 
     return QuestionStatusChangesOut(
@@ -2872,11 +3248,32 @@ def competitor_analysis(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    # UI 「全局工具栏 → 模型」筛选:逗号分隔 compound key(每个 entry 已
+    # 带 ``${code}__${delivery}__${thinking}``)。空 / 缺省 = 不筛。
+    platforms: str | None = None,
+    # UI 「全局工具栏 → 问题」筛选:逗号分隔的 ``ProjectPrompt.id``。
+    # 空 / 缺省 = 不筛。
+    prompt_ids: str | None = None,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
+    selected_triples = parse_platforms_param(platforms)
+    # BrandMention 按 prompt 文本存,所以把 ``prompt_ids`` 解析成
+    # ``ProjectPrompt.prompt`` 文本后再传进 service;空集合(全部 id 解
+    # 析不到)保留空数组 —— 比回退到 None 更安全:前端筛选应用后即便
+    # prompt 已被删,也明确返回 0 行,而不是静默回退到「全部」。
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompt_ids)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
     return compute_competitor_analysis(
         db=db,
         project_id=project_id,
@@ -2884,6 +3281,8 @@ def competitor_analysis(
         days=days,
         start=start,
         end=end,
+        selected_triples=selected_triples,
+        selected_prompt_texts=selected_prompt_texts,
     )
 
 
@@ -3078,6 +3477,32 @@ def citation_analysis(
 def source_preferences(
     project_id: int,
     days: int = 15,
+    start: date | None = Query(
+        None,
+        description=(
+            "自定义窗口起点(YYYY-MM-DD),与 ``end`` 同进同出,优先于 ``days``。"
+            "toolbar 「自定义」范围时使用。"
+        ),
+    ),
+    end: date | None = Query(
+        None,
+        description="自定义窗口终点(YYYY-MM-DD),与 ``start`` 同进同出。",
+    ),
+    models: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 compound platform 列表(如 qianwen__web__fast,baiduai__web__fast),"
+            "用于补齐 by_model_top:用户在 dropdown 选了 N 个但窗口内某些 platform 没数据时,"
+            "也返回对应空卡片,UI 视觉对齐 dropdown。省略时不补齐。"
+        ),
+    ),
+    prompts: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 ``ProjectPrompt.id`` 列表(全局工具栏 → 问题 筛选)。"
+            "空 / 缺省 = 不筛;空集合(全部 id 解析不到)显式返回 0 行。"
+        ),
+    ),
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
@@ -3091,18 +3516,224 @@ def source_preferences(
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
 
+    # toolbar 日期下拉:preset 走 days,自定义走 start/end。service 内部
+    # 统一解析(start/end 优先),endpoint 不重复校验。
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    # toolbar 「问题」筛选:把 ``ProjectPrompt.id`` 解析成 ``prompt`` 文本,
+    # service 按 ``Subtask.prompt IN (...)`` 过滤(Subtask 按 prompt 文本
+    # 存,无 prompt_id 外键)。空集合(全部 id 解析不到)保留空数组 —— 比
+    # 回退到 None 更安全:前端筛选应用后即便 prompt 已被删,也明确返回
+    # 0 行,而不是静默回退到「全部」。
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
     try:
-        win_start, win_end = _resolve_competitor_window(days, None, None)
-    except HTTPException:
-        raise
+        return compute_source_preferences(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
-    # 把 HTTP 400 的字符串检查抽到 service 之外(避免 service 层返 HTTPException)。
-    if days < 1 or days > 90:
-        raise HTTPException(400, "days must be between 1 and 90")
 
-    return compute_source_preferences(
-        db=db, project_id=project_id, days=days,
-    )
+@router.get(
+    "/projects/{project_id}/source-detail",
+    response_model=SourceDetailOut,
+)
+def source_detail(
+    project_id: int,
+    days: int = 15,
+    start: date | None = Query(
+        None,
+        description="自定义窗口起点(YYYY-MM-DD),与 ``end`` 同进同出,优先于 ``days``。",
+    ),
+    end: date | None = Query(
+        None,
+        description="自定义窗口终点(YYYY-MM-DD),与 ``start`` 同进同出。",
+    ),
+    models: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 compound platform 列表(如 qianwen__web__fast),"
+            "过滤 SQL 与信源明细列表;省略 = 不筛。"
+        ),
+    ),
+    prompts: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 ``ProjectPrompt.id`` 列表(全局工具栏 → 问题 筛选)。"
+            "空 / 缺省 = 不筛;空集合(全部 id 解析不到)显式返回 0 行。"
+        ),
+    ),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """信源明细页 —— 一次返回窗口内全部 unique URL,前端做类型筛选 / 关键词
+    搜索 / 排序 + 选中 → iframe 预览。字段口径与 ``source-preferences`` 的
+    top_sources 一致,只是没有 50 上限且不做 KPI / 趋势聚合。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
+    try:
+        return compute_source_detail(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get(
+    "/projects/{project_id}/source-video",
+    response_model=VideoSourceOut,
+)
+def source_video(
+    project_id: int,
+    days: int = 15,
+    start: date | None = Query(
+        None,
+        description="自定义窗口起点(YYYY-MM-DD),与 ``end`` 同进同出,优先于 ``days``。",
+    ),
+    end: date | None = Query(
+        None,
+        description="自定义窗口终点(YYYY-MM-DD),与 ``start`` 同进同出。",
+    ),
+    models: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 compound platform 列表(如 qianwen__web__fast),"
+            "过滤 SQL 与视频类信源聚合;省略 = 不筛。"
+        ),
+    ),
+    prompts: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 ``ProjectPrompt.id`` 列表(全局工具栏 → 问题 筛选)。"
+            "空 / 缺省 = 不筛;空集合(全部 id 解析不到)显式返回 0 行。"
+        ),
+    ),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """视频类信源 sub-tab —— 仅统计 host 命中「视频平台」白名单
+    (抖音 / B 站 / 快手 / 西瓜 / YouTube / 优酷 / 腾讯视频 / 新浪视频)
+    的引用,按视频平台分桶 + 按模型聚合,供顶部平台卡片网格 + 底部
+    ranking chart 使用。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
+    try:
+        return compute_source_video(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get(
+    "/projects/{project_id}/source-self",
+    response_model=SourceSelfOut,
+)
+def source_self(
+    project_id: int,
+    days: int = 15,
+    start: date | None = Query(
+        None,
+        description="自定义窗口起点(YYYY-MM-DD),与 ``end`` 同进同出,优先于 ``days``。",
+    ),
+    end: date | None = Query(
+        None,
+        description="自定义窗口终点(YYYY-MM-DD),与 ``start`` 同进同出。",
+    ),
+    models: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 compound platform 列表(如 qianwen__web__fast),"
+            "过滤 SQL 与自有文章聚合;省略 = 不筛。"
+        ),
+    ),
+    prompts: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 ``ProjectPrompt.id`` 列表(全局工具栏 → 问题 筛选)。"
+            "空 / 缺省 = 不筛;空集合(全部 id 解析不到)显式返回 0 行。"
+        ),
+    ),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """自有文章引用分析 sub-tab —— 仅统计 host 命中「自媒体」分类
+    (抖音 / B 站 / 快手 / 西瓜 / YouTube / 优酷 / 腾讯视频 / 新浪视频)
+    的引用,提供 KPI + 按模型分布 + 信源列表 + 运营建议。
+
+    跟「视频类信源」共用同一份底层数据(都基于「自媒体」分类的 host),
+    差异只在聚合维度:本接口按 model + URL 维度,视频类信源按 video platform 维度。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
+    try:
+        return compute_source_self(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 # --------------------------------------------------------------------------
@@ -3143,33 +3774,17 @@ def _delta_pct(value: float, prev: float) -> float | None:
     return (value - prev) / prev
 
 
-# ``Subtask`` 行没有持久化的 thinking_mode / delivery_mode 桶;这个
-# CASE 表达式复刻 :func:`app.services.extraction._derive_thinking_mode`
-# / ``_derive_delivery_mode`` 的派生规则,让 Subtask 维度的 KPI 分母
-# 过滤与 BrandMention 行(已落桶)口径一致。
-_THINKING_MODES = ("reasoning", "reasoning_search")
-_FAST_MODES = ("standard", "search", "web")
-
-
-def _subtask_thinking_bucket():
-    """``Subtask.mode`` → thinking_mode 桶,用于 KPI 分母过滤。"""
-    return case(
-        (Subtask.mode.in_(_THINKING_MODES), True),
-        (Subtask.mode.in_(_FAST_MODES), False),
-        else_=None,
-    )
-
-
-def _subtask_delivery_bucket():
-    """``Subtask.platform`` → delivery_mode 桶,用于 KPI 分母过滤。"""
-    return case(
-        (Subtask.platform.like("%_mobile"), "mobile"),
-        else_="web",
-    )
-
-
 class _OverviewWindow:
-    """Everything one time window contributes to the overview tab."""
+    """One time window's contribution to the overview tab — every number
+    comes from ``geo_brand_mentions`` rows.
+
+    Older versions joined ``geo_subtasks`` / ``geo_tasks`` for KPI
+    denominators (``mention_rate`` = subtask-level, ``answer_count`` =
+    subtasks with non-empty ``answer_content``). That mixed two tables
+    whose cardinalities can drift apart (a subtask without a brand-
+    mention row, or a brand-mention row whose task was deleted), so the
+    cards read inconsistently under different filter combinations.
+    """
 
     def __init__(
         self,
@@ -3177,7 +3792,15 @@ class _OverviewWindow:
         project_id: int,
         start: date,
         end: date,
-        platforms: list[str] | None = None,
+        # ``selected_triples`` 是 UI 「全局工具栏 → 模型」筛选的最终口径
+        # —— 每个 entry 是 ``(platform_code, delivery_mode, is_think)`` 三
+        # 元组,由 GlobalToolbar 的 compound key ``${code}__${delivery}__${thinking}``
+        # 解析而来。None = 不筛(全平台);空集合 = 「全不选」,SQLAlchemy
+        # ``tuple_(...).in_(())`` 渲染成 ``1 != 1`` 自动返回 0 行;非空集
+        # 合 → 按三元组精确匹配 BrandMention 行。带 delivery / thinking
+        # 是关键:旧版只按 platform_code 过滤会让「只勾快速 / 只勾 PC」
+        # 错带同 code 的思考 / 移动档位,与工具栏 UI 口径不一致。
+        selected_triples: set[tuple[str, str, bool]] | None = None,
         prompt_texts: list[str] | None = None,
         thinking_modes: list[bool] | None = None,
         delivery_modes: list[str] | None = None,
@@ -3188,301 +3811,170 @@ class _OverviewWindow:
         lo = datetime.combine(start, time.min)
         hi = datetime.combine(end, time.max)
 
-        # ``platforms`` 是 UI 「全局工具栏 → 模型」筛选,传 None 视为
-        # 不筛选(全平台)。空数组也视为不筛 —— 「全选」语义。
-        # 筛选同时收紧 KPI 分母 (subtask_rows / answers) 与分子
-        # (mentions),保证窗口内「未选平台的」数据整体不进入计算。
-        platform_filter = platforms or None
+        # ``selected_triples`` 已在前置 router 层区分 None(全选) vs 空集
+        # (显式未选),_OverviewWindow 不再二次回退,跟 prompt_filter 的
+        # 「空集合保留空 list」语义对齐。
+        platform_filter = selected_triples
         # ``prompt_texts`` 是 UI 「全局工具栏 → 问题」筛选的最终口径 —— 后端
         # 在 router 层已经把 ``prompt_ids`` 解析成对应的 prompt 文本。None
         # 视为不筛;空数组视为「全部 id 都解析不到 / 全部 prompt 已删」,保留
         # 为空 list,SQL IN () 自然返回 0 行,避免静默回退到不筛。
         prompt_filter = None if prompt_texts is None else prompt_texts
-        # 模式分桶 —— UI 「全局工具栏 → 模式」。None 视为不筛。
-        # 空列表也视为不筛(全选语义:不限制)。
-        thinking_filter = thinking_modes or None
-        # 终端分桶 —— UI 「全局工具栏 → 终端」。同上。
-        delivery_filter = delivery_modes or None
 
-        # Window + bucket key use ``Task.created_local_at`` (when the
-        # question was asked), not ``BrandMention.created_at`` (when the
-        # extraction pipeline wrote the row). ``Task`` is outer-joined so
-        # orphan mention rows (no live Task) drop out via the NULL
-        # range check rather than crashing on a NULL date.
+        # 模式 / 终端(历史参数,GlobalToolbar 已不发送)。``thinking_mode``
+        # / ``delivery_mode`` 已经在 BrandMention 行上落桶,直接拿持久化
+        # 列做 IN 过滤即可,不依赖 Subtask。空列表 → 不筛(全选语义)。
+        thinking_filter: list[bool] | None = (
+            thinking_modes if thinking_modes else None
+        )
+        delivery_filter: list[str] | None = (
+            delivery_modes if delivery_modes else None
+        )
+
+        # 单条 SELECT,所有 KPI / sparkline / 趋势 / 排行 / 模型维度都
+        # 消费这一份 ``self.mentions``。窗口按 ``BrandMention.created_at``
+        # 过滤(抽取流水线记录到 mention 的时间),与 Subtask / Task 解耦;
+        # 抽取通常在提问后秒级触发,与「问题被问到」基本同步。``is_self``
+        # 在这一层就锁死,后面所有 KPI 都只看项目自品牌行,排除竞品行。
         rows_stmt = (
-            select(BrandMention, Task.created_local_at)
-            .outerjoin(Task, Task.task_id == BrandMention.task_id)
+            select(BrandMention)
             .where(
                 BrandMention.project_id == project_id,
                 BrandMention.is_self.is_(True),
-                Task.created_local_at >= lo,
-                Task.created_local_at <= hi,
+                BrandMention.created_at >= lo,
+                BrandMention.created_at <= hi,
             )
         )
-        # ``BrandMention.platform`` 来自抽取阶段对 Subtask 的回填,与
-        # Subtask.platform 一致;直接在这里筛比再 JOIN Subtask 更轻。
         if platform_filter is not None:
-            rows_stmt = rows_stmt.where(BrandMention.platform.in_(platform_filter))
+            if platform_filter:
+                rows_stmt = rows_stmt.where(
+                    tuple_(
+                        BrandMention.platform,
+                        BrandMention.delivery_mode,
+                        BrandMention.thinking_mode,
+                    ).in_(platform_filter)
+                )
+            else:
+                rows_stmt = rows_stmt.where(literal(False))
         if prompt_filter is not None:
             rows_stmt = rows_stmt.where(BrandMention.prompt.in_(prompt_filter))
-        # 模式 / 终端:BrandMention 行上已落桶(由抽取流水线写入),
-        # 直接拿持久化列做 IN 过滤,无需 JOIN Subtask。
         if thinking_filter is not None:
-            rows_stmt = rows_stmt.where(BrandMention.thinking_mode.in_(thinking_filter))
+            rows_stmt = rows_stmt.where(
+                BrandMention.thinking_mode.in_(thinking_filter)
+            )
         if delivery_filter is not None:
-            rows_stmt = rows_stmt.where(BrandMention.delivery_mode.in_(delivery_filter))
-        rows = db.execute(rows_stmt).all()
-        self.mentions = [m for m, _ in rows]
-        self.task_dates: dict[int, datetime] = {m.id: ts for m, ts in rows}
-
-        # Subtask 维度(分母)的过滤:Subtask 行上没有持久化的
-        # thinking_mode / delivery_mode 列,需要在 SQL 里用 CASE 复刻
-        # 抽取流水线的桶派生逻辑,与 BrandMention 行过滤口径一致。
-        thinking_bucket_expr = _subtask_thinking_bucket()
-        delivery_bucket_expr = _subtask_delivery_bucket()
-
-        # Subtasks carry no timestamp of their own, so they inherit the day
-        # of the run that produced them. ``answer_content`` is measured in
-        # SQL rather than selected — the column holds full answers.
-        answers_stmt = (
-            select(
-                Task.created_local_at,
-                Subtask.task_id,
-                Subtask.prompt,
-                func.length(func.coalesce(Subtask.answer_content, "")) > 0,
+            rows_stmt = rows_stmt.where(
+                BrandMention.delivery_mode.in_(delivery_filter)
             )
-            .join(Subtask, Subtask.task_id == Task.task_id)
-            .where(
-                Task.project_id == project_id,
-                Task.created_local_at >= lo,
-                Task.created_local_at <= hi,
-            )
-        )
-        if platform_filter is not None:
-            answers_stmt = answers_stmt.where(Subtask.platform.in_(platform_filter))
-        if prompt_filter is not None:
-            answers_stmt = answers_stmt.where(Subtask.prompt.in_(prompt_filter))
-        if thinking_filter is not None:
-            answers_stmt = answers_stmt.where(thinking_bucket_expr.in_(thinking_filter))
-        if delivery_filter is not None:
-            answers_stmt = answers_stmt.where(delivery_bucket_expr.in_(delivery_filter))
-        self.answers = db.execute(answers_stmt).all()
+        self.mentions: list[BrandMention] = list(db.execute(rows_stmt).scalars())
 
-        # Per-subtask status rollup. Used for:
-        #   - ``correct_rate`` 分子 (status in success/completed)
-        #   - per-platform ``total_subtasks`` 分母 in model_dimensions
-        # We pull only the columns we need; ``answer_content`` (potentially
-        # large) stays in self.answers via its own select.
-        subtask_stmt = (
-            select(
-                Subtask.platform,
-                Subtask.status,
-                Task.created_local_at,
-            )
-            .join(Task, Task.task_id == Subtask.task_id)
-            .where(
-                Task.project_id == project_id,
-                Task.created_local_at >= lo,
-                Task.created_local_at <= hi,
-            )
-        )
-        if platform_filter is not None:
-            subtask_stmt = subtask_stmt.where(Subtask.platform.in_(platform_filter))
-        if prompt_filter is not None:
-            subtask_stmt = subtask_stmt.where(Subtask.prompt.in_(prompt_filter))
-        if thinking_filter is not None:
-            subtask_stmt = subtask_stmt.where(thinking_bucket_expr.in_(thinking_filter))
-        if delivery_filter is not None:
-            subtask_stmt = subtask_stmt.where(delivery_bucket_expr.in_(delivery_filter))
-        self.subtask_rows = db.execute(subtask_stmt).all()
-
-    @property
-    def total_subtasks(self) -> int:
-        """Window subtask count. Denominator for ``mention_rate`` and
-        ``correct_rate``."""
-        return len(self.subtask_rows)
-
-    @property
-    def correct_subtasks(self) -> int:
-        """Count of subtasks whose ``status`` is ``success`` (production
-        pipeline terminal state) or ``completed`` (legacy mock data).
-        Mirrors what frontend used to filter the 查看原文 modal — see
-        ``QuestionTab.tsx`` "completed || success" comment."""
-        return sum(
-            1
-            for _platform, status, _created in self.subtask_rows
-            if status in ("success", "completed")
-        )
+        # 每行归属到窗口里的具体一天 —— 直接用 ``created_at`` 落到 ``days``
+        # 桶里。WHERE 已经把窗口外的行挡掉了,理论上 ``row_day`` 必在 days
+        # 内,但保留 ``if d in by_day`` 的防御性写法,跟未来窗口语义变化
+        # 解耦。
+        self.row_day: dict[int, date] = {
+            m.id: m.created_at.date() for m in self.mentions
+        }
 
     def kpis(self) -> dict[str, tuple[float, list[float]]]:
-        """Window totals plus the per-day sparkline for each KPI card."""
-        by_day_mentions: dict[date, list[BrandMention]] = {d: [] for d in self.days}
+        """Window totals + per-day sparkline. Every number is row-level
+        on ``self.mentions``:
+
+        - ``mention_rate``: ``is_mention > 0`` 行 / 全部 self 行
+        - ``top1_rate`` / ``top3_rate``: rank 命中行 / ``is_mention > 0`` 行
+        - ``correct_rate``: ``is_correct = True`` 行 / 全部 self 行
+        - ``question_count``: 窗口内 ``(task_id, prompt)`` 去重数
+        - ``answer_count``: 窗口内 ``subtask_id`` 去重数
+
+        分子分母同源 → 不同筛选组合下数字之间不会再有口径漂移。
+        """
+        by_day: dict[date, list[BrandMention]] = {d: [] for d in self.days}
         for m in self.mentions:
-            bucket = by_day_mentions.get(self.task_dates[m.id].date())
-            if bucket is not None:
-                bucket.append(m)
+            d = self.row_day.get(m.id)
+            if d in by_day:
+                by_day[d].append(m)
 
-        asked: dict[date, set[tuple[str, str | None]]] = {d: set() for d in self.days}
-        answered: dict[date, int] = {d: 0 for d in self.days}
-        for created_at, task_id, prompt, has_answer in self.answers:
-            day = created_at.date()
-            if day not in asked:
-                continue
-            asked[day].add((task_id, prompt))
-            if has_answer:
-                answered[day] += 1
+        n_mentions_total = sum(m.is_mention for m in self.mentions)
+        n_self_rows = max(len(self.mentions), 1)
+        n_mentions_denom = max(n_mentions_total, 1)
 
-        # top1 / top3 rates are computed off ``geo_brand_mentions`` alone,
-        # independent of the subtask-level rollups below. The denominator
-        # is the count of self rows where the brand was actually mentioned
-        # (``is_mention > 0``) — the rows where a rank_position even makes
-        # sense. Rows with ``is_mention = 0`` carry no rank and would
-        # dilute the rate if they were included.
-        n_mentions = sum(m.is_mention for m in self.mentions)
-        top1 = sum(
-            1 for m in self.mentions
-            if m.is_mention and m.rank_position == 1
-        )
-        top3 = sum(
-            1 for m in self.mentions
-            if m.is_mention and m.rank_position is not None and m.rank_position <= 3
-        )
+        def _topn_by_day(predicate):
+            return [
+                _rate(
+                    sum(1 for m in by_day[d] if predicate(m)),
+                    max(sum(1 for m in by_day[d] if m.is_mention), 1),
+                )
+                for d in self.days
+            ]
 
-        # Subtask counts bucketed per day for the ``mention_rate``
-        # sparkline (correct_rate now rolls off is_correct on self rows,
-        # see below — doesn't need subtask bucketing).
-        subtasks_by_day: dict[date, int] = {d: 0 for d in self.days}
-        for _platform, status, created_at in self.subtask_rows:
-            day = created_at.date()
-            if day not in subtasks_by_day:
-                continue
-            subtasks_by_day[day] += 1
-
-        # is_correct bucketed per day. ``self.mentions`` is already filtered
-        # to ``is_self=True`` rows (see __init__), so we count the True
-        # bucket against the same row set as the denominator. ``None``
-        # (un-judged / competitor / LLM-failed) is treated as "not True"
-        # rather than skipped, so partially-backfilled windows don't
-        # silently inflate the rate.
-        correct_by_day: dict[date, int] = {d: 0 for d in self.days}
-        for m in self.mentions:
-            day = self.task_dates[m.id].date()
-            if day not in correct_by_day:
-                continue
-            if m.is_correct:
-                correct_by_day[day] += 1
-
-        # Mention rate is measured at the **subtask** level, not the
-        # brand-mention-row level. A subtask counts as "品牌被提及"
-        # iff at least one self row has ``is_mention > 0``. Counting
-        # rows directly would inflate the numerator whenever a subtask
-        # has multiple self rows (e.g. multiple brands in the same row
-        # of the AI response), and would also force the denominator
-        # onto a row-count basis that doesn't match how the rest of
-        # the overview reports "of N questions, K got a hit".
-        subtasks_with_mention: set[str] = {
-            m.subtask_id for m in self.mentions if m.is_mention
-        }
-        subtasks_with_mention_by_day: dict[date, set[str]] = {
-            d: set() for d in self.days
-        }
-        for m in self.mentions:
-            if not m.is_mention:
-                continue
-            day = self.task_dates[m.id].date()
-            if day in subtasks_with_mention_by_day:
-                subtasks_with_mention_by_day[day].add(m.subtask_id)
-
-        total_subs = max(self.total_subtasks, 1)
-        total_self_rows = max(len(self.mentions), 1)
         return {
-            # Mention rate: % of subtasks in which the brand was actually
-            # named in the answer (at least one self row with
-            # ``is_mention > 0``). Denominator is the window's subtask
-            # count so the number reads as "of N answers, K mentioned
-            # the brand" — matching how the rest of the overview
-            # reports the metric.
             "mention_rate": (
-                _rate(len(subtasks_with_mention), total_subs),
+                _rate(n_mentions_total, n_self_rows),
                 [
-                    _rate(len(subtasks_with_mention_by_day[d]),
-                          max(subtasks_by_day[d], 1))
+                    _rate(
+                        sum(m.is_mention for m in by_day[d]),
+                        max(len(by_day[d]), 1),
+                    )
                     for d in self.days
                 ],
             ),
             "total_mentions": (
-                float(sum(m.is_mention for m in self.mentions)),
-                [
-                    float(sum(m.is_mention for m in by_day_mentions[d]))
-                    for d in self.days
-                ],
+                float(n_mentions_total),
+                [float(sum(m.is_mention for m in by_day[d])) for d in self.days],
             ),
-            # Top1 / Top3 mention rate: % of *mention rows* (self rows
-            # where the brand was actually named) that ranked #1 / in
-            # the top 3. Computed purely off ``geo_brand_mentions``; the
-            # subtask rollup is irrelevant here because each self row
-            # already corresponds to one (subtask × brand) pair.
             "top1_rate": (
-                _rate(top1, max(n_mentions, 1)),
-                [
-                    _rate(
-                        sum(
-                            1 for m in by_day_mentions[d]
-                            if m.is_mention and m.rank_position == 1
-                        ),
-                        max(
-                            sum(1 for m in by_day_mentions[d] if m.is_mention),
-                            1,
-                        ),
-                    )
-                    for d in self.days
-                ],
+                _rate(
+                    sum(1 for m in self.mentions
+                        if m.is_mention and m.rank_position == 1),
+                    n_mentions_denom,
+                ),
+                _topn_by_day(
+                    lambda m: m.is_mention and m.rank_position == 1
+                ),
             ),
             "top3_rate": (
-                _rate(top3, max(n_mentions, 1)),
+                _rate(
+                    sum(
+                        1 for m in self.mentions
+                        if m.is_mention
+                        and m.rank_position is not None
+                        and m.rank_position <= 3
+                    ),
+                    n_mentions_denom,
+                ),
+                _topn_by_day(
+                    lambda m: m.is_mention
+                    and m.rank_position is not None
+                    and m.rank_position <= 3
+                ),
+            ),
+            "correct_rate": (
+                _rate(
+                    sum(1 for m in self.mentions if m.is_correct),
+                    n_self_rows,
+                ),
                 [
                     _rate(
-                        sum(
-                            1 for m in by_day_mentions[d]
-                            if m.is_mention and m.rank_position is not None
-                            and m.rank_position <= 3
-                        ),
-                        max(
-                            sum(1 for m in by_day_mentions[d] if m.is_mention),
-                            1,
-                        ),
+                        sum(1 for m in by_day[d] if m.is_correct),
+                        max(len(by_day[d]), 1),
                     )
-                    for d in self.days
-                ],
-            ),
-            # Correct rate: among self rows in the window, the share
-            # whose LLM judge returned ``is_correct=True``. The
-            # denominator is *all* self rows (including ``is_correct=None``
-            # for un-judged / historical backfill gaps) so a partial
-            # backfill doesn't artificially inflate the number. Competitor
-            # (``is_self=False``) rows are filtered out upstream in
-            # ``__init__`` because they always carry ``is_correct=None``.
-            "correct_rate": (
-                _rate(sum(1 for m in self.mentions if m.is_correct), total_self_rows),
-                [
-                    _rate(correct_by_day[d], max(
-                        sum(
-                            1
-                            for m in self.mentions
-                            if self.task_dates[m.id].date() == d
-                        ),
-                        1,
-                    ))
                     for d in self.days
                 ],
             ),
             "question_count": (
-                float(sum(len(asked[d]) for d in self.days)),
-                [float(len(asked[d])) for d in self.days],
+                float(len({
+                    (m.task_id, m.prompt) for m in self.mentions
+                })),
+                [
+                    float(len({
+                        (m.task_id, m.prompt) for m in by_day[d]
+                    }))
+                    for d in self.days
+                ],
             ),
             "answer_count": (
-                float(sum(answered[d] for d in self.days)),
-                [float(answered[d]) for d in self.days],
+                float(len({m.subtask_id for m in self.mentions})),
+                [float(len({m.subtask_id for m in by_day[d]})) for d in self.days],
             ),
         }
 
@@ -3517,38 +4009,58 @@ def project_overview(
 
     The 4 KPI cards mirror docs/更新版UI #tab-overview: 总提及率 / Top1 / Top3
     / 正确率. Per-day sparklines come from the same windowed buckets as
-    the count card (mention_rate / correct_rate bucket subtasks, top1
-    and top3 bucket mentions).
+    the count card.
 
     ``start``/``end`` (inclusive, local dates) drive the 自定义 range and
     win over ``days``; without them the window is the last ``days`` days
     ending today.
 
-    ``platforms`` 是逗号分隔的 modelCode 列表(参考 ``BatchQuestionModal`` 的
-    ``ProjectPlatform.platform`` 字段)。空字符串 / 缺省视为「不筛」,
-    与原行为一致。传入时同时收紧 KPI 分母 (subtask_rows / answers) 与
-    分子 (mentions),确保窗口内未选平台的数据整体不进入计算。
+    ``platforms`` 是逗号分隔的 compound key 列表(每项
+    ``${modelCode}__${delivery}__${thinking}``,如 ``qianwen__web__fast``),
+    由 GlobalToolbar.applyModels 直接透传 staged 集合的合成 key。空字符
+    串 / 缺省视为「不筛」(全平台);非空 → 按 ``(platform, delivery_mode,
+    thinking_mode)`` 三元组精确匹配,确保「只勾快速 / 只勾 PC」不会把
+    同 modelCode 的思考 / 移动档位错带进来。传入时同时收紧 KPI 分母
+    与分子,确保窗口内未选档位的数据整体不进入计算。
 
     ``prompt_ids`` 是逗号分隔的 ``ProjectPrompt.id`` 列表;后端按项目把
-    id 解析成对应的 ``prompt`` 文本(``Subtask.prompt`` / ``BrandMention.prompt``
-    都是文本,与 ``ProjectPrompt.prompt`` 同源),再分别过滤三个 stmt。
+    id 解析成对应的 ``prompt`` 文本,直接过滤 BrandMention 行。
 
-    ``thinking_mode`` 是逗号分隔的 ``true``/``false`` 列表,对应 UI 模式
-    分桶;``delivery_mode`` 是逗号分隔的 ``web``/``mobile`` 列表,对应
-    UI 终端分桶。空 / 缺省视为「不筛」。非法 token 静默忽略(与
-    ``prompt_ids`` 一致)。
+    所有数字(KPI / trend / ranking / model_dimensions) 都从
+    ``geo_brand_mentions`` 行级口径算,不 JOIN ``geo_subtasks`` /
+    ``geo_tasks``,与工具栏 UI 的口径一致。
+
+    ``thinking_mode`` / ``delivery_mode`` 是历史参数,GlobalToolbar 已不
+    再发送(模型 compound key 已携带完整三元组),保留是为不破坏旧路径;
+    后端不再消费,只是不抛错。
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
 
-    # 解码 comma-separated platforms 字符串,空 / 全空白 → None (不筛)。
-    platform_list: list[str] | None = None
+    # 解码 comma-separated compound key 列表,每个 entry 切成
+    # ``(platform, delivery, is_think)`` 三元组,与 ProjectPlatform /
+    # BrandMention 的桶列对齐。非法 entry(不是合法 compound key 形
+    # 式,如旧 raw modelCode)静默忽略。None = 「全选」走原口径;空集
+    # 合 = 「全不选」,SQLAlchemy ``tuple_(...).in_(())`` 渲染成
+    # ``1 != 1`` 自动返回 0 行,跟 prompt_ids 「显式未选」语义对齐。
+    selected_triples: set[tuple[str, str, bool]] | None = None
     if platforms is not None:
         parsed = [p.strip() for p in platforms.split(",") if p.strip()]
-        platform_list = parsed or None
+        triples: set[tuple[str, str, bool]] = set()
+        for entry in parsed:
+            parts = entry.split("__")
+            if len(parts) != 3:
+                continue
+            platform_str, delivery, thinking = parts
+            if delivery not in ("web", "mobile"):
+                continue
+            if thinking not in ("fast", "think"):
+                continue
+            triples.add((platform_str, delivery, thinking == "think"))
+        selected_triples = triples
 
-    # 解码 prompt_ids:根据项目把 id 解析成对应 prompt 文本(Subtask/BrandMention
-    # 都按文本存)。项目下 prompt 文本 unique,所以 IN-list 不会有歧义。
+    # 解码 prompt_ids:根据项目把 id 解析成对应 prompt 文本(BrandMention
+    # 按文本存)。项目下 prompt 文本 unique,所以 IN-list 不会有歧义。
     prompt_filter: list[str] | None = None
     if prompt_ids is not None:
         parsed_ids = [
@@ -3567,9 +4079,11 @@ def project_overview(
             # 更安全:前端筛选应用后即便 prompt 已被删,也明确返回 0,
             # 而不是静默回退到「全部」让用户误以为没生效。
 
-    # 解码 thinking_mode:true / false → bool;非法 token 丢弃。空集合视为
-    # 不筛(None),与 platforms 行为对齐 —— 「全选」是 UI 端按钮语义,
-    # 不应让后端退化到「全不选」。
+    # thinking_mode / delivery_mode 是历史参数,GlobalToolbar 已不发送
+    # (模型 compound key 已携带完整三元组)。保留是为不破坏旧路径——
+    # 底层走 BrandMention 的持久化列 IN 过滤,不再 JOIN Subtask,与
+    # overview 「纯走 BrandMention」口径一致。非法 token 静默忽略;空
+    # 集合视为不筛(全选语义)。
     thinking_filter: list[bool] | None = None
     if thinking_mode is not None:
         parsed: list[bool] = []
@@ -3581,7 +4095,6 @@ def project_overview(
                 parsed.append(False)
         thinking_filter = parsed or None
 
-    # 解码 delivery_mode:'web' / 'mobile' 字符串。空集合视为不筛。
     delivery_filter: list[str] | None = None
     if delivery_mode is not None:
         parsed_d = [
@@ -3598,7 +4111,7 @@ def project_overview(
         project_id,
         win_start,
         win_end,
-        platform_list,
+        selected_triples,
         prompt_filter,
         thinking_filter,
         delivery_filter,
@@ -3608,7 +4121,7 @@ def project_overview(
         project_id,
         win_start - timedelta(days=span),
         win_start - timedelta(days=1),
-        platform_list,
+        selected_triples,
         prompt_filter,
         thinking_filter,
         delivery_filter,
@@ -3627,87 +4140,130 @@ def project_overview(
 
     # Legend order follows the project's configured platforms so a platform
     # with no data in the window still shows up as a flat line.
-    platforms_iter = list(
-        dict.fromkeys(
-            db.scalars(
-                select(ProjectPlatform.platform)
-                .where(ProjectPlatform.project_id == project_id)
-                .order_by(ProjectPlatform.id)
-            ).all()
-        )
+    # 每个 ProjectPlatform row = 一个 (platform_code × delivery_mode ×
+    # thinking_mode) 档,与 docs/模型名字.txt 的 4 档展开对齐:同一逻辑
+    # 模型的「网页-快速」「网页-思考」「手机-快速」「手机-思考」是 4 个
+    # 独立的 chart series / rank 行 / model-dimension 行。compound key
+    # 用 ``row.platform_code`` 而不是 ``row.platform``:mobile 行的
+    # ``platform`` 是 web code(``baiduai``),``platform_code`` 才是真正
+    # 落到 Subtask / BrandMention 的 code(``baidu_mobile``)。后端
+    # 选 triple 必须跟 GlobalToolbar.rowKeyOf 用同一列 —— 否则 mobile
+    # 档的 ProjectPlatform row 会被 selected_triples 误过滤掉。
+    def _overview_key(row: ProjectPlatform) -> str:
+        thinking = "think" if row.thinking_mode else "fast"
+        return f"{row.platform_code}__{row.delivery_mode.value}__{thinking}"
+
+    pp_rows = list(
+        db.execute(
+            select(ProjectPlatform)
+            .where(ProjectPlatform.project_id == project_id)
+            .order_by(ProjectPlatform.id)
+        ).scalars()
     )
-    # 当 UI 选了模型子集时,legend 只展示选中的,避免出现「看不到的平台」
-    # 抢占到 KPI 分母的空间让分母看起来变大。
-    if platform_list is not None:
-        platforms = [p for p in platforms_iter if p in platform_list]
-    else:
-        platforms = platforms_iter
-    for m in cur.mentions:
-        if m.platform and m.platform not in platforms:
-            platforms.append(m.platform)
 
-    # Per-platform subtask counts (for model_dimensions 分母). Built once
-    # here so the loop below is O(mentions + subtasks) instead of
-    # O(platforms * mentions + platforms * subtasks).
-    subtasks_by_platform: dict[str, int] = {}
-    for platform, _status, _created in cur.subtask_rows:
-        if not platform:
+    # Chart series key 只来自配置的 ProjectPlatform row,跟 GlobalToolbar
+    # 「全选 / 子集」一一对应:全选 N 行 → N 条 series。窗口里出现的
+    # orphan mention(平台已下线 / 配置被改过)不进入 trend,ranking 同理,
+    # 避免「全选 8 个 = chart 11 条」的工具栏 / 图表不一致。
+    seen: set[str] = set()
+    keys: list[str] = []
+    for row in pp_rows:
+        key = _overview_key(row)
+        if key in seen:
             continue
-        subtasks_by_platform[platform] = subtasks_by_platform.get(platform, 0) + 1
+        # ``selected_triples`` 是 (platform_code, delivery_mode, is_think)
+        # 三元组集合。ProjectPlatform row 走 ``(row.platform_code,
+        # row.delivery_mode.value, row.thinking_mode)`` 三元组精确匹配
+        # —— 「只勾快速」时千问-网页-思考 这类同 platform_code 不同档位
+        # 的 row 自然排除,与 KPI 分子 / 分母过滤口径一致。用
+        # ``platform_code`` 而非 ``platform``:mobile 行的 ``platform``
+        # 是 web code,而 selected_triples 里的 code 是真正的 API code
+        # (mobile 行是 ``baidu_mobile`` / ``qianwen_mobile`` 等)。
+        if selected_triples is not None:
+            triple = (
+                row.platform_code,
+                row.delivery_mode.value,
+                row.thinking_mode,
+            )
+            if triple not in selected_triples:
+                continue
+        seen.add(key)
+        keys.append(key)
 
+    # 每个 chart key = 一个 ProjectPlatform row,所有 KPI / 分桶口径从
+    # ``cur.mentions`` 这份行级数据里取:
+    #   - trend     : 每日 is_mention 行求和
+    #   - ranking   : top1 = rank==1 行 / 全部 mention 行(口径与 KPI top1 一致)
+    #   - model_dim:
+    #       mention_rate = mention 行 / 全部 self 行(对应 KPI mention_rate)
+    #       top{1,2,3}   = rank 命中行 / mention 行(对应 KPI top1/top3)
+    # 所有分母都来自 BrandMention,不再依赖 Subtask。
     trend: list[TrendSeries] = []
     ranking: list[PlatformRank] = []
     model_dimensions: list[ModelDimension] = []
-    for platform in platforms:
-        rows = [m for m in cur.mentions if m.platform == platform]
+    for key in keys:
+        platform_str, delivery, thinking = key.split("__")
+        is_think = thinking == "think"
+        rows = [
+            m
+            for m in cur.mentions
+            if m.platform == platform_str
+            and (m.delivery_mode if m.delivery_mode else "web") == delivery
+            and (m.thinking_mode is True) == is_think
+        ]
         per_day = {d: 0 for d in cur.days}
         for m in rows:
-            day = cur.task_dates[m.id].date()
+            day = cur.row_day.get(m.id)
             if day in per_day:
                 per_day[day] += m.is_mention
         trend.append(
-            TrendSeries(platform=platform, data=[per_day[d] for d in cur.days])
+            TrendSeries(platform=key, data=[per_day[d] for d in cur.days])
         )
+
+        # ranking 用「mention 行」(is_mention>0)做分母:这条 top1 率的口径
+        # 等于「品牌被提到时排第 1 的占比」,与 KPI top1_rate 完全对齐。
+        mention_rows = [m for m in rows if m.is_mention]
+        n_mentions_key = max(len(mention_rows), 1)
+        top1 = sum(1 for m in mention_rows if m.rank_position == 1)
         ranking.append(
             PlatformRank(
-                platform=platform,
-                top1_rate=_rate(
-                    sum(1 for m in rows if m.rank_position == 1), len(rows)
-                ),
-                sample=len(rows),
+                platform=key,
+                top1_rate=_rate(top1, n_mentions_key),
+                sample=len(mention_rows),
             )
         )
 
-        # 模型维度 4 指标 — 全部用「该平台的 subtasks 总数」做分母,与
-        # 竞品分析的 per-brand rate 口径一致(见 _kpi_for / CompetitorKpi)。
-        platform_subs = subtasks_by_platform.get(platform, 0)
+        # 模型维度 4 指标:
+        #   - mention_rate = is_mention 行 / 该 key 全部 self 行
+        #     (「该平台的所有 mention 中,真正命中的占比」)
+        #   - top{1,2,3}   = rank 命中行 / is_mention 行
+        #     (「命中的 mention 中,排名位置达标的占比」)
+        # 分母都用 BrandMention 行,不再走 Subtask。
+        n_rows_key = max(len(rows), 1)
         model_dimensions.append(
             ModelDimension(
-                platform=platform,
+                platform=key,
                 mention_rate=_rate(
-                    sum(m.is_mention for m in rows), max(platform_subs, 1)
+                    sum(m.is_mention for m in rows), n_rows_key
                 ),
-                top1_rate=_rate(
-                    sum(1 for m in rows if m.rank_position == 1),
-                    max(platform_subs, 1),
-                ),
+                top1_rate=_rate(top1, n_mentions_key),
                 top2_rate=_rate(
                     sum(
                         1
-                        for m in rows
+                        for m in mention_rows
                         if m.rank_position is not None and m.rank_position <= 2
                     ),
-                    max(platform_subs, 1),
+                    n_mentions_key,
                 ),
                 top3_rate=_rate(
                     sum(
                         1
-                        for m in rows
+                        for m in mention_rows
                         if m.rank_position is not None and m.rank_position <= 3
                     ),
-                    max(platform_subs, 1),
+                    n_mentions_key,
                 ),
-                sample=platform_subs,
+                sample=len(rows),
             )
         )
     ranking.sort(key=lambda r: (r.top1_rate, r.sample), reverse=True)
@@ -3735,3 +4291,188 @@ def project_overview(
             1 for m in cur.mentions if m.extract_status.value == "failed"
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# 自有文章引用分析(独立一级页面,表格视图)
+# --------------------------------------------------------------------------
+
+_OWN_ARTICLES_MAX_BYTES = 5 * 1024 * 1024
+
+
+@router.get(
+    "/projects/{project_id}/own-articles",
+    response_model=OwnArticleListOut,
+)
+def list_own_articles(
+    project_id: int,
+    days: int = Query(15),
+    start: date | None = Query(None),
+    end: date | None = Query(None),
+    models: str | None = Query(None),
+    prompts: str | None = Query(None),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """项目自有文章列表 + 引用统计。
+
+    - 引用次数 / 引用模型 / 最近引用 = 后端 join ``geo_subtasks.reference_list_json``
+      (全信源池,不只是回答正文里 cite 过的子集)在 ``days`` / ``start..end`` /
+      ``models`` / ``prompts`` 过滤范围内的聚合结果。
+    - 排序:``publish_date DESC, id DESC`` —— 有发布日期的按新到旧;
+      无发布日期的(URL 列表批量导入未指定日期)兜底按 id 倒序。
+      MySQL 下 ``DESC`` 自然让 NULL 排最后,无需 ``NULLS LAST``。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
+    try:
+        stats = own_articles.compute_cite_stats(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    articles = db.execute(
+        select(OwnArticle)
+        .where(OwnArticle.project_id == project_id)
+        # MySQL: ``ORDER BY x DESC`` 默认 NULL 排最后,无需 ``.nulls_last()``
+        # (SQLAlchemy 2 的 nulls_last() 直接拼成 ``NULLS LAST``,MySQL 1064 语法错)。
+        .order_by(OwnArticle.publish_date.desc(), OwnArticle.id.desc())
+    ).scalars().all()
+
+    items: list[OwnArticleOut] = []
+    for a in articles:
+        s = stats.get(own_articles.normalize_url(a.url), {})
+        last = s.get("last_cited")
+        last_str = last.strftime("%Y-%m-%d %H:%M") if last else "—"
+        items.append(OwnArticleOut(
+            id=a.id,
+            url=a.url,
+            title=a.title,
+            publish_date=a.publish_date,
+            remind=a.remind,
+            created_at=a.created_at,
+            cited=bool(s),
+            cite_count=s.get("count", 0),
+            cite_models=sorted(s.get("models") or []),
+            last_cited=last_str,
+        ))
+    return OwnArticleListOut(items=items, total=len(items))
+
+
+@router.post(
+    "/projects/{project_id}/own-articles/import/preview",
+    response_model=OwnArticleImportPreview,
+)
+async def preview_own_articles_import(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """xlsx 预览 —— 解析 + 校验 + 与 DB diff,不入库。
+
+    xlsx 列固定 3 列:URL / 标题 / 发布日期(首行为表头)。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    content = await _read_xlsx(file)
+    return own_articles.preview_import(db, project_id, content)
+
+
+@router.post(
+    "/projects/{project_id}/own-articles/import",
+    response_model=OwnArticleImportResult,
+)
+async def import_own_articles(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """xlsx 应用 —— 单事务 upsert。"""
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    content = await _read_xlsx(file)
+    return own_articles.apply_import(db, project_id, content)
+
+
+@router.post(
+    "/projects/{project_id}/own-articles/{article_id}/remind",
+    response_model=OwnArticleOut,
+)
+def toggle_own_article_remind(
+    project_id: int,
+    article_id: int,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """切换单条自有文章的「引用提醒」boolean。
+
+    - 命中:翻转 ``remind``,返回最新 Out(不附 cite 统计 —— toggle 走
+      局部刷新,前端拿到 id 后再走 list 接口取最新 stats)。
+    - 找不到对应项目下的文章 → 404。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    a = db.get(OwnArticle, article_id)
+    if a is None or a.project_id != project_id:
+        raise HTTPException(404, "article not found")
+    a.remind = not a.remind
+    db.commit()
+    return OwnArticleOut.model_validate(a)
+
+
+@router.delete(
+    "/projects/{project_id}/own-articles/{article_id}",
+    status_code=204,
+)
+def delete_own_article(
+    project_id: int,
+    article_id: int,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """删除单条自有文章声明(不影响历史 citation_list_json 数据)。"""
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+    a = db.get(OwnArticle, article_id)
+    if a is None or a.project_id != project_id:
+        raise HTTPException(404, "article not found")
+    db.delete(a)
+    db.commit()
+    return None
+
+
+async def _read_xlsx(file: UploadFile) -> bytes:
+    """校验扩展名 + 大小 + 可解析性 —— 任何失败都抛 400 而非 500。"""
+    name = (file.filename or "").lower()
+    if not name.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="only .xlsx files supported")
+    content = await file.read()
+    if len(content) > _OWN_ARTICLES_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 5MB)")
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        import openpyxl
+        openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True).close()
+    except Exception as exc:  # BadZipFile / InvalidFileException / zipfile 各种
+        raise HTTPException(status_code=400, detail=f"invalid .xlsx: {exc}") from exc
+    return content

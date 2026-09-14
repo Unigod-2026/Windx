@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, tuple_
 
 from app.models.common import now_local
 from app.models.project import BrandMention, ProjectCompetitor
@@ -22,6 +22,18 @@ from app.schemas.project import (
     ModelDiff,
     QuadrantPoint,
 )
+
+
+def compound_key(
+    platform_code: str,
+    delivery_mode: str,
+    thinking_mode: bool | None,
+) -> str:
+    """``${platform_code}__${delivery_mode}__${thinking}`` —— ``thinking_mode``
+    缺省按 False 处理,避免与旧 fixture ``None`` 行拼出 ``__None__`` 这种坏
+    key。本地副本,避免与 ``app.api.projects`` 的 circular import。"""
+    thinking = "think" if thinking_mode else "fast"
+    return f"{platform_code}__{delivery_mode}__{thinking}"
 
 
 _COMPETITOR_LINE_COLORS = [
@@ -54,6 +66,43 @@ def _resolve_competitor_window(
     return today - timedelta(days=days - 1), today
 
 
+def _build_brand_filter(
+    selected_triples: set[tuple[str, str, bool]] | None,
+    selected_prompt_texts: list[str] | None,
+) -> list:
+    """构造 ``BrandMention`` 表的额外 WHERE 条件。
+
+    - ``selected_triples=None`` 表示「不筛」(全选);非 None 表示按
+      ``(platform, delivery_mode, thinking_mode)`` 三元组精确过滤,
+      与 Overview / 问题提及分析 tab 同口径;
+    - ``selected_prompt_texts=None`` 表示「不筛」(全选);``[]`` 表示
+      「全部未选」(走 0 行,避免静默回退到全选);非空 list 是 IN-list
+      过滤(按 prompt 文本匹配,因为 BrandMention.prompt 是文本)。
+
+    返回 SQLAlchemy 条件 list;调用方用 ``*existing, *filter`` 拼到
+    ``.where()`` 里。
+    """
+    out: list = []
+    if selected_triples is not None:
+        if not selected_triples:
+            # 「全部未选」走 0 行,SQL 永远 false,避免空集合 IN () 语法错。
+            out.append(func.coalesce(BrandMention.id, None).is_(None))
+        else:
+            out.append(
+                tuple_(
+                    BrandMention.platform,
+                    BrandMention.delivery_mode,
+                    BrandMention.thinking_mode,
+                ).in_(selected_triples)
+            )
+    if selected_prompt_texts is not None:
+        if not selected_prompt_texts:
+            out.append(func.coalesce(BrandMention.id, None).is_(None))
+        else:
+            out.append(BrandMention.prompt.in_(selected_prompt_texts))
+    return out
+
+
 def _compute_diff_core(
     self_kpi: CompetitorKpi | None,
     competitor_kpis: list[CompetitorKpi],
@@ -82,22 +131,40 @@ def _compute_diff_core(
     )
 
 
-def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
-    """模型维度提及率 — 每个 platform 一行,自身 vs 竞品均值。spec §2.4。
+def _compute_diff_model(
+    db,
+    project_id,
+    win_start_dt,
+    win_end_dt,
+    selected_triples: set[tuple[str, str, bool]] | None = None,
+    selected_prompt_texts: list[str] | None = None,
+):
+    """模型维度提及率 — 每个 (platform_code, delivery_mode, thinking_mode) triple
+    一行,自身 vs 竞品均值。spec §2.4。
 
-    分母统一用「该 platform 在窗口内的 distinct subtask 数」,与 is_self 无关 —
+    分母统一用「该 triple 在窗口内的 distinct subtask 数」,与 is_self 无关 —
     同行的两条 bar 必须共用一个分母才能横向比较。竞品侧是「各竞品 brand 在
-    该 platform 上的 rate」的算术平均,所以即一行有多家竞品被同时提到,均值
+    该 triple 上的 rate」的算术平均,所以即一行有多家竞品被同时提到,均值
     也不会超过 1。
 
     之前的实现把 (platform, is_self) 子集的 distinct subtask 数作为分母:
     竞品侧分母 = 该 platform 下「至少被任一竞品提到」的 subtask 数,远小于
     真实 subtask 数;再把多家竞品的 matched 直接相加,rate 就被放大到 > 1。
+
+    2026-09 起按 triple 拆(与 Overview / 问题提及分析 tab 口径一致),
+    output 行数 = 「项目配置的 ProjectPlatform 行数」,每行用 compound key
+    表示,前端按 ``platformLabel`` 渲染展示名(「千问-网页-快速」等)。
+
+    selected_triples / selected_prompt_texts 与主函数同语义:None = 不筛;
+    非 None = 严格按 triple + prompt 文本过滤,跟 toolbar 联动口径一致。
     """
-    # Per-platform total subtask count — common denominator for both sides.
+    brand_filter = _build_brand_filter(selected_triples, selected_prompt_texts)
+    # Per-triple total subtask count — common denominator for both sides.
     total_rows = db.execute(
         select(
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             func.count(func.distinct(BrandMention.subtask_id)).label("total"),
         )
         .where(
@@ -105,16 +172,28 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
             BrandMention.platform.is_not(None),
+            *brand_filter,
         )
-        .group_by(BrandMention.platform)
+        .group_by(
+            BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
+        )
     ).all()
-    total_by_plat: dict[str, int] = {r.platform: int(r.total or 0) for r in total_rows}
+    # key = compound key, value = distinct subtask count
+    total_by_triple: dict[str, int] = {
+        compound_key(r.platform, r.delivery_mode, bool(r.thinking_mode)):
+            int(r.total or 0)
+        for r in total_rows
+    }
 
-    # Per-(platform, brand) rollup. Self side has at most one brand
-    # per platform; comp side may have many — we average their per-brand rates.
+    # Per-(triple, brand) rollup. Self side has at most one brand
+    # per triple; comp side may have many — we average their per-brand rates.
     brand_rows = db.execute(
         select(
             BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
             BrandMention.brand,
             BrandMention.is_self,
             func.sum(case((BrandMention.is_mention > 0, 1), else_=0)).label("matched"),
@@ -128,17 +207,28 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
             BrandMention.platform.is_not(None),
+            *brand_filter,
         )
-        .group_by(BrandMention.platform, BrandMention.brand, BrandMention.is_self)
+        .group_by(
+            BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
+            BrandMention.brand,
+            BrandMention.is_self,
+        )
     ).all()
 
-    by_plat: dict[str, dict[str, list[dict[str, float]]]] = {}
+    by_triple: dict[str, dict[str, list[dict[str, float]]]] = {}
+    delivery_by_triple: dict[str, str] = {}
+    thinking_by_triple: dict[str, bool] = {}
     for r in brand_rows:
-        plat = r.platform
-        denom = total_by_plat.get(plat) or 1
-        by_plat.setdefault(plat, {"self": [], "comp": []})
+        key = compound_key(r.platform, r.delivery_mode, bool(r.thinking_mode))
+        delivery_by_triple[key] = r.delivery_mode
+        thinking_by_triple[key] = bool(r.thinking_mode)
+        denom = total_by_triple.get(key) or 1
+        by_triple.setdefault(key, {"self": [], "comp": []})
         side = "self" if r.is_self else "comp"
-        by_plat[plat][side].append({
+        by_triple[key][side].append({
             "mention_rate": int(r.matched or 0) / denom,
             "top1_rate": int(r.top1 or 0) / denom,
             "top3_rate": int(r.top3 or 0) / denom,
@@ -150,11 +240,27 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
         n = len(rows)
         return sum(r[key] for r in rows) / n
 
+    # 排序:按 (delivery_mode web→mobile, thinking_mode fast→think, platform_code)
+    # 让四象限 / BarChartH 的「网页快速 / 网页思考 / 手机快速 / 手机思考」分组
+    # 在视觉上连成一片。
+    delivery_order = {"web": 0, "mobile": 1}
+    thinking_order = {False: 0, True: 1}
+    sorted_keys = sorted(
+        by_triple.keys(),
+        key=lambda k: (
+            delivery_order.get(delivery_by_triple.get(k, ""), 99),
+            thinking_order.get(thinking_by_triple.get(k, False), 99),
+            k,
+        ),
+    )
+
     out: list[ModelDiff] = []
-    for plat in sorted(by_plat.keys()):
-        sides = by_plat[plat]
+    for key in sorted_keys:
+        sides = by_triple[key]
         out.append(ModelDiff(
-            platform=plat,
+            platform=key,
+            delivery_mode=delivery_by_triple.get(key),
+            thinking_mode=thinking_by_triple.get(key),
             self_mention_rate=_avg(sides["self"], "mention_rate"),
             self_top1_rate=_avg(sides["self"], "top1_rate"),
             self_top3_rate=_avg(sides["self"], "top3_rate"),
@@ -166,10 +272,12 @@ def _compute_diff_model(db, project_id, win_start_dt, win_end_dt):
 
 
 def _compute_diff_quadrant(diff_model):
-    """四象限 — 从 per-platform 抽 mention_rate 点。每个 platform 一个点。"""
+    """四象限 — 从 per-triple 抽 mention_rate 点。每个 triple 一个点。"""
     return [
         QuadrantPoint(
             platform=m.platform,
+            delivery_mode=m.delivery_mode,
+            thinking_mode=m.thinking_mode,
             self_mention_rate=m.self_mention_rate,
             competitor_avg_mention_rate=m.competitor_mention_rate,
         )
@@ -185,16 +293,23 @@ def compute_competitor_analysis(
     days: int = 15,
     start: date | None = None,
     end: date | None = None,
+    selected_triples: set[tuple[str, str, bool]] | None = None,
+    selected_prompt_texts: list[str] | None = None,
 ) -> CompetitorAnalysisOut:
     """Drives the 竞品分析 tab. Returns a ``CompetitorAnalysisOut``
     populated with self + competitors + trend + diff trio (diff_core /
     diff_model / diff_quadrant) + previous window dates. The 4 deltas on
     each KPI and ``previous_window_*`` are None when ``days < 7``
     (spec §1.3).
+
+    selected_triples / selected_prompt_texts 都是 toolbar 联动的筛选口径:
+    None 表示「不筛」;非 None 表示严格过滤(三元组 / prompt 文本 IN-list)。
+    当前 / 上一窗口、trend、diff_model、diff_quadrant 都共享同一组筛选条件。
     """
     win_start, win_end = _resolve_competitor_window(days, start, end)
     win_start_dt = datetime.combine(win_start, time.min)
     win_end_dt = datetime.combine(win_end, time.max)
+    brand_filter = _build_brand_filter(selected_triples, selected_prompt_texts)
 
     competitor_rows = db.scalars(
         select(ProjectCompetitor).where(ProjectCompetitor.project_id == project_id)
@@ -321,6 +436,7 @@ def compute_competitor_analysis(
             BrandMention.project_id == project_id,
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
+            *brand_filter,
         )
         .group_by(BrandMention.brand, BrandMention.is_self)
     ).all()
@@ -330,6 +446,7 @@ def compute_competitor_analysis(
             BrandMention.project_id == project_id,
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
+            *brand_filter,
         )
     ) or 0
 
@@ -384,6 +501,7 @@ def compute_competitor_analysis(
                 BrandMention.project_id == project_id,
                 BrandMention.created_at >= prev_start_dt,
                 BrandMention.created_at <= prev_end_dt,
+                *brand_filter,
             )
             .group_by(BrandMention.brand, BrandMention.is_self)
         ).all()
@@ -393,6 +511,7 @@ def compute_competitor_analysis(
                 BrandMention.project_id == project_id,
                 BrandMention.created_at >= prev_start_dt,
                 BrandMention.created_at <= prev_end_dt,
+                *brand_filter,
             )
         ) or 0
 
@@ -417,6 +536,7 @@ def compute_competitor_analysis(
             BrandMention.is_mention > 0,
             BrandMention.created_at >= win_start_dt,
             BrandMention.created_at <= win_end_dt,
+            *brand_filter,
         )
         .group_by(BrandMention.brand, func.date(BrandMention.created_at))
     ).all()
@@ -526,7 +646,14 @@ def compute_competitor_analysis(
 
     diff_core = _compute_diff_core(self_kpi, competitor_kpis)
 
-    diff_model = _compute_diff_model(db, project_id, win_start_dt, win_end_dt)
+    diff_model = _compute_diff_model(
+        db,
+        project_id,
+        win_start_dt,
+        win_end_dt,
+        selected_triples=selected_triples,
+        selected_prompt_texts=selected_prompt_texts,
+    )
 
     diff_quadrant = _compute_diff_quadrant(diff_model)
 

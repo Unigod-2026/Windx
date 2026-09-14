@@ -571,15 +571,29 @@ export const getBrandMentionsSummary = (projectId: number, days = 15) =>
     .then((r) => r.data);
 
 export interface QuestionPlatformStat {
+  /**
+   * Compound key ``${platform_code}__${delivery}__${thinking}`` —— 1 行
+   * = 1 个 (platform_code, delivery_mode, thinking_mode) 三元组,与
+   * ProjectPlatform 行一一对应。fast/think 与 web/mobile 不再合并,跟
+   * Overview 的 trend / ranking / model_dimensions 同口径。
+   */
   platform: string;
+  delivery_mode?: "web" | "mobile";
+  thinking_mode?: boolean;
   matched: number;
   total: number;
   best_rank: number | null;
   avg_sentiment: number | null;
   recommend_yes: boolean;
   // Populated when ``view=competitor`` — the dominant competitor
-  // brand that drove the aggregation for this (prompt, platform).
+  // brand that drove the aggregation for this (prompt, triple).
   brand?: string | null;
+  // Per-triple prev-window numbers,模型对比表行内环比 pill 用。
+  prev_matched?: number;
+  prev_total?: number;
+  prev_top1_rate?: number;
+  prev_top3_rate?: number;
+  prev_mention_rate?: number;
 }
 
 export interface QuestionPrevStat {
@@ -667,12 +681,19 @@ export interface QuestionWindowParams {
   days?: number;
   start?: string;
   end?: string;
+  /** Toolbar 切档 —— compound key 列表,逗号分隔 */
+  platforms?: string[];
 }
 
 export interface QuestionStableItem {
   prompt_id: number;
   prompt: string;
   category: string | null;
+  /**
+   * 列出该 prompt 在当前窗口被提及的所有档位 —— 元素是 compound key
+   * ``${platform_code}__${delivery}__${thinking}``,与 ProjectPlatform
+   * 行一一对应。改前是 raw modelCode,改后 ``platformLabel`` 直接渲染。
+   */
   platforms: string[];
 }
 
@@ -680,7 +701,14 @@ export interface DropEvent {
   prompt_id: number;
   prompt: string;
   category: string | null;
-  platform: string;
+  /**
+   * Compound key ``${platform_code}__${delivery}__${thinking}``,与
+   * Overview / 模型对比表 / 摘录 同口径。改前是 raw modelCode;
+   * 改后前端用 ``platformLabel(triple)`` 直接渲染「千问-网页-快速」格式。
+   */
+  triple: string;
+  delivery_mode?: "web" | "mobile";
+  thinking_mode?: boolean;
   dropped_day: string;
   from_rank: number | null;
   to_rank: number | null;
@@ -698,7 +726,7 @@ export interface QuestionStatusChangesOut {
 }
 
 /**
- * 稳定与掉落面板 — 服务端把每个 (prompt, platform) 划入 4 个独立集合:
+ * 稳定与掉落面板 — 服务端把每个 (prompt, triple) 划入 4 个独立集合:
  *   - ``stable``: 上一窗口 + 当前窗口都有提及
  *   - ``drops``: 上一窗口有,当前窗口掉出 Top-3 或消失(per 事件)
  *   - ``never_listed``: 双窗口都没出现过
@@ -706,12 +734,17 @@ export interface QuestionStatusChangesOut {
  */
 export const getQuestionStatusChanges = (
   projectId: number,
-  params: { days?: number; start?: string; end?: string } = {},
+  params: QuestionWindowParams = {},
 ) =>
   client
     .get<QuestionStatusChangesOut>(
       `/projects/${projectId}/questions/status-changes`,
-      { params },
+      {
+        params: {
+          ...params,
+          platforms: params.platforms ? params.platforms.join(",") : undefined,
+        },
+      },
     )
     .then((r) => r.data);
 
@@ -724,7 +757,12 @@ export const getQuestionSummary = (
   client
     .get<QuestionSummaryOut>(
       `/projects/${projectId}/questions/summary`,
-      { params },
+      {
+        params: {
+          ...params,
+          platforms: params.platforms ? params.platforms.join(",") : undefined,
+        },
+      },
     )
     .then((r) => r.data);
 
@@ -738,7 +776,12 @@ export const getQuestionProductAnalytics = (
   client
     .get<QuestionProductAnalyticsOut>(
       `/projects/${projectId}/questions/${promptId}/product-analytics`,
-      { params },
+      {
+        params: {
+          ...params,
+          platforms: params.platforms ? params.platforms.join(",") : undefined,
+        },
+      },
     )
     .then((r) => r.data);
 
@@ -751,7 +794,12 @@ export const getQuestionCompetitorAnalytics = (
   client
     .get<QuestionCompetitorAnalyticsOut>(
       `/projects/${projectId}/questions/${promptId}/competitor-analytics`,
-      { params },
+      {
+        params: {
+          ...params,
+          platforms: params.platforms ? params.platforms.join(",") : undefined,
+        },
+      },
     )
     .then((r) => r.data);
 
@@ -830,7 +878,9 @@ export const getProjectOverview = (
     .get<ProjectOverview>(`/projects/${projectId}/overview`, {
       params: {
         ...params,
-        platforms: params.platforms?.length ? params.platforms.join(",") : undefined,
+        // platforms 区分 null (「全选」→ 不传) vs [] (「全不选」→ 传空字符串,
+// 后端 SQLAlchemy in_([]) 渲染成 `1 != 1`,返回 0 行,语义对齐 prompt_ids)。
+platforms: params.platforms ? params.platforms.join(",") : undefined,
         prompt_ids: params.prompt_ids?.length ? params.prompt_ids.join(",") : undefined,
         thinking_mode: params.thinking_mode?.length
           ? params.thinking_mode
@@ -888,13 +938,21 @@ export interface CompetitorTrendBlock {
 }
 
 export interface QuadrantPoint {
+  /** Compound key: ``${platform_code}__${delivery_mode}__${thinking}``。 */
   platform: string;
+  delivery_mode: "web" | "mobile" | null;
+  thinking_mode: boolean | null;
   self_mention_rate: number;
   competitor_avg_mention_rate: number;
 }
 
 export interface ModelDiff {
+  /** Compound key: ``${platform_code}__${delivery_mode}__${thinking}``。
+   *  2026-09 起按 triple 拆,与 Overview / 问题提及分析 tab 口径一致;
+   *  前端用 ``platformLabel`` 渲染展示名。 */
   platform: string;
+  delivery_mode: "web" | "mobile" | null;
+  thinking_mode: boolean | null;
   self_mention_rate: number;
   self_top1_rate: number;
   self_top3_rate: number;
@@ -925,16 +983,29 @@ export interface CompetitorAnalysisOut {
   previous_window_end: string | null;
 }
 
-/** 竞品分析 — 近 15 天默认。``start``/``end`` (inclusive ``YYYY-MM-DD``) win over ``days``. */
+/** 竞品分析 — 近 15 天默认。``start``/``end`` (inclusive ``YYYY-MM-DD``) win over ``days``。
+ *  ``platforms`` 是 toolbar 的模型筛选(逗号分隔的 compound key,每个 key 已带
+ *  ``${code}__${delivery}__${thinking}``);``prompt_ids`` 是 toolbar 的问题筛选。 */
 export const getCompetitorAnalysis = (
   projectId: number,
-  params: { days?: number; start?: string; end?: string } = {},
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    platforms?: string[];
+    prompt_ids?: number[];
+  } = {},
 ) =>
   client
-    .get<CompetitorAnalysisOut>(
-      `/projects/${projectId}/competitor-analysis`,
-      { params },
-    )
+    .get<CompetitorAnalysisOut>(`/projects/${projectId}/competitor-analysis`, {
+      params: {
+        days: params.days,
+        start: params.start,
+        end: params.end,
+        platforms: params.platforms?.join(","),
+        prompt_ids: params.prompt_ids?.join(","),
+      },
+    })
     .then((r) => r.data);
 
 // ------------------------------------------------------------------
@@ -1017,6 +1088,45 @@ export interface SourcePreferenceItem {
   last_seen: string;
 }
 
+export interface SourceMediaTop {
+  /** 媒体名(取自 reference_list_json.site,中文显示名)。 */
+  media_name: string;
+  count: number;
+  type: string;
+  sample_url: string;
+  sample_title: string | null;
+}
+
+export interface SourceByModelTop {
+  /** Compound key ``<code>__<delivery>__<thinking>``,对齐
+   *  GlobalToolbar 模型 dropdown 的取值(如 ``qianwen__web__fast``)。 */
+  platform: string;
+  items: SourceMediaTop[];
+}
+
+export interface SourceStableItem {
+  url: string;
+  site: string;
+  title: string | null;
+  type: string;
+  count: number;
+  model_count: number;
+  total_models: number;
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface SourceTrendPlatform {
+  platform: string;
+  days: SourceTrendDay[];
+}
+
+export interface SourceSuggestion {
+  icon: "focus" | "chart-line" | "swap" | "warning";
+  title: string;
+  content: string;
+}
+
 export interface SourcePreferenceOut {
   project_id: number;
   start: string;
@@ -1027,18 +1137,320 @@ export interface SourcePreferenceOut {
   platform_slices: SourcePlatformSlice[];
   top_sources: SourcePreferenceItem[];
   trend: SourceTrendDay[];
+  by_model_top: SourceByModelTop[];
+  stable_sources: SourceStableItem[];
+  trend_by_platform: SourceTrendPlatform[];
+  suggestions: SourceSuggestion[];
 }
 
+export interface SourceDetailItem {
+  url: string;
+  site: string;
+  title: string | null;
+  type: string;
+  count: number;
+  platforms: string[];
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface SourceDetailOut {
+  project_id: number;
+  start: string;
+  end: string;
+  items: SourceDetailItem[];
+  total: number;
+}
+
+export interface VideoPlatformSlice {
+  name: string;
+  color: string;
+  count: number;
+  unique_urls: number;
+  platforms: Record<string, number>;
+  sources: string[];
+}
+
+export interface VideoSourceOut {
+  project_id: number;
+  start: string;
+  end: string;
+  total: number;
+  platforms: VideoPlatformSlice[];
+  by_model: SourcePlatformSlice[];
+}
+
+export interface SourceSelfKpi {
+  unique_sources: number;
+  total_citations: number;
+  model_count: number;
+  top_source_count: number;
+}
+
+export interface SourceSelfItem {
+  url: string;
+  site: string;
+  title: string | null;
+  count: number;
+  platforms: string[];
+}
+
+export interface SourceSelfOut {
+  project_id: number;
+  start: string;
+  end: string;
+  kpi: SourceSelfKpi;
+  by_model: SourcePlatformSlice[];
+  items: SourceSelfItem[];
+  suggestions: SourceSuggestion[];
+}
+
+/** 跟 :func:`getQuestionSummary` 同款日期范围参数对象 —— ``days`` 是默认预设;
+ *  ``start``/``end``(inclusive YYYY-MM-DD)优先,对应 toolbar 「自定义」窗口。
+ *  ``models``(逗号分隔的 compound key 列表)跟 GlobalToolbar dropdown 选中态
+ *  对齐,用于补齐 by_model_top 空卡片。 */
 export function getSourcePreferences(
   projectId: number,
-  days = 15,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
 ): Promise<SourcePreferenceOut> {
+  const { days, start, end, models, prompts } = params;
   return client
     .get<SourcePreferenceOut>(
       `/projects/${projectId}/source-preferences`,
-      { params: { days } },
+      {
+        params: {
+          days,
+          start,
+          end,
+          ...(models && models.length ? { models: models.join(",") } : {}),
+          ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+        },
+      },
     )
     .then((r) => r.data);
+}
+
+/** 信源明细 sub-tab —— 后端一次返回窗口内全部 unique URL,
+ *  前端做类型筛选 / 关键词搜索 / 排序 + 选中 → iframe 预览。 */
+export function getSourceDetail(
+  projectId: number,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
+): Promise<SourceDetailOut> {
+  const { days, start, end, models, prompts } = params;
+  return client
+    .get<SourceDetailOut>(
+      `/projects/${projectId}/source-detail`,
+      {
+        params: {
+          days,
+          start,
+          end,
+          ...(models && models.length ? { models: models.join(",") } : {}),
+          ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+        },
+      },
+    )
+    .then((r) => r.data);
+}
+
+/** 视频类信源 sub-tab —— 后端只统计命中视频平台白名单(抖音 / B 站 /
+ *  快手 / 西瓜 / YouTube / 优酷 / 腾讯视频 / 新浪视频)的引用,按视频
+ *  平台分桶 + 按模型聚合,前端渲染顶部平台卡片网格 + 底部 ranking chart。*/
+export function getVideoSources(
+  projectId: number,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
+): Promise<VideoSourceOut> {
+  const { days, start, end, models, prompts } = params;
+  return client
+    .get<VideoSourceOut>(
+      `/projects/${projectId}/source-video`,
+      {
+        params: {
+          days,
+          start,
+          end,
+          ...(models && models.length ? { models: models.join(",") } : {}),
+          ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+        },
+      },
+    )
+    .then((r) => r.data);
+}
+
+/** 自有文章引用分析 sub-tab —— 后端只统计 host 命中「自媒体」分类
+ *  (抖音 / B 站 / 快手 等)的引用,提供 KPI + 按模型分布 + 信源列表 +
+ *  运营建议。数据源与 source-video 共用,但聚合维度不同 —— 这里按
+ *  model + URL 维度,视频类信源按 video platform 维度。*/
+export function getSelfArticles(
+  projectId: number,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
+): Promise<SourceSelfOut> {
+  const { days, start, end, models, prompts } = params;
+  return client
+    .get<SourceSelfOut>(
+      `/projects/${projectId}/source-self`,
+      {
+        params: {
+          days,
+          start,
+          end,
+          ...(models && models.length ? { models: models.join(",") } : {}),
+          ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+        },
+      },
+    )
+    .then((r) => r.data);
+}
+
+// ------------------------------------------------------------------
+// 自有文章引用分析(独立一级页面,表格视图)
+//
+// 对应 index.html:1293-1326 的 7 列表格:文章 / 发布日期 / 是否被引用 /
+// 引用次数 / 引用模型 / 最近引用 / 引用提醒。每行 remind toggle;顶部有
+// 「导入 URL 列表」xlsx 批量导入按钮。
+// ------------------------------------------------------------------
+
+export interface OwnArticleIn {
+  url: string;
+  title: string;
+  publish_date: string | null;
+}
+
+export interface OwnArticleOut {
+  id: number;
+  url: string;
+  title: string;
+  publish_date: string | null;
+  remind: boolean;
+  created_at: string;
+  cited: boolean;
+  cite_count: number;
+  cite_models: string[];
+  last_cited: string;
+}
+
+export interface OwnArticleListOut {
+  items: OwnArticleOut[];
+  total: number;
+}
+
+export type OwnArticleInvalidReason =
+  | "empty_url"
+  | "invalid_url"
+  | "duplicate_in_file";
+
+export interface OwnArticleInvalidRow {
+  row: number;
+  raw_url: string;
+  reason: OwnArticleInvalidReason;
+}
+
+export interface OwnArticleImportPreview {
+  entries: OwnArticleIn[];
+  new_urls: string[];
+  update_urls: string[];
+  invalid_rows: OwnArticleInvalidRow[];
+}
+
+export interface OwnArticleImportResult {
+  inserted: number;
+  updated: number;
+  skipped: number;
+  total_in_project: number;
+}
+
+export function getOwnArticles(
+  projectId: number,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
+): Promise<OwnArticleListOut> {
+  const { days, start, end, models, prompts } = params;
+  return client
+    .get<OwnArticleListOut>(`/projects/${projectId}/own-articles`, {
+      params: {
+        days,
+        start,
+        end,
+        ...(models && models.length ? { models: models.join(",") } : {}),
+        ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+      },
+    })
+    .then((r) => r.data);
+}
+
+function _postOwnArticlesFile(
+  projectId: number,
+  suffix: string,
+  file: File,
+): Promise<unknown> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return client
+    .post(`/projects/${projectId}/own-articles/${suffix}`, fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((r) => r.data);
+}
+
+export function previewOwnArticlesImport(
+  projectId: number,
+  file: File,
+): Promise<OwnArticleImportPreview> {
+  return _postOwnArticlesFile(projectId, "import/preview", file) as Promise<OwnArticleImportPreview>;
+}
+
+export function importOwnArticles(
+  projectId: number,
+  file: File,
+): Promise<OwnArticleImportResult> {
+  return _postOwnArticlesFile(projectId, "import", file) as Promise<OwnArticleImportResult>;
+}
+
+export function toggleOwnArticleRemind(
+  projectId: number,
+  articleId: number,
+): Promise<OwnArticleOut> {
+  return client
+    .post<OwnArticleOut>(
+      `/projects/${projectId}/own-articles/${articleId}/remind`,
+    )
+    .then((r) => r.data);
+}
+
+export function deleteOwnArticle(
+  projectId: number,
+  articleId: number,
+): Promise<void> {
+  return client.delete<void>(`/projects/${projectId}/own-articles/${articleId}`).then(() => undefined);
 }
 
 // ------------------------------------------------------------------
