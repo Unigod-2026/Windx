@@ -217,6 +217,18 @@ export interface PromptAnswerOut {
   answer_length: number;
   /** True when ``answer_content`` was truncated for this row. */
   truncated: boolean;
+  /** 自有品牌(``is_self=true``)在该回答里的位次 — 数据真源是 LLM 抽取返回的
+   *  ``raw.allRankings``,由后端 ``_find_competitor_rank`` 写入
+   *  ``BrandMention.rank_position``。UI 在 raw sub-tab 每张卡片底部显示
+   *  「品牌第 N 位」徽章。 */
+  self_rank: number | null;
+  /** LLM 抽取的自身品牌情感倾向:"positive" / "neutral" / "negative" / null。 */
+  self_sentiment: string | null;
+  /** 本回答里的全品牌排名(LLM ``raw.allRankings``)—— 数据真源在
+   *  ``geo_subtasks.raw_result_json`` 上,后端 list 端点一次性带回。UI 在 raw
+   *  sub-tab 每张卡片底部按 allRankings 顺序缩略展示,hover Tooltip 看完整
+   *  列表。无数据时为 null(抽取失败 / 平台未返回)。 */
+  all_rankings: Array<{ name: string; rank: number }> | null;
 }
 
 /** Single-subtask full payload, fetched on demand for 展开全部. Adds the
@@ -482,13 +494,36 @@ export const getTaskSubtasks = (projectId: number, taskId: string) =>
 export const listPromptAnswers = (
   projectId: number,
   promptId: number,
-  params: { days?: number; start?: string; end?: string; platform?: string; preview_chars?: number } = {},
-) =>
-  client
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    /** Legacy single-model filter (raw modelCode). Used by QuestionTab
+     *  查看原文 modal; 新代码请用 platforms. */
+    platform?: string;
+    /** Toolbar 「模型」多选 —— compound key 列表
+     *  (`<base>__<delivery>__<thinking>`,例 `deepseek__web__fast`)。
+     *  后端先按 platform_code SQL IN 收窄,再按 compound key 在 Python 里
+     *  post-filter(同 base 不同档位的子集)。传空数组 = 显式「筛 0 个」,
+     *  后端直接返回空集。 */
+    platforms?: string[];
+    preview_chars?: number;
+  } = {},
+) => {
+  const { platforms, ...rest } = params;
+  const queryParams: Record<string, unknown> = { ...rest };
+  if (platforms !== undefined) {
+    queryParams.platforms = platforms;
+  }
+  return client
     .get<PromptAnswerList>(`/projects/${projectId}/prompts/${promptId}/answers`, {
-      params,
+      params: queryParams,
+      paramsSerializer: {
+        indexes: null, // axios ≥1.x: 序列化成 ?platforms=a&platforms=b
+      },
     })
     .then((r) => r.data);
+};
 
 /** Single-subtask full payload, fetched when the operator opens
  *  展开全部 on a list-row card. Returns the untruncated ``answer_content``,

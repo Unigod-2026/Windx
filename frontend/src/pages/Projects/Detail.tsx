@@ -7,6 +7,7 @@ import OverviewTab from "./OverviewTab";
 import QuestionTab from "./QuestionTab";
 import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
+import AnswerTab from "./AnswerTab";
 import PlaceholderTab from "./PlaceholderTab";
 import SelfArticles from "./sourcePreferences/SelfArticles";
 import SourcePreferencesTab from "./SourcePreferencesTab";
@@ -115,12 +116,7 @@ export default function ProjectDetail() {
       case "citation":
         return <CitationAnalysisTab projectId={projectId} />;
       case "answer":
-        return (
-          <PlaceholderTab
-            title="AI 回答详情"
-            hint="按 (问题, 模型) 维度查看 AI 原始回答内容"
-          />
-        );
+        return <AnswerTab projectId={projectId} />;
       case "edit":
         return <EditProjectTab projectId={projectId} />;
       case "settings":

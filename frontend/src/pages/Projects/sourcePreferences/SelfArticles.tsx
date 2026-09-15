@@ -29,25 +29,12 @@ import {
   type OwnArticleOut,
   type ProjectPlatform,
 } from "../../../api/projects";
-import { rowKeyOfPlatform } from "../platforms";
+import { platformColor, platformLabel, rowKeyOfPlatform } from "../platforms";
 import { useToolbarFilter } from "../../../components/ToolbarFilterContext";
 import OwnArticlesImportModal from "../../../components/OwnArticlesImportModal";
 
 interface Props {
   projectId: number;
-}
-
-const MODEL_COLOR: Record<string, string> = {
-  deepseek: "blue",
-  doubao: "magenta",
-  kimi: "geekblue",
-  yuanbao: "purple",
-  qianwen: "volcano",
-  wenxinyiyan: "red",
-};
-
-function modelColor(platform: string): string {
-  return MODEL_COLOR[platform] ?? "default";
 }
 
 export default function SelfArticles({ projectId }: Props) {
@@ -124,14 +111,19 @@ export default function SelfArticles({ projectId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, toolbar.version, effectiveModels, dateKey, promptsKey]);
 
-  const handleToggleRemind = async (record: OwnArticleOut) => {
-    try {
-      const next = await toggleOwnArticleRemind(projectId, record.id);
-      setItems((prev) => prev.map((it) => (it.id === next.id ? next : it)));
-      message.success(next.remind ? "已开启引用提醒" : "已关闭引用提醒");
-    } catch (err) {
-      message.error((err as Error).message || "操作失败");
-    }
+  const handleToggleRemind = (record: OwnArticleOut) => {
+    const nextRemind = !record.remind;
+    // 乐观更新:立即翻转本地 boolean,不弹 toast、不重算引用次数/模型
+    setItems((prev) =>
+      prev.map((it) => (it.id === record.id ? { ...it, remind: nextRemind } : it)),
+    );
+    // 后台 fire-and-forget 持久化;失败回滚到原值,仅 console 告警
+    toggleOwnArticleRemind(projectId, record.id).catch((err: Error) => {
+      console.warn("toggle own-article remind failed", err);
+      setItems((prev) =>
+        prev.map((it) => (it.id === record.id ? { ...it, remind: record.remind } : it)),
+      );
+    });
   };
 
   const columns = useMemo<ColumnsType<OwnArticleOut>>(
@@ -206,8 +198,8 @@ export default function SelfArticles({ projectId }: Props) {
           models.length > 0 ? (
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
               {models.map((m) => (
-                <Tag key={m} color={modelColor(m)} style={{ margin: 0 }}>
-                  {m}
+                <Tag key={m} color={platformColor(m)} style={{ margin: 0 }}>
+                  {platformLabel(m)}
                 </Tag>
               ))}
             </div>

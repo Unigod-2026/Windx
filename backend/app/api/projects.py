@@ -62,6 +62,8 @@ from app.services.competitor_analysis import (
     compute_competitor_analysis,
 )
 from app.services.source_preferences import (
+    _compound_platform,
+    _expand_platform_keys,
     compute_source_detail,
     compute_source_preferences,
     compute_source_self,
@@ -1739,6 +1741,7 @@ def list_prompt_answers(
     start: date | None = None,
     end: date | None = None,
     platform: str | None = None,
+    platforms: list[str] | None = Query(default=None),
     preview_chars: int = 200,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
@@ -1753,9 +1756,15 @@ def list_prompt_answers(
     ``created_local_at`` — same semantics as the overview endpoint — so
     ``start``/``end`` win over ``days``.
 
-    ``platform`` narrows the result to a single AI model — used by the
-    查看原文 modal so clicking a row in the 模型对比 table only shows
-    that model's answers, not the union across all platforms.
+    ``platform`` narrows the result to a single AI model — legacy single-
+    model filter, kept for the QuestionTab 查看原文 modal. ``platforms``
+    accepts a list of compound keys (``<base>__<delivery>__<thinking>``)
+    from the GlobalToolbar 「模型」dropdown, applied via the same
+    ``_expand_platform_keys`` / compound-key post-filter pipeline as
+    source-preferences so the 答案质量分析 page sees exactly the same
+    slice the user selected. The two filters compose: ``platform`` is
+    applied as a strict equality, then ``platforms`` narrows further if
+    provided.
 
     The list intentionally omits the heavy fields (full ``answer_content``
     text, ``page_screenshot`` base64, all structured-payload JSON). Each
@@ -1814,6 +1823,21 @@ def list_prompt_answers(
     )
     if platform is not None:
         base_stmt = base_stmt.where(Subtask.platform == platform)
+    # Toolbar compound-key filter: SQL narrows by ``platform_code`` so we
+    # don't pull every subtask just to drop most of them in Python. The
+    # compound-key post-filter below handles the (base, delivery, thinking)
+    # granularity — e.g. user勾了 web+fast 但同 base 也有 web+think 行
+    # 时,后者 SQL 仍会被拉进来,要在 Python 里再过一刀。
+    selected_compound_keys: set[str] | None = None
+    if platforms is not None:
+        platform_codes = _expand_platform_keys(platforms)
+        if platform_codes:
+            base_stmt = base_stmt.where(Subtask.platform.in_(platform_codes))
+        # Empty list = "filter to nothing" (no platform selected in toolbar);
+        # short-circuit so the caller doesn't waste a round-trip.
+        elif not platforms:
+            return PromptAnswerListOut(items=[], total=0)
+        selected_compound_keys = set(platforms)
     # Sort key + id first so MySQL can sort on a tiny row, then re-fetch
     # the rest by id. Selecting every JSON / page_screenshot /
     # answer_content straight into the sort buffer blew past the server's
@@ -1823,9 +1847,16 @@ def list_prompt_answers(
         base_stmt.with_only_columns(
             Subtask.subtask_id,
             Subtask.task_id,
+            Subtask.platform,
+            Subtask.mode,
             Task.created_local_at,
         ).order_by(Task.created_local_at.desc(), Subtask.subtask_id)
     ).all()
+    if selected_compound_keys is not None:
+        sort_rows = [
+            r for r in sort_rows
+            if _compound_platform(r.platform, r.mode) in selected_compound_keys
+        ]
     if not sort_rows:
         return PromptAnswerListOut(items=[], total=0)
     sub_ids = [r.subtask_id for r in sort_rows]
@@ -1843,15 +1874,40 @@ def list_prompt_answers(
             Subtask.status,
             Subtask.answer_content,
             Subtask.error_message,
+            # ``raw_result_json.allRankings`` 是本回答里的全品牌排名列表 —— 数据
+            # 真源在 subtask 行上(``BrandMention.raw_extraction`` 只存派生 payload,
+            # 不带 allRankings),所以 list 端点一并带回。前端卡片底部按顺序缩略展示,
+            # hover Tooltip 看完整列表。
+            Subtask.raw_result_json,
         ).where(Subtask.subtask_id.in_(sub_ids))
     ).all()
     light_by_sub = {r.subtask_id: r for r in light_rows}
+    # Pull the project's own-brand mention (is_self=true) for every subtask
+    # in the window. ``rank_position`` was written by ``_find_competitor_rank``
+    # (extraction.py) from LLM ``raw.allRankings``; ``sentiment`` is the
+    # LLM-emitted polarity. One SQL roundtrip keeps the list endpoint cheap.
+    self_mentions = db.execute(
+        select(
+            BrandMention.subtask_id,
+            BrandMention.rank_position,
+            BrandMention.sentiment,
+        ).where(
+            BrandMention.subtask_id.in_(sub_ids),
+            BrandMention.is_self.is_(True),
+        )
+    ).all()
+    self_by_sub: dict[str, object] = {
+        m.subtask_id: m for m in self_mentions
+    }
     items = [
         _build_preview_answer(
             sid=sid,
             row=light_by_sub[sid],
             created_local_at=created_at_by_sub[sid],
             preview_chars=preview_chars,
+            self_rank=getattr(self_by_sub.get(sid), "rank_position", None),
+            self_sentiment=getattr(self_by_sub.get(sid), "sentiment", None),
+            all_rankings=_extract_all_rankings(light_by_sub[sid].raw_result_json),
         )
         for sid in sub_ids
     ]
@@ -1864,10 +1920,17 @@ def _build_preview_answer(
     row,
     created_local_at,
     preview_chars: int,
+    self_rank: int | None = None,
+    self_sentiment: str | None = None,
+    all_rankings: list[dict] | None = None,
 ) -> "PromptAnswerOut":
     """Slice ``answer_content`` to ``preview_chars`` and emit a list-row
     schema. We keep the original length in ``answer_length`` so the UI
     can render the 展开全部 (N 字) affordance without a second fetch.
+    ``self_rank`` / ``self_sentiment`` are pulled from the project's own-
+    brand mention row for this subtask (see list_prompt_answers above).
+    ``all_rankings`` comes straight from ``Subtask.raw_result_json`` so
+    the UI can show the full brand ranking list per answer.
     """
     full_text = row.answer_content or ""
     length = len(full_text)
@@ -1888,7 +1951,37 @@ def _build_preview_answer(
         truncated=truncated,
         error_message=row.error_message,
         created_local_at=created_local_at,
+        self_rank=self_rank,
+        self_sentiment=self_sentiment,
+        all_rankings=all_rankings,
     )
+
+
+def _extract_all_rankings(raw_result_json: object) -> list[dict] | None:
+    """Return ``raw_result_json.allRankings`` if it's a list of {name, rank}
+    dicts; otherwise ``None``.
+
+    ``Subtask.raw_result_json`` holds the verbatim LLM extraction payload;
+    the platform-facing schema isn't 100% consistent (some platforms wrap
+    ``allRankings`` differently, some omit it for failed runs), so we
+    defensively normalise here. We only keep entries that look like
+    ``{"name": str, "rank": int > 0}`` — anything else is silently dropped
+    so the UI never renders junk like ``None`` or non-dict rows.
+    """
+    if not isinstance(raw_result_json, dict):
+        return None
+    rows = raw_result_json.get("allRankings")
+    if not isinstance(rows, list):
+        return None
+    out: list[dict] = []
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        rank = entry.get("rank")
+        if isinstance(name, str) and name.strip() and isinstance(rank, int) and rank > 0:
+            out.append({"name": name.strip(), "rank": rank})
+    return out or None
 
 
 @router.get(

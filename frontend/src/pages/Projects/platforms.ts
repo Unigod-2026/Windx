@@ -96,6 +96,39 @@ export function parseOverviewKey(raw: string):
   return { code: m[1], delivery: m[2] as "web" | "mobile", thinking: m[3] as "fast" | "think" };
 }
 
+/** ``Subtask`` 直出的 ``(platform, mode)`` → compound key,与后端
+ *  ``_compound_platform`` 同款逻辑(见 backend source_preferences.py)。
+ *  ``Subtask.platform`` 是 raw ``platform_code``(mobile 档带 ``_mobile`` 后缀),
+ *  ``mode`` 是 Molizhishu 直返回的 ``search`` / ``reasoning_search`` / ``web`` 等。
+ *  喂给 ``platformLabel`` 即可走 compound 路径渲染成「千问-网页-快速」对齐
+ *  docs/模型名字.txt —— 不再用 fallback 路径输出「千问 网页版 · search」。 */
+export function compoundKeyFor(
+  platform: string | null | undefined,
+  mode: string | null | undefined,
+): string {
+  const raw = platform || "unknown";
+  const delivery: "web" | "mobile" = raw.endsWith("_mobile") ? "mobile" : "web";
+  const base = delivery === "mobile" ? raw.slice(0, -"_mobile".length) : raw;
+  const thinking: "fast" | "think" = mode === "reasoning_search" ? "think" : "fast";
+  return `${base}__${delivery}__${thinking}`;
+}
+
+/** 只取模型中文/英文展示名(不含「-网页版-快速」后缀),跟「终端 / 模式」
+ *  chip 配合使用 —— 头部已经是「网页版」「快速」chip,就不再在标题文本里
+ *  重复同样的 -网页-快速 后缀,避免视觉冗余。找不到时回退 raw code。 */
+export function modelNameFor(
+  platform: string | null | undefined,
+  mode: string | null | undefined,
+): string {
+  const compound = parseOverviewKey(compoundKeyFor(platform, mode));
+  const code = compound?.code ?? platform ?? "?";
+  const w = wizardByCode(code);
+  if (w) return w.entry.name;
+  const meta = platformMeta(code);
+  if (meta) return meta.name;
+  return code;
+}
+
 /** ``ProjectPlatform`` row → compound key,与后端 ``_compound_platform`` 拼出的
  *  key 完全一致(``${base}__${delivery}__${thinking}``,其中 ``base`` 是剥掉
  *  ``_mobile`` 后缀的 ``platform_code``)。GlobalToolbar 拼 dropdown 选项、

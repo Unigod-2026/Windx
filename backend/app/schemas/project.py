@@ -525,6 +525,19 @@ class PromptAnswerOut(BaseModel):
     answer_content: str | None = None
     answer_length: int = 0
     truncated: bool = False
+    # 自有品牌(``BrandMention.is_self=true``)在该回答里的位次 + 情感 —— 数据真源
+    # 是 LLM 抽取返回的 ``raw.allRankings``(后端 ``_find_competitor_rank`` 把 self
+    # brand 在所有 allRankings 里的 rank 写到 ``BrandMention.rank_position``),UI 在
+    # raw sub-tab 每张卡片底部显示「品牌第 N 位」徽章 + 「情感倾向」tag。两条都
+    # 由后端 join ``geo_brand_mentions`` 一次带回,前端不单独发请求。
+    self_rank: int | None = None
+    self_sentiment: str | None = None
+    # 本回答里所有被提及的品牌(LLM ``raw.allRankings`` 抽取返回的全集),数据
+    # 真源是 ``geo_subtasks.raw_result_json.allRankings`` —— 该字段未被落进
+    # ``BrandMention.raw_extraction``(后者只存派生 payload),所以这里直接
+    # 从 subtask 行读。前端 raw sub-tab 每张卡片底部按 allRankings 顺序缩
+    # 略一行展示,hover 时 antd Tooltip 显示完整品牌列表。
+    all_rankings: list[dict[str, Any]] | None = None
 
 
 class PromptAnswerDetailOut(PromptAnswerOut):

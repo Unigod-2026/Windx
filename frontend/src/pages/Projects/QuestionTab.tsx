@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { Empty, Modal, Skeleton, Spin, Tag, message } from "antd";
 import { LinkOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
@@ -30,6 +28,7 @@ import {
 import { cachedFetch, cacheKey } from "./questionTabCache";
 import { parseOverviewKey, platformColor, platformLabel } from "./platforms";
 import { useToolbarFilter } from "../../components/ToolbarFilterContext";
+import { buildHighlightGroups, renderAnswerHtml, type HighlightGroup } from "../../utils/answerHtml";
 
 interface Props {
   projectId: number;
@@ -111,19 +110,6 @@ function num(v: number): string {
   return v.toLocaleString("zh-CN");
 }
 
-interface HighlightGroup {
-  /** Tokens to highlight with this group. Order is irrelevant; the
-   *  regex picks the first match at any given position. Tokens that
-   *  are empty / whitespace-only are dropped up front. */
-  tokens: string[];
-  /** CSS class applied to <span> wrappers around each match. */
-  cls: string;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * Wrap tokens from successive groups with class-bearing spans.
  *
@@ -131,6 +117,10 @@ function escapeRegex(s: string): string {
  * an earlier (higher-priority) group won't be re-matched by a later
  * one. The order in ``groups`` is therefore the visual priority:
  * 监控品牌 > 竞争品牌 > 关键词.
+ *
+ * 不导出到 utils:此函数返回 ReactNode,只用于卡片内的轻量预览(不走
+ * dangerouslySetInnerHTML);大段渲染走 utils 的 ``renderAnswerHtml``。
+ * QuestionTab 这里继续自维护,避免 utils 引入 React 依赖。
  */
 function highlightText(text: string, groups: HighlightGroup[]): ReactNode {
   if (!text) return text;
@@ -138,7 +128,10 @@ function highlightText(text: string, groups: HighlightGroup[]): ReactNode {
   if (usable.length === 0) return text;
   let parts: (string | ReactNode)[] = [text];
   usable.forEach((g, gi) => {
-    const re = new RegExp(`(${g.tokens.map(escapeRegex).join("|")})`, "g");
+    const re = new RegExp(
+      `(${g.tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+      "g",
+    );
     const next: (string | ReactNode)[] = [];
     parts.forEach((p, pi) => {
       if (typeof p !== "string") {
@@ -161,61 +154,6 @@ function highlightText(text: string, groups: HighlightGroup[]): ReactNode {
     parts = next;
   });
   return parts;
-}
-
-/** Token placeholder: a single private-use-area Unicode char that the
- *  upstream Markdown parser (marked) treats as ordinary text. We use
- *  this to stash each highlighted token's position in the source string
- *  while the Markdown parser is running, then swap the placeholder back
- *  out for a ``<span class="hl-...">`` wrapper in the produced HTML.
- *
- *  Inserting the ``<span>`` *before* ``marked.parse`` would break the
- *  parser's ``**...**`` strong-em delimiter pairing — a token sitting
- *  between two ``**`` markers (e.g. ``**伊速达**``) would get its span
- *  cut in half and the surrounding bold markup would swallow adjacent
- *  prose. The placeholder sidesteps that entirely. */
-const HL_PLACEHOLDER = "";
-
-/** Render ``answer_content`` (mixed Markdown + HTML from the upstream
- *  LLM) into a sanitized HTML string suitable for
- *  ``dangerouslySetInnerHTML``. Pipeline:
- *
- *  1. Walk ``groups`` in priority order (hl-self > hl-competitor >
- *     hl-keyword) and swap each token for a private-use Unicode
- *     placeholder, recording its class. Tokens already replaced are
- *     not re-matched because the placeholder isn't a token.
- *  2. ``marked.parse`` turns the Markdown into HTML; placeholders are
- *     ordinary characters so ``**`` / ``##`` / etc. delimiters pair
- *     cleanly across token boundaries.
- *  3. Swap placeholders back out for ``<span class="hl-...">`` wrappers
- *     in the produced HTML. Order doesn't matter here because each
- *     placeholder is unique.
- *  4. ``DOMPurify.sanitize`` strips anything dangerous (``<script>``,
- *     ``on*`` handlers, ``javascript:`` URLs) but keeps ``<span>``,
- *     ``<table>``, ``<ul>``, ``<blockquote>``, and yuanbao's
- *     ``<div class="media-*">`` video cards.
- */
-function renderAnswerHtml(content: string, groups: HighlightGroup[]): string {
-  const usable = groups.filter((g) => g.tokens.length > 0);
-  if (!content || usable.length === 0) {
-    return DOMPurify.sanitize(marked.parse(content) as string);
-  }
-  const tokens: Array<{ token: string; cls: string }> = [];
-  let pre = content;
-  usable.forEach((g) => {
-    const re = new RegExp(`(${g.tokens.map(escapeRegex).join("|")})`, "g");
-    pre = pre.replace(re, (match) => {
-      const idx = tokens.length;
-      tokens.push({ token: match, cls: g.cls });
-      return `${HL_PLACEHOLDER}${idx}${HL_PLACEHOLDER}`;
-    });
-  });
-  let html = marked.parse(pre) as string;
-  tokens.forEach((entry, i) => {
-    const ph = `${HL_PLACEHOLDER}${i}${HL_PLACEHOLDER}`;
-    html = html.split(ph).join(`<span class="${entry.cls}">${entry.token}</span>`);
-  });
-  return DOMPurify.sanitize(html);
 }
 
 const PREVIEW_CHARS = 100;
@@ -674,45 +612,18 @@ export default function QuestionTab({ projectId, detail }: Props) {
   }, [competitorDetail, selected]);
 
   // Tokens used by the 查看原文 modal to colour-code brand / competitor /
-  // keyword hits in the answer body. Order is the visual priority.
-  const highlightGroups = useMemo<HighlightGroup[]>(() => {
-    const cleanTokens = (xs: Array<string | null | undefined>): string[] => {
-      const out: string[] = [];
-      const seen = new Set<string>();
-      xs.forEach((x) => {
-        if (!x) return;
-        const t = x.trim();
-        if (!t) return;
-        const k = t.toLowerCase();
-        if (seen.has(k)) return;
-        seen.add(k);
-        out.push(t);
-      });
-      return out;
-    };
-    const groups: HighlightGroup[] = [];
-    const selfTokens = cleanTokens([
-      detail?.brand ?? null,
-      ...(detail?.aliases ?? []),
-    ]);
-    if (selfTokens.length > 0) {
-      groups.push({ tokens: selfTokens, cls: "hl-self" });
-    }
-    const competitorTokens: string[] = [];
-    competitors.forEach((c) => {
-      if (c.name) competitorTokens.push(c.name);
-      (c.aliases ?? []).forEach((a) => a && competitorTokens.push(a));
-    });
-    const compClean = cleanTokens(competitorTokens);
-    if (compClean.length > 0) {
-      groups.push({ tokens: compClean, cls: "hl-competitor" });
-    }
-    const kwClean = cleanTokens(detail?.keywords ?? []);
-    if (kwClean.length > 0) {
-      groups.push({ tokens: kwClean, cls: "hl-keyword" });
-    }
-    return groups;
-  }, [detail, competitors]);
+  // keyword hits in the answer body. Delegates to ``buildHighlightGroups``
+  // in utils/answerHtml so 答案质量分析 sub-tab 走同一份 priority 排序。
+  const highlightGroups = useMemo<HighlightGroup[]>(
+    () =>
+      buildHighlightGroups({
+        selfBrand: detail?.brand,
+        selfAliases: detail?.aliases,
+        competitors: competitors.map((c) => ({ name: c.name, aliases: c.aliases })),
+        keywords: detail?.keywords,
+      }),
+    [detail, competitors],
+  );
 
   // Answers modal — opened from each model row's "查看原文" link. The modal
   // fetches on demand (not preloaded) so the listing isn't held open while
