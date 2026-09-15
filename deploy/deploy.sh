@@ -70,8 +70,8 @@ fi
 # 若该文件不存在,fall back 到「假设 windx-backend 已经在 PM2 里注册」的
 # reloadOrRestart(命令式,适合手动 pm2 start 起来的进程)。
 if [[ -f deploy/pm2.ecosystem.config.cjs && -f deploy/start-backend.sh ]]; then
-  echo "==> pm2 reloadOrStart (ecosystem)"
-  pm2 reloadOrStart deploy/pm2.ecosystem.config.cjs
+  echo "==> pm2 reloadOrRestart (ecosystem)"
+  pm2 reloadOrRestart deploy/pm2.ecosystem.config.cjs
 elif command -v pm2 >/dev/null && pm2 describe windx-backend >/dev/null 2>&1; then
   echo "==> pm2 reloadOrRestart windx-backend"
   pm2 reloadOrRestart windx-backend
