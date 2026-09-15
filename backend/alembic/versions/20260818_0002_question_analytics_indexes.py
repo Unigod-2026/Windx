@@ -1,7 +1,7 @@
 """question analytics 索引
 
 Revision ID: 20260818_0002
-Revises: 20260818_0001
+Revises: 20260815_0002
 Create Date: 2026-08-18
 
 为问题提及分析按需加载加速(question analytics lazy loading):
@@ -23,7 +23,7 @@ from alembic import op
 
 
 revision = "20260818_0002"
-down_revision = "20260818_0001"
+down_revision = "20260815_0002"
 branch_labels = None
 depends_on = None
 
