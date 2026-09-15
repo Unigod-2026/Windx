@@ -18,6 +18,17 @@
 
 set -euo pipefail
 
+# sudo 重置 PATH 到 /usr/bin:/bin,丢掉 uv (通常在 ~/.local/bin) 和
+# pm2 (npm 全局装的)。显式补回常见 bin 目录,无论 sudo / sudo -E 都能找到。
+for p in \
+  "$HOME/.local/bin" \
+  "/usr/local/bin" \
+  "/usr/local/lib/node_modules/bin" \
+  "/usr/lib/node_modules/bin"; do
+  [[ -d "$p" ]] && PATH="$p:$PATH"
+done
+export PATH
+
 # REPO_ROOT 默认 = 脚本父目录的父目录(也就是仓库根)。
 # `cd dirname` 反推,不依赖固定 /opt/windx 路径,本地 / 任意部署目录都能用。
 # 仍可通过 REPO_ROOT=... 显式覆盖。
