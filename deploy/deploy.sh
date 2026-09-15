@@ -85,10 +85,26 @@ fi
 # reloadOrRestart(命令式,适合手动 pm2 start 起来的进程)。
 if [[ -f deploy/pm2.ecosystem.config.cjs && -f deploy/start-backend.sh ]]; then
   echo "==> pm2 reloadOrRestart (ecosystem)"
-  pm2 reloadOrRestart deploy/pm2.ecosystem.config.cjs
+  if ! pm2 reloadOrRestart deploy/pm2.ecosystem.config.cjs 2>&1 | tee /tmp/windx-pm2.log; then
+    # 老版本 pm2 (通常 < 5.x) 没有 reloadOrRestart 命令 —— fallback 到
+    # restart。restart 是 PM2 一直就有的命令,任何版本都支持。
+    if grep -q "Command not found" /tmp/windx-pm2.log; then
+      echo "==> pm2 reloadOrRestart not supported, falling back to restart"
+      pm2 restart deploy/pm2.ecosystem.config.cjs
+    else
+      exit 1
+    fi
+  fi
 elif command -v pm2 >/dev/null && pm2 describe windx-backend >/dev/null 2>&1; then
   echo "==> pm2 reloadOrRestart windx-backend"
-  pm2 reloadOrRestart windx-backend
+  if ! pm2 reloadOrRestart windx-backend 2>&1 | tee /tmp/windx-pm2.log; then
+    if grep -q "Command not found" /tmp/windx-pm2.log; then
+      echo "==> pm2 reloadOrRestart not supported, falling back to restart"
+      pm2 restart windx-backend
+    else
+      exit 1
+    fi
+  fi
 else
   echo "==> no pm2 process 'windx-backend' registered; skip"
   echo "    bootstrap with: pm2 start <ecosystem or script>"
