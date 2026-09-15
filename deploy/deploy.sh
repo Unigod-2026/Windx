@@ -18,10 +18,13 @@
 
 set -euo pipefail
 
-# sudo 重置 PATH 到 /usr/bin:/bin,丢掉 uv (通常在 ~/.local/bin) 和
-# pm2 (npm 全局装的)。显式补回常见 bin 目录,无论 sudo / sudo -E 都能找到。
+# sudo 重置 PATH 到 /usr/bin:/bin,且把 $HOME 指向 /root —— 直接用
+# $HOME/.local/bin 会找不到 ubuntu 用户的 uv。Hardcode /home/ubuntu
+# 是因为本机 PM2 / uv 都装在 ubuntu 下,部署脚本也只在这台机器跑。
+# 如果哪天换部署用户,这里要跟着改。
 for p in \
-  "$HOME/.local/bin" \
+  "/home/ubuntu/.local/bin" \
+  "/home/ubuntu/.npm-global/bin" \
   "/usr/local/bin" \
   "/usr/local/lib/node_modules/bin" \
   "/usr/lib/node_modules/bin"; do
