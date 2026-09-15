@@ -120,6 +120,24 @@ if [[ -f deploy/nginx.conf ]]; then
   if (( EUID == 0 )) || sudo -n true 2>/dev/null; then
     SUDO=""
     [[ $EUID -ne 0 ]] && SUDO="sudo"
+
+    # 自签证书(nginx.conf 指向 /etc/ssl/{certs,private}/windx-selfsigned.{crt,key})。
+    # 已存在就跳过 —— 这样续期不会覆盖掉用户之后换成 Let's Encrypt 的真证书。
+    if [[ ! -f /etc/ssl/certs/windx-selfsigned.crt ]] || [[ ! -f /etc/ssl/private/windx-selfsigned.key ]]; then
+      echo "==> generate self-signed cert"
+      $SUDO openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout /etc/ssl/private/windx-selfsigned.key \
+        -out /etc/ssl/certs/windx-selfsigned.crt \
+        -subj "/CN=106.52.233.226" 2>&1 | tail -3
+      $SUDO chmod 600 /etc/ssl/private/windx-selfsigned.key
+    fi
+
+    # nginx 自带的 default site 可能占了 80/443 —— 移走避免跟 windx 冲突。
+    if [[ -f /etc/nginx/sites-enabled/default ]]; then
+      echo "==> disable nginx default site"
+      $SUDO rm -f /etc/nginx/sites-enabled/default
+    fi
+
     echo "==> install nginx site"
     $SUDO install -m 0644 deploy/nginx.conf /etc/nginx/sites-available/windx.conf
     $SUDO ln -sf /etc/nginx/sites-available/windx.conf /etc/nginx/sites-enabled/windx.conf
@@ -135,12 +153,15 @@ fi
 
 # --- 6. smoke check -----------------------------------------------------
 sleep 3
-if curl -fsS http://localhost/health >/dev/null; then
-  echo "==> OK  http://localhost/health"
+# /healthz 走 nginx 反代到后端 /health,验证「nginx + TLS + 反代 + uvicorn」
+# 完整链路。直接打 443,nginx 配的 listen 443 ssl default_server 会响应。
+if curl -fksS https://localhost/healthz >/dev/null; then
+  echo "==> OK  https://localhost/healthz (nginx + TLS + backend)"
 else
-  echo "==> health failed,排查:" >&2
+  echo "==> healthz failed,排查:" >&2
   echo "    pm2 status                  # 进程在不在" >&2
   echo "    pm2 logs windx-backend --lines 50  # 后端日志" >&2
+  echo "    nginx 没装?curl -k https://localhost/healthz 直打 nginx" >&2
   echo "    nginx 没装?curl http://localhost:18083/health 直打后端" >&2
   exit 1
 fi
