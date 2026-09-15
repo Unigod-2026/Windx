@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # 服务器端部署脚本 —— 增量更新 windx 到生产。
-# 首次部署需要先做一次 bootstrap(创建 systemd unit / nginx site / .env),
+# 后端进程用 PM2 管(不放 systemd),nginx 仍走 sites-enabled。
+# 首次部署需要先 bootstrap:装 nginx + pm2 register windx-backend,
 # 之后每次代码更新跑这个就行。
 #
 # 前置:
 #   - 仓库克隆在任意目录(脚本会从自身路径反推仓库根)
 #   - .env 已填好真值在 $REPO_ROOT/.env
-#   - uv / node / nginx / mysql-client 已装
-#   - 有 sudo 权限(systemctl / nginx reload)
-#   - 首次跑过 deploy/bootstrap.sh(创建了 /etc/systemd/system/windx-backend.service
-#     和 /etc/nginx/sites-available/windx.conf)
+#   - uv / node / nginx / pm2 / mysql-client 已装
+#   - 首次跑过 deploy/bootstrap.sh(创建了 nginx site + pm2 注册 windx-backend)
 #
 # 用法:
-#   sudo ./deploy/deploy.sh
-#   REPO_ROOT=/custom/path ./deploy/deploy.sh --skip-build   # 只更后端
+#   ./deploy/deploy.sh
+#   ./deploy/deploy.sh --skip-build   # 只更后端
+#   ./deploy/deploy.sh --skip-migrate # 跳过 alembic 升级
 #   ./deploy/deploy.sh --help
 
 set -euo pipefail
@@ -64,17 +64,20 @@ if [[ $SKIP_FRONTEND -eq 0 ]]; then
   (cd frontend && npm ci && npm run build)
 fi
 
-# --- 4. 重新加载 systemd unit + nginx(配置变了才需要) -----------------
-# 这两个 if 既是「install」也是「restart」的开关 —— unit 文件不存在时,
-# 跳过 install 也跳过 restart(否则 systemctl 找不到 unit 会问 sudo 密码,
-# 首次部署会卡住)。
-if [[ -f deploy/windx-backend.service ]]; then
-  echo "==> install systemd unit"
-  install -m 0644 deploy/windx-backend.service /etc/systemd/system/windx-backend.service
-  systemctl daemon-reload
-  systemctl enable --now windx-backend
-  echo "==> restart windx-backend"
-  systemctl restart windx-backend
+# --- 4. 重启后端(PM2)+ reload nginx ---------------------------------
+# 后端走 PM2 而非 systemd —— 本机以 ubuntu 用户跑 pm2 daemon,不需要 root。
+# 优先用 deploy/pm2.ecosystem.config.cjs + start-backend.sh(声明式),
+# 若该文件不存在,fall back 到「假设 windx-backend 已经在 PM2 里注册」的
+# reloadOrRestart(命令式,适合手动 pm2 start 起来的进程)。
+if [[ -f deploy/pm2.ecosystem.config.cjs && -f deploy/start-backend.sh ]]; then
+  echo "==> pm2 reloadOrStart (ecosystem)"
+  pm2 reloadOrStart deploy/pm2.ecosystem.config.cjs
+elif command -v pm2 >/dev/null && pm2 describe windx-backend >/dev/null 2>&1; then
+  echo "==> pm2 reloadOrRestart windx-backend"
+  pm2 reloadOrRestart windx-backend
+else
+  echo "==> no pm2 process 'windx-backend' registered; skip"
+  echo "    bootstrap with: pm2 start <ecosystem or script>"
 fi
 if [[ -f deploy/nginx.conf ]]; then
   echo "==> install nginx site"
