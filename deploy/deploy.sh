@@ -80,10 +80,23 @@ else
   echo "    bootstrap with: pm2 start <ecosystem or script>"
 fi
 if [[ -f deploy/nginx.conf ]]; then
-  echo "==> install nginx site"
-  install -m 0644 deploy/nginx.conf /etc/nginx/sites-available/windx.conf
-  ln -sf /etc/nginx/sites-available/windx.conf /etc/nginx/sites-enabled/windx.conf
-  nginx -t && systemctl reload nginx
+  # nginx install / reload 需要 root。脚本整体以普通用户跑(PM2 daemon 属
+  # ubuntu),所以这一步要么 sudo 整段跑、要么已经装过就跳过 reload。
+  # sudo -n true:无密码 sudo 才能继续;有密码 sudo 会卡在询问上。
+  if (( EUID == 0 )) || sudo -n true 2>/dev/null; then
+    SUDO=""
+    [[ $EUID -ne 0 ]] && SUDO="sudo"
+    echo "==> install nginx site"
+    $SUDO install -m 0644 deploy/nginx.conf /etc/nginx/sites-available/windx.conf
+    $SUDO ln -sf /etc/nginx/sites-available/windx.conf /etc/nginx/sites-enabled/windx.conf
+    $SUDO nginx -t && $SUDO systemctl reload nginx
+  else
+    echo "==> nginx install skipped (no root / passwordless sudo)"
+    echo "    改用: sudo ./deploy/deploy.sh 重跑,或手动:"
+    echo "      sudo cp deploy/nginx.conf /etc/nginx/sites-available/windx.conf"
+    echo "      sudo ln -sf /etc/nginx/sites-available/windx.conf /etc/nginx/sites-enabled/windx.conf"
+    echo "      sudo nginx -t && sudo systemctl reload nginx"
+  fi
 fi
 
 # --- 6. smoke check -----------------------------------------------------
@@ -91,6 +104,9 @@ sleep 3
 if curl -fsS http://localhost/healthz >/dev/null; then
   echo "==> OK  http://localhost/healthz"
 else
-  echo "==> healthz failed,看日志:journalctl -u windx-backend -n 50" >&2
+  echo "==> healthz failed,排查:" >&2
+  echo "    pm2 status                  # 进程在不在" >&2
+  echo "    pm2 logs windx-backend --lines 50  # 后端日志" >&2
+  echo "    nginx 没装?curl http://localhost:18083/healthz 直打后端" >&2
   exit 1
 fi
