@@ -25,9 +25,11 @@ export default function ProjectSwitcher({ currentId, variant = "inline" }: Props
     let cancelled = false;
     (async () => {
       try {
+        // 只拉 status=active —— 侧栏「当前项目」选择器不允许切到已停用 / 待审 /
+        // 已驳回的项目(那些走「监控项目」列表页 + 单独的 PendingProjects 入口)。
         // First page is enough for the dropdown — projects typically
         // number in the tens, not thousands.
-        const data = await listProjects({ page: 1, size: 200 });
+        const data = await listProjects({ page: 1, size: 200, status: "active" });
         if (!cancelled) setAll(data.items);
       } catch (err) {
         message.error((err as Error).message || "项目列表加载失败");
@@ -58,11 +60,6 @@ export default function ProjectSwitcher({ currentId, variant = "inline" }: Props
           <div style={{ fontWeight: 500 }}>{p.name}</div>
           <div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
             {p.code}
-            {p.status === "disabled" && (
-              <span style={{ marginLeft: 8, color: "var(--text-quaternary)" }}>
-                已停用
-              </span>
-            )}
           </div>
         </div>
       ),
@@ -120,7 +117,7 @@ export default function ProjectSwitcher({ currentId, variant = "inline" }: Props
                     fontSize: 13,
                   }}
                 >
-                  无匹配项目
+                  {keyword.trim() ? "无匹配项目" : "暂无可用项目"}
                 </div>
               ) : (
                 filtered.map((p) => (
@@ -150,11 +147,6 @@ export default function ProjectSwitcher({ currentId, variant = "inline" }: Props
                     </div>
                     <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 }}>
                       {p.code}
-                      {p.status === "disabled" && (
-                        <span style={{ marginLeft: 8, color: "var(--text-quaternary)" }}>
-                          · 已停用
-                        </span>
-                      )}
                     </div>
                   </div>
                 ))
