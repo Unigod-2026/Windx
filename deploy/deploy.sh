@@ -65,24 +65,23 @@ if [[ $SKIP_FRONTEND -eq 0 ]]; then
 fi
 
 # --- 4. 重新加载 systemd unit + nginx(配置变了才需要) -----------------
+# 这两个 if 既是「install」也是「restart」的开关 —— unit 文件不存在时,
+# 跳过 install 也跳过 restart(否则 systemctl 找不到 unit 会问 sudo 密码,
+# 首次部署会卡住)。
 if [[ -f deploy/windx-backend.service ]]; then
   echo "==> install systemd unit"
   install -m 0644 deploy/windx-backend.service /etc/systemd/system/windx-backend.service
   systemctl daemon-reload
-  systemctl enable windx-backend
+  systemctl enable --now windx-backend
+  echo "==> restart windx-backend"
+  systemctl restart windx-backend
 fi
 if [[ -f deploy/nginx.conf ]]; then
   echo "==> install nginx site"
   install -m 0644 deploy/nginx.conf /etc/nginx/sites-available/windx.conf
   ln -sf /etc/nginx/sites-available/windx.conf /etc/nginx/sites-enabled/windx.conf
+  nginx -t && systemctl reload nginx
 fi
-
-# --- 5. 重启服务 --------------------------------------------------------
-echo "==> restart windx-backend"
-systemctl restart windx-backend
-
-echo "==> nginx reload"
-nginx -t && systemctl reload nginx
 
 # --- 6. smoke check -----------------------------------------------------
 sleep 3
