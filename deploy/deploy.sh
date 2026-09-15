@@ -84,13 +84,17 @@ fi
 # 若该文件不存在,fall back 到「假设 windx-backend 已经在 PM2 里注册」的
 # reloadOrRestart(命令式,适合手动 pm2 start 起来的进程)。
 if [[ -f deploy/pm2.ecosystem.config.cjs && -f deploy/start-backend.sh ]]; then
+  # PM2 daemon 用 daemon 自己的 cwd 解析 ecosystem 里的 script/cwd 相对路径,
+  # 不是 deploy.sh 当前的 cwd。把 repo 绝对路径通过 PM2_CONFIG_CWD 注入
+  # ecosystem config,让它拼绝对路径。
+  export PM2_CONFIG_CWD="$REPO_ROOT"
   echo "==> pm2 reloadOrRestart (ecosystem)"
-  if ! pm2 reloadOrRestart deploy/pm2.ecosystem.config.cjs 2>&1 | tee /tmp/windx-pm2.log; then
+  if ! pm2 reloadOrRestart "$REPO_ROOT/deploy/pm2.ecosystem.config.cjs" 2>&1 | tee /tmp/windx-pm2.log; then
     # 老版本 pm2 (通常 < 5.x) 没有 reloadOrRestart 命令 —— fallback 到
     # restart。restart 是 PM2 一直就有的命令,任何版本都支持。
     if grep -q "Command not found" /tmp/windx-pm2.log; then
       echo "==> pm2 reloadOrRestart not supported, falling back to restart"
-      pm2 restart deploy/pm2.ecosystem.config.cjs
+      pm2 restart "$REPO_ROOT/deploy/pm2.ecosystem.config.cjs"
     else
       exit 1
     fi
