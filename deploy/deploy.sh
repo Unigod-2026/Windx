@@ -101,12 +101,12 @@ fi
 
 # --- 6. smoke check -----------------------------------------------------
 sleep 3
-if curl -fsS http://localhost/healthz >/dev/null; then
-  echo "==> OK  http://localhost/healthz"
+if curl -fsS http://localhost/health >/dev/null; then
+  echo "==> OK  http://localhost/health"
 else
-  echo "==> healthz failed,排查:" >&2
+  echo "==> health failed,排查:" >&2
   echo "    pm2 status                  # 进程在不在" >&2
   echo "    pm2 logs windx-backend --lines 50  # 后端日志" >&2
-  echo "    nginx 没装?curl http://localhost:18083/healthz 直打后端" >&2
+  echo "    nginx 没装?curl http://localhost:18083/health 直打后端" >&2
   exit 1
 fi
