@@ -74,6 +74,12 @@ fi
 
 # --- 3. 前端:重建静态文件 ----------------------------------------------
 if [[ $SKIP_FRONTEND -eq 0 ]]; then
+  # 兜底历史 sudo 污染:root 拥有的 node_modules / dist 会让 npm ci / vite build EACCES
+  echo "==> chown frontend (兜底历史 sudo 污染)"
+  if (( EUID != 0 )) && [[ -d frontend/node_modules ]] && \
+     [[ "$(stat -c %u frontend/node_modules 2>/dev/null)" != "$(id -u)" ]]; then
+    sudo chown -R "$(id -un):$(id -gn)" frontend/node_modules frontend/dist || true
+  fi
   echo "==> frontend build"
   (cd frontend && npm ci && npm run build)
 fi
@@ -129,7 +135,10 @@ if [[ -f deploy/nginx.conf ]]; then
         -keyout /etc/ssl/private/windx-selfsigned.key \
         -out /etc/ssl/certs/windx-selfsigned.crt \
         -subj "/CN=106.52.233.226" 2>&1 | tail -3
-      $SUDO chmod 600 /etc/ssl/private/windx-selfsigned.key
+      # 640 + ssl-cert 组是 Debian/Ubuntu nginx 包惯例,worker(www-data
+      # 默认属 ssl-cert)能读、又不暴露给普通用户。
+      $SUDO chown root:ssl-cert /etc/ssl/private/windx-selfsigned.key
+      $SUDO chmod 640 /etc/ssl/private/windx-selfsigned.key
     fi
 
     # nginx 自带的 default site 可能占了 80/443 —— 移走避免跟 windx 冲突。
