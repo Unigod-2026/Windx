@@ -1,0 +1,34 @@
+# windx-geo 单容器部署。
+# 服务器上 80/443 被 windx-page 容器占用,本服务只暴露 5173。
+# 宿主机 / 防火墙规则只放 5173,所以对外只开 5173。
+#
+# 用法:
+#   docker compose up -d --build   # 构建镜像并起服务
+#   docker compose logs -f         # 看日志
+#   docker compose down            # 停服务
+#
+# 持久化:
+#   - ./.env  → /app/.env:ro  后端 config.py 读这里(/app/.env 是 parents[2] 的位置)
+#   - ./data/logos → /app/data/logos  客户 logo 存储(对应 .env 里 LOGO_STORAGE_DIR)
+#   - ./data/logs  → /app/data/logs   后端日志(对应 .env 里 LOG_DIR)
+# .env 里这两个变量需要设成容器内的路径(见 .env.example)。
+services:
+  windx-geo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: windx-geo:latest
+    container_name: windx-geo
+    ports:
+      - "5173:18083"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data/logos:/app/data/logos
+      - ./data/logs:/app/data/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c", "import httpx; httpx.get('http://localhost:18083/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

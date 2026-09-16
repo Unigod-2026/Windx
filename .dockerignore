@@ -1,0 +1,23 @@
+# 构建上下文里排除掉这些,镜像 / 上传小一点、也不会误把 .env 之类塞进镜像。
+.git
+.github
+data
+deploy
+docs
+node_modules
+backend/.venv
+backend/__pycache__
+backend/**/__pycache__
+backend/.pytest_cache
+backend/.ruff_cache
+backend/logs
+backend/windx_backend.egg-info
+backend/scripts
+frontend/node_modules
+frontend/dist
+**/*.log
+**/.DS_Store
+.idea
+.vscode
+*.md
+!backend/app/**/*.md

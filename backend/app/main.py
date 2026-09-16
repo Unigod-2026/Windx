@@ -8,6 +8,7 @@ import ``app.main`` don't need a writable logo directory or a live database.
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -29,6 +30,11 @@ from app.logging_setup import configure_logging
 from app.services.scheduler_runtime import TIMEZONE, reload_jobs
 from app.services.sync import sync_pending_tasks
 
+# 前端构建产物在 Docker 镜像里 COPY 到 /app/frontend_dist,dev 环境跑 uvicorn
+# 时 backend/ 与 frontend/dist/ 同级,相对路径都能命中。html=True 让
+# SPA 路由(如 /projects/123)fallback 到 index.html。
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend_dist"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,6 +45,13 @@ async def lifespan(app: FastAPI):
         StaticFiles(directory=settings.logo_storage_dir, check_dir=False),
         name="static",
     )
+    # 前端 dist/ —— 顺序:先 /static(logo),再 /(catch-all 兜底 SPA)
+    if _FRONTEND_DIST.is_dir():
+        app.mount(
+            "/",
+            StaticFiles(directory=str(_FRONTEND_DIST), html=True),
+            name="frontend",
+        )
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     reload_jobs(scheduler)
     if settings.molizhishu_sync_enabled:
