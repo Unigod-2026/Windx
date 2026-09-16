@@ -10,6 +10,8 @@ COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --no-audit --no-fund
 
 COPY frontend/ ./
+# esbuild/rollup 在 ~2GB 内存下能炸,显式抬 heap 上限防止 OOM kill 留下半截 dist。
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 # 产物:/build/dist → stage 2 拷到 /app/frontend_dist
 
