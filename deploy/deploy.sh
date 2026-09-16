@@ -69,11 +69,22 @@ fi
 # --- 3. 准备持久化目录(./data/logos, ./data/logs)--------------------
 mkdir -p data/logos data/logs
 
-# --- 4. 构建 + 启动容器 ----------------------------------------------
+# --- 4. 在 host 上 build 前端 ----------------------------------------
+# 不在 Docker 里跑 npm run build —— 一来 Docker 内看不到实时输出难 debug,
+# 二来 Vite + AntD + echarts + tsc -b 整轮在 Node 容器里偶尔会卡,Host 跑
+# 能直接看到进度和报错。
+echo "==> build frontend (host)"
+(cd frontend && npm ci --no-audit --no-fund && npm run build)
+[[ -f frontend/dist/index.html ]] || {
+  echo "frontend/dist/index.html 没生成,前端 build 失败,中止部署" >&2
+  exit 1
+}
+
+# --- 5. 构建 + 启动容器 ----------------------------------------------
 echo "==> docker compose up -d --build"
 $DC up -d --build
 
-# --- 5. smoke check ----------------------------------------------------
+# --- 6. smoke check ----------------------------------------------------
 sleep 3
 # 直打 5173 验证 FastAPI /health,确认容器起来 + alembic 跑完 + uvicorn 在听。
 if curl -fsS http://localhost:5173/health >/dev/null; then

@@ -1,22 +1,6 @@
-# 多阶段 —— Node build 前端,Python 跑后端。
-# deploy.sh 用 `docker compose up -d --build` 在服务器上原地构建,不需要预 push 镜像。
+# 单阶段 —— 前端 build 由 deploy.sh 在 host 上跑完,Docker 这里只 COPY 产物。
+# 避开 Docker 内 Node 构建挂掉的盲区(看不到 npm/vite 实时输出)。
 
-# --- stage 1: 前端 ----------------------------------------------------
-FROM node:20-alpine AS frontend-builder
-WORKDIR /build
-
-# 单独 COPY package*.json 触发 npm ci 缓存,源码改动不会重装依赖。
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --no-audit --no-fund
-
-COPY frontend/ ./
-# esbuild/rollup 在 ~2GB 内存下能炸,显式抬 heap 上限防止 OOM kill 留下半截 dist。
-ENV NODE_OPTIONS=--max-old-space-size=4096
-RUN npm run build
-# 产物:/build/dist → stage 2 拷到 /app/frontend_dist
-
-# --- stage 2: 后端 ----------------------------------------------------
-# 用 astral-sh 的 uv 镜像(内置 python + uv),省一层 pip install uv。
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 WORKDIR /app
 
@@ -32,8 +16,9 @@ RUN uv sync --frozen --no-dev
 # 拷后端源码。
 COPY backend/ ./
 
-# 拷前端产物。main.py 里 /app/frontend_dist 是 StaticFiles 的目录。
-COPY --from=frontend-builder /build/dist ./frontend_dist
+# 前端 dist 由 deploy.sh 在 host 跑 npm run build 生成。
+# main.py 里 /app/frontend_dist 是 StaticFiles 的目录。
+COPY frontend/dist ./frontend_dist
 
 # 容器里 alembic 升级 + 启 uvicorn。exec 让 uvicorn 替换 shell,
 # docker stop 的 SIGTERM 直接打给 uvicorn,优雅退出。
