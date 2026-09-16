@@ -81,6 +81,16 @@ async def lifespan(app: FastAPI):
         )
     scheduler.start()
     app.state.scheduler = scheduler
+    # SPA catch-all —— 必须在 StaticFiles mount 之后注册,否则 catch-all
+    # 在 routes 列表里更靠前,任何路径(包括 /assets/*.js)都被它截胡
+    # 返回 index.html(浏览器拿到 HTML 不加载 JS,页面就是空白)。
+    if _FRONTEND_DIST.is_dir():
+        app.add_route(
+            "/{full_path:path}",
+            _spa_fallback,
+            methods=["GET", "HEAD"],
+            include_in_schema=False,
+        )
     try:
         yield
     finally:
@@ -103,8 +113,7 @@ def health():
     return {"ok": True}
 
 
-@app.get("/{full_path:path}", include_in_schema=False)
-def spa_fallback(full_path: str):
+def _spa_fallback(full_path: str):
     """SPA 兜底 —— React Router 的客户端路由(/login、/admin/* 等)都
     走这里回 index.html,让前端 router 接管。静态文件(/assets/*)由
     StaticFiles mount 在更早的位置匹配并服务,不会落到这里。"""
