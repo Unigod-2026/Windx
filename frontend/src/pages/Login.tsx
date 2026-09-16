@@ -4,7 +4,8 @@ import { UserOutlined, LockOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import client from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
-import { getDashboard } from "../api/dashboard";
+import { useSetCurrentProject } from "../auth/ProjectContext";
+import { listProjects } from "../api/projects";
 import "./Login.css";
 
 interface LoginValues {
@@ -14,6 +15,7 @@ interface LoginValues {
 
 export default function Login() {
   const { setUser } = useAuth();
+  const setCurrentProjectId = useSetCurrentProject();
   const nav = useNavigate();
   const [loading, setLoading] = useState(false);
 
@@ -24,9 +26,12 @@ export default function Login() {
       localStorage.setItem("token", r.data.token);
       const me = await client.get("/auth/me");
       setUser(me.data);
-      const dash = await getDashboard();
-      const latest = dash.recent_runs[0];
-      nav(latest ? `/admin/projects/${latest.project_id}?tab=overview` : "/admin");
+      // 默认项目:super_admin/customer_admin 都拿「最新创建的 active 项目」。
+      // 后端 listProjects 按 session 自动收窄 customer_admin 到自己的客户。
+      const res = await listProjects({ status: "active", page: 1, size: 1 });
+      const latest = res.items[0];
+      if (latest) setCurrentProjectId(latest.id);
+      nav(latest ? `/admin/projects/${latest.id}?tab=overview` : "/admin");
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 403) {
