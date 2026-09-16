@@ -136,12 +136,14 @@ if [[ -f deploy/nginx.conf ]]; then
         -out /etc/ssl/certs/windx-selfsigned.crt \
         -subj "/CN=106.52.233.226" 2>&1 | tail -3
       # worker 要能读私钥才能起 SSL。优先 Debian/Ubuntu 惯例
-      # (root:ssl-cert 640),组不存在就 644 兜底(自签证书内部用可接受)。
+      # (root:ssl-cert 640),组不存在就 644 + 父目录 o+x 兜底
+      # (自签证书内部用可接受)。
       if getent group ssl-cert >/dev/null; then
         $SUDO chown root:ssl-cert /etc/ssl/private/windx-selfsigned.key
         $SUDO chmod 640 /etc/ssl/private/windx-selfsigned.key
       else
         $SUDO chmod 644 /etc/ssl/private/windx-selfsigned.key
+        $SUDO chmod o+x /etc/ssl/private/
       fi
     fi
 
