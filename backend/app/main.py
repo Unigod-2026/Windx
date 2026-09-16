@@ -13,8 +13,9 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from app.api import (
     admin_media_dictionary,
@@ -46,17 +47,6 @@ async def lifespan(app: FastAPI):
         StaticFiles(directory=settings.logo_storage_dir, check_dir=False),
         name="static",
     )
-    # 前端 dist/ —— StaticFiles 挂在根路径服务真实静态文件(/assets/*、
-    # /logo.png、/favicon.ico 等)。SPA 路由(/login、/admin/projects/38)
-    # 由下面注册的 catch-all 兜底返回 index.html(Starlette 1.4 的
-    # StaticFiles html=True 只 fallback 到 404.html,不会回 index.html,
-    # 所以手写一条)。
-    if _FRONTEND_DIST.is_dir():
-        app.mount(
-            "",
-            StaticFiles(directory=str(_FRONTEND_DIST)),
-            name="frontend-static",
-        )
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     reload_jobs(scheduler)
     if settings.molizhishu_sync_enabled:
@@ -81,16 +71,6 @@ async def lifespan(app: FastAPI):
         )
     scheduler.start()
     app.state.scheduler = scheduler
-    # SPA catch-all —— 必须在 StaticFiles mount 之后注册,否则 catch-all
-    # 在 routes 列表里更靠前,任何路径(包括 /assets/*.js)都被它截胡
-    # 返回 index.html(浏览器拿到 HTML 不加载 JS,页面就是空白)。
-    if _FRONTEND_DIST.is_dir():
-        app.add_route(
-            "/{full_path:path}",
-            _spa_fallback,
-            methods=["GET", "HEAD"],
-            include_in_schema=False,
-        )
     try:
         yield
     finally:
@@ -113,11 +93,37 @@ def health():
     return {"ok": True}
 
 
-def _spa_fallback(full_path: str):
-    """SPA 兜底 —— React Router 的客户端路由(/login、/admin/* 等)都
-    走这里回 index.html,让前端 router 接管。静态文件(/assets/*)由
-    StaticFiles mount 在更早的位置匹配并服务,不会落到这里。"""
-    del full_path  # path param 仅用于路由匹配,handler 不消费具体值
+# 前端静态 + SPA 兜底 —— 只用一条 catch-all,handler 里手判:
+#   1. ``frontend_dist/<full_path>`` 是真实文件 → FileResponse(原内容)
+#   2. 否则 → FileResponse(index.html),让 React Router 接管
+# 不用 StaticFiles mount 是因为 Starlette Mount 一旦路径前缀命中就
+# 把请求吃掉、不会再 fallback 到后面的 catch-all;mount + 手动 catch-all
+# 的组合会让 /login 这种 SPA 路径被 StaticFiles 截胡返回 404,而不是
+# index.html(在 Starlette 1.4 上无法简单修)。
+async def _serve_frontend(request):
+    raw_path = request.url.path.lstrip("/")
+    target = (_FRONTEND_DIST / raw_path).resolve()
+    # 防 path traversal —— 解析后必须在 _FRONTEND_DIST 之下
+    try:
+        target.relative_to(_FRONTEND_DIST.resolve())
+    except ValueError:
+        target = _FRONTEND_INDEX
+    if target.is_file():
+        return FileResponse(str(target))
     if _FRONTEND_INDEX.is_file():
         return FileResponse(str(_FRONTEND_INDEX))
-    return {"detail": "frontend dist not built"}
+    return PlainTextResponse("frontend dist not built", status_code=500)
+
+
+# 直接往 Starlette router 追加 Route 对象 —— app.add_route 在 FastAPI
+# 路径解析里把 endpoint 当 FastAPI handler 处理(只传 request,不会传
+# scope/receive/send),所以 raw ASGI 必须用 Starlette Route。
+app.router.routes.append(
+    Route(
+        "/{full_path:path}",
+        _serve_frontend,
+        methods=["GET", "HEAD"],
+        include_in_schema=False,
+    )
+)
+
