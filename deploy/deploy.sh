@@ -127,27 +127,8 @@ if [[ -f deploy/nginx.conf ]]; then
     SUDO=""
     [[ $EUID -ne 0 ]] && SUDO="sudo"
 
-    # 自签证书(nginx.conf 指向 /etc/ssl/{certs,private}/windx-selfsigned.{crt,key})。
-    # 已存在就跳过 —— 这样续期不会覆盖掉用户之后换成 Let's Encrypt 的真证书。
-    if [[ ! -f /etc/ssl/certs/windx-selfsigned.crt ]] || [[ ! -f /etc/ssl/private/windx-selfsigned.key ]]; then
-      echo "==> generate self-signed cert"
-      $SUDO openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout /etc/ssl/private/windx-selfsigned.key \
-        -out /etc/ssl/certs/windx-selfsigned.crt \
-        -subj "/CN=106.52.233.226" 2>&1 | tail -3
-      # worker 要能读私钥才能起 SSL。优先 Debian/Ubuntu 惯例
-      # (root:ssl-cert 640),组不存在就 644 + 父目录 o+x 兜底
-      # (自签证书内部用可接受)。
-      if getent group ssl-cert >/dev/null; then
-        $SUDO chown root:ssl-cert /etc/ssl/private/windx-selfsigned.key
-        $SUDO chmod 640 /etc/ssl/private/windx-selfsigned.key
-      else
-        $SUDO chmod 644 /etc/ssl/private/windx-selfsigned.key
-        $SUDO chmod o+x /etc/ssl/private/
-      fi
-    fi
-
-    # nginx 自带的 default site 可能占了 80/443 —— 移走避免跟 windx 冲突。
+    # nginx 自带的 default site 可能占了 80 —— 移走避免跟未来 windx 想加
+    # 80 listen 时冲突;5173 不受 default site 影响。
     if [[ -f /etc/nginx/sites-enabled/default ]]; then
       echo "==> disable nginx default site"
       $SUDO rm -f /etc/nginx/sites-enabled/default
@@ -168,15 +149,15 @@ fi
 
 # --- 6. smoke check -----------------------------------------------------
 sleep 3
-# /healthz 走 nginx 反代到后端 /health,验证「nginx + TLS + 反代 + uvicorn」
-# 完整链路。直接打 443,nginx 配的 listen 443 ssl default_server 会响应。
-if curl -fksS https://localhost/healthz >/dev/null; then
-  echo "==> OK  https://localhost/healthz (nginx + TLS + backend)"
+# /healthz 走 nginx 反代到后端 /health,验证「nginx + 反代 + uvicorn」
+# 完整链路。直接打 5173,nginx 配的 listen 5173 default_server 会响应。
+if curl -fsS http://localhost:5173/healthz >/dev/null; then
+  echo "==> OK  http://localhost:5173/healthz (nginx + backend)"
 else
   echo "==> healthz failed,排查:" >&2
-  echo "    pm2 status                  # 进程在不在" >&2
+  echo "    pm2 status                  # 后端进程在不在" >&2
   echo "    pm2 logs windx-backend --lines 50  # 后端日志" >&2
-  echo "    nginx 没装?curl -k https://localhost/healthz 直打 nginx" >&2
-  echo "    nginx 没装?curl http://localhost:18083/health 直打后端" >&2
+  echo "    curl http://localhost:5173/healthz 直打 nginx" >&2
+  echo "    curl http://localhost:18083/health 直打后端" >&2
   exit 1
 fi
