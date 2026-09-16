@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# 服务器端部署脚本 —— Docker 化后的 windx-geo。
-# 单一容器跑后端 + 前端 dist/(FastAPI 静态服务),对外只暴露 5173。
-# 后端 18083 是容器内端口,宿主机不暴露。
+# 服务器端部署脚本 —— 直接在 host 上 build,不走 Docker / 不走 nginx。
+#
+# 形态:
+#   - 后端 uvicorn 监听 5173(uvicorn 自己挂前端 dist/ 当静态文件)
+#   - 前端 dist/ 由 host 上 `npm run build` 生成(backend/app/main.py
+#     通过 parents[2] / "frontend" / "dist" 找到)
+#   - PM2 拉起 / 重启后端进程
+#   - 宿主机防火墙只放 5173
 #
 # 前置:
-#   - 仓库已 clone 在任意目录(脚本从自身路径反推仓库根)
-#   - .env 已填好真值在 $REPO_ROOT/.env,且 LOGO_STORAGE_DIR / LOG_DIR
-#     指向 /app/data/{logos,logs}(与 docker-compose.yml 的 volume 一致)
-#   - 服务器装好 docker + docker compose plugin
-#   - 防火墙只放 5173(参考 docs/)
+#   - 仓库已 clone,REPO_ROOT 默认 = 脚本父目录的父目录
+#   - .env 已填好真值,且 LOGO_STORAGE_DIR / LOG_DIR 指向 host 上
+#     实际存在的目录(如 /home/ubuntu/projects/Windx/data/{logos,logs})
+#   - 服务器装好 python3.11 + uv + node + npm + pm2
+#   - 防火墙只放 5173
 #
 # 用法:
 #   ./deploy/deploy.sh
@@ -16,24 +21,13 @@
 
 set -euo pipefail
 
-# docker compose 子命令在不同版本里叫 `docker compose` (v2) 或 `docker-compose`
-# (v1 standalone)。先探测一下。
-if docker compose version >/dev/null 2>&1; then
-  DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  DC="docker-compose"
-else
-  echo "需要 docker + docker compose(>=v2 推荐),都没找到" >&2
-  exit 1
-fi
-
 # REPO_ROOT 默认 = 脚本父目录的父目录(仓库根)。仍可 REPO_ROOT=... 覆盖。
 _REPO_ROOT_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$_REPO_ROOT_DEFAULT}"
 DEPLOY_USER="${SUDO_USER:-$(id -un)}"
 
 usage() {
-  sed -n '2,17p' "$0"
+  sed -n '2,29p' "$0"
   exit 0
 }
 
@@ -52,27 +46,18 @@ cd "$REPO_ROOT"
 echo "==> git pull"
 git pull --ff-only
 
-# --- 2. 清掉旧的 PM2 / systemd nginx(部署形态从 systemd 改成 Docker)---
-# 老 backend windx-backend 由 PM2 管的,留着会和容器内 backend 重复。
-# 老 nginx windx.conf 站点(80/443 + 5173)删掉,新形态全交给容器。
-if command -v pm2 >/dev/null 2>&1 && pm2 describe windx-backend >/dev/null 2>&1; then
-  echo "==> stop pm2 windx-backend"
-  pm2 delete windx-backend || true
-fi
-if [[ -f /etc/nginx/sites-enabled/windx.conf ]]; then
-  echo "==> disable old windx nginx site"
-  sudo rm -f /etc/nginx/sites-enabled/windx.conf
-  sudo rm -f /etc/nginx/sites-available/windx.conf
-  sudo nginx -t && sudo systemctl reload nginx || true
-fi
-
-# --- 3. 准备持久化目录(./data/logos, ./data/logs)--------------------
+# --- 2. 准备持久化目录(./data/logos, ./data/logs)--------------------
 mkdir -p data/logos data/logs
 
+# --- 3. 同步 Python 依赖 + 跑 alembic --------------------------------
+echo "==> uv sync (backend)"
+(cd backend && uv sync --frozen --no-dev)
+
+echo "==> alembic upgrade head"
+(cd backend && uv run alembic upgrade head)
+
 # --- 4. 在 host 上 build 前端 ----------------------------------------
-# 不在 Docker 里跑 npm run build —— 一来 Docker 内看不到实时输出难 debug,
-# 二来 Vite + AntD + echarts + tsc -b 整轮在 Node 容器里偶尔会卡,Host 跑
-# 能直接看到进度和报错。
+# Vite + AntD + echarts + tsc -b 在 host 上跑,进度 / 报错肉眼可见。
 echo "==> build frontend (host)"
 (cd frontend && npm ci --no-audit --no-fund && npm run build)
 [[ -f frontend/dist/index.html ]] || {
@@ -80,19 +65,28 @@ echo "==> build frontend (host)"
   exit 1
 }
 
-# --- 5. 构建 + 启动容器 ----------------------------------------------
-echo "==> docker compose up -d --build"
-$DC up -d --build
+# --- 5. PM2 重启后端 ---------------------------------------------------
+# PM2 ecosystem config 读 PM2_CONFIG_CWD 拿仓库根绝对路径(daemon cwd
+# 不可靠,见 pm2.ecosystem.config.cjs 头部注释)。
+export PM2_CONFIG_CWD="$REPO_ROOT"
+echo "==> pm2 reload backend"
+if pm2 describe windx-backend >/dev/null 2>&1; then
+  pm2 reload windx-backend
+else
+  pm2 start "$REPO_ROOT/deploy/pm2.ecosystem.config.cjs"
+fi
+pm2 save --force || true
 
 # --- 6. smoke check ----------------------------------------------------
 sleep 3
-# 直打 5173 验证 FastAPI /health,确认容器起来 + alembic 跑完 + uvicorn 在听。
+# 直打 5173 验证 FastAPI /health,确认 uvicorn 在听 5173 + alembic 跑完。
 if curl -fsS http://localhost:5173/health >/dev/null; then
-  echo "==> OK  http://localhost:5173/health (容器 + 后端)"
+  echo "==> OK  http://localhost:5173/health (后端 + 前端静态)"
 else
   echo "==> health failed,排查:" >&2
-  echo "    $DC ps                         # 容器在不在" >&2
-  echo "    $DC logs --tail 50 windx-geo  # 容器日志" >&2
-  echo "    curl http://localhost:5173/health 直打容器" >&2
+  echo "    pm2 ls                            # 进程在不在" >&2
+  echo "    pm2 logs --lines 80 windx-backend # 进程日志" >&2
+  echo "    curl http://localhost:5173/health 直打本机" >&2
+  echo "    ss -tlnp | grep 5173              # 端口监听状态" >&2
   exit 1
 fi

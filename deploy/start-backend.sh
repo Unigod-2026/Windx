@@ -19,7 +19,7 @@ set +a
 
 exec .venv/bin/uvicorn app.main:app \
   --host 0.0.0.0 \
-  --port 18083 \
+  --port 5173 \
   --workers 4 \
   --proxy-headers \
   --no-access-log

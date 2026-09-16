@@ -30,10 +30,10 @@ from app.logging_setup import configure_logging
 from app.services.scheduler_runtime import TIMEZONE, reload_jobs
 from app.services.sync import sync_pending_tasks
 
-# 前端构建产物在 Docker 镜像里 COPY 到 /app/frontend_dist,dev 环境跑 uvicorn
-# 时 backend/ 与 frontend/dist/ 同级,相对路径都能命中。html=True 让
-# SPA 路由(如 /projects/123)fallback 到 index.html。
-_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend_dist"
+# 前端构建产物由 deploy.sh 在 host 跑 npm run build 生成,路径与 backend/
+# 平级(dev / 生产一致)。html=True 让 SPA 路由(如 /projects/123)fallback
+# 到 index.html。
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 @asynccontextmanager
