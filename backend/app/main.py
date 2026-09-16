@@ -13,6 +13,7 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
@@ -31,9 +32,9 @@ from app.services.scheduler_runtime import TIMEZONE, reload_jobs
 from app.services.sync import sync_pending_tasks
 
 # 前端构建产物由 deploy.sh 在 host 跑 npm run build 生成,路径与 backend/
-# 平级(dev / 生产一致)。html=True 让 SPA 路由(如 /projects/123)fallback
-# 到 index.html。
+# 平级(dev / 生产一致)。
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+_FRONTEND_INDEX = _FRONTEND_DIST / "index.html"
 
 
 @asynccontextmanager
@@ -45,12 +46,16 @@ async def lifespan(app: FastAPI):
         StaticFiles(directory=settings.logo_storage_dir, check_dir=False),
         name="static",
     )
-    # 前端 dist/ —— 顺序:先 /static(logo),再 /(catch-all 兜底 SPA)
+    # 前端 dist/ —— StaticFiles 挂在根路径服务真实静态文件(/assets/*、
+    # /logo.png、/favicon.ico 等)。SPA 路由(/login、/admin/projects/38)
+    # 由下面注册的 catch-all 兜底返回 index.html(Starlette 1.4 的
+    # StaticFiles html=True 只 fallback 到 404.html,不会回 index.html,
+    # 所以手写一条)。
     if _FRONTEND_DIST.is_dir():
         app.mount(
-            "/",
-            StaticFiles(directory=str(_FRONTEND_DIST), html=True),
-            name="frontend",
+            "",
+            StaticFiles(directory=str(_FRONTEND_DIST)),
+            name="frontend-static",
         )
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     reload_jobs(scheduler)
@@ -96,3 +101,14 @@ app.include_router(admin_media_dictionary.router)
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    """SPA 兜底 —— React Router 的客户端路由(/login、/admin/* 等)都
+    走这里回 index.html,让前端 router 接管。静态文件(/assets/*)由
+    StaticFiles mount 在更早的位置匹配并服务,不会落到这里。"""
+    del full_path  # path param 仅用于路由匹配,handler 不消费具体值
+    if _FRONTEND_INDEX.is_file():
+        return FileResponse(str(_FRONTEND_INDEX))
+    return {"detail": "frontend dist not built"}
