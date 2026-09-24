@@ -38,6 +38,7 @@ from app.models.project import Project
 from app.models.report import Report as ReportRow
 from app.schemas.report import ReportSnapshotOut
 from app.services import report_templates
+from app.services.report_overrides import merge_overrides
 
 router = APIRouter(tags=["public-reports"])
 
@@ -125,6 +126,7 @@ def get_public_report_snapshot(
     snapshot = template_fn(ctx)
     snapshot["generated_by"] = row.generated_by_name
     snapshot["generated_at"] = row.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    merge_overrides(snapshot, row.manual_overrides or {})
 
     # Build a minimal ReportMeta inline so we don't depend on
     # get_current_user for the user field. (We need user_id to be a

@@ -50,6 +50,7 @@ from app.schemas.report import (
     UpdateReportIn,
 )
 from app.services import report_settings, report_templates
+from app.services.report_overrides import merge_overrides
 from app.services.report_render import render_html
 from app.services.report_templates import TEMPLATE_FIELDS
 from app.services.scope_text import compose_scope_text
@@ -106,48 +107,6 @@ def _scope_clause(user: AdminUser):
     if user.role is AdminRole.CUSTOMER_ADMIN:
         return ReportRow.customer_id == user.customer_id
     return None
-
-
-# --------------------------------------------------------------------- #
-# Manual override merge helper
-# --------------------------------------------------------------------- #
-
-
-def _merge_overrides(snapshot: dict, manual_overrides: dict) -> dict:
-    """Overlay operator-edited narrative content onto a template snapshot.
-
-    For each editable field declared in ``TEMPLATE_FIELDS``, prefer the
-    operator's value in ``manual_overrides`` over the template's output
-    (which is currently always None for these fields — the template no
-    longer computes narrative prose).
-
-    Dead keys in ``manual_overrides`` (template removed the field but
-    the operator saved before) are ignored — we only read keys declared
-    in the template's editable-field list.
-    """
-    if not manual_overrides:
-        return snapshot
-    editable_keys = {
-        f["key"]
-        for fields in TEMPLATE_FIELDS.values()
-        for f in fields
-    }
-    for k, v in manual_overrides.items():
-        if k not in editable_keys:
-            continue
-        snapshot[k] = v
-    # Also overlay the 4-block weekly_summary nested object.
-    nested_overrides = {
-        "core_finding": manual_overrides.get("weekly_core_finding"),
-        "platform_dynamic": manual_overrides.get("weekly_platform_dynamic"),
-        "content_result": manual_overrides.get("weekly_content_result"),
-        "scene_coverage": manual_overrides.get("weekly_scene_coverage"),
-    }
-    if "weekly_summary" in snapshot and isinstance(snapshot["weekly_summary"], dict):
-        for k, v in nested_overrides.items():
-            if v is not None:
-                snapshot["weekly_summary"][k] = v
-    return snapshot
 
 
 # --------------------------------------------------------------------- #
@@ -555,7 +514,7 @@ def get_report_snapshot(
     # ``ctx.generated_by`` which we just set to the current viewer.
     snapshot["generated_by"] = row.generated_by_name
     snapshot["generated_at"] = row.created_at.strftime("%Y-%m-%d %H:%M:%S")
-    _merge_overrides(snapshot, row.manual_overrides or {})
+    merge_overrides(snapshot, row.manual_overrides or {})
 
     return ReportSnapshotOut(
         meta=ReportMeta(
