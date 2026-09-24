@@ -47,6 +47,7 @@ from app.schemas.report import (
     ReportSnapshotOut,
     ReportTemplateListOut,
     ReportTemplateOut,
+    UpdateReportIn,
 )
 from app.services import report_settings, report_templates
 from app.services.report_render import render_html
@@ -576,6 +577,186 @@ def get_report_snapshot(
         ),
         template_id=row.template_id,
         snapshot=snapshot,
+    )
+
+
+# --------------------------------------------------------------------- #
+# PATCH /api/reports/{report_id} — save manual overrides
+# --------------------------------------------------------------------- #
+
+
+@router.patch("/api/reports/{report_id}", response_model=Report)
+def update_report(
+    report_id: int,
+    payload: UpdateReportIn,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """Save operator-edited narrative content (save-as-draft).
+
+    Replaces ``manual_overrides`` wholesale with the supplied dict.
+    Keys must be declared in the template's ``TEMPLATE_FIELDS``; an
+    unrecognized key returns 422 so a stale client doesn't sneak
+    garbage into the persisted JSON.
+
+    Drafts (is_published=False) are the default — calling this
+    endpoint does NOT publish. Use POST .../publish for that.
+    """
+    row = db.get(ReportRow, report_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    if (
+        user.role is AdminRole.CUSTOMER_ADMIN
+        and row.customer_id != user.customer_id
+    ):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    # Validate keys against the template's editable-field list. We
+    # only check field presence — values can be empty strings (operator
+    # may want to clear a field they previously filled).
+    editable_keys = {
+        f["key"]
+        for fields in TEMPLATE_FIELDS.values()
+        for f in fields
+    }
+    bad_keys = set(payload.manual_overrides.keys()) - editable_keys
+    if bad_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown manual_overrides keys: {sorted(bad_keys)}",
+        )
+
+    row.manual_overrides = payload.manual_overrides
+    db.commit()
+    db.refresh(row)
+    return Report(
+        id=row.id,
+        project_id=row.project_id,
+        template_id=row.template_id,
+        title=row.title,
+        scope_text=row.scope_text,
+        share_token=row.share_token,
+        period_start=row.period_start,
+        period_end=row.period_end,
+        baseline_date=row.baseline_date,
+        baseline_rate=row.baseline_rate,
+        manual_overrides=row.manual_overrides or {},
+        is_published=row.is_published,
+        generated_by_id=row.generated_by_id,
+        generated_by_name=row.generated_by_name,
+        generated_at=row.created_at,
+    )
+
+
+# --------------------------------------------------------------------- #
+# POST /api/reports/{report_id}/publish — flip is_published=True
+# --------------------------------------------------------------------- #
+
+
+@router.post("/api/reports/{report_id}/publish", response_model=Report)
+def publish_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """Publish the report: makes its public URL accessible.
+
+    Validation: every field declared in this template's
+    ``TEMPLATE_FIELDS`` must have a non-empty value in
+    ``manual_overrides``. Empty values publish anyway but render as
+    the "暂无数数据" placeholder — but we choose to require
+    non-empty so the public URL never shows a half-finished report.
+    """
+    row = db.get(ReportRow, report_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    if (
+        user.role is AdminRole.CUSTOMER_ADMIN
+        and row.customer_id != user.customer_id
+    ):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    # Collect required fields for this template.
+    fields = TEMPLATE_FIELDS.get(row.template_id, [])
+    overrides = row.manual_overrides or {}
+    missing = [
+        f["key"]
+        for f in fields
+        if not (overrides.get(f["key"]) or "").strip()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"cannot publish: missing or empty fields: {missing}"
+            ),
+        )
+
+    row.is_published = True
+    db.commit()
+    db.refresh(row)
+    return Report(
+        id=row.id,
+        project_id=row.project_id,
+        template_id=row.template_id,
+        title=row.title,
+        scope_text=row.scope_text,
+        share_token=row.share_token,
+        period_start=row.period_start,
+        period_end=row.period_end,
+        baseline_date=row.baseline_date,
+        baseline_rate=row.baseline_rate,
+        manual_overrides=row.manual_overrides or {},
+        is_published=row.is_published,
+        generated_by_id=row.generated_by_id,
+        generated_by_name=row.generated_by_name,
+        generated_at=row.created_at,
+    )
+
+
+# --------------------------------------------------------------------- #
+# POST /api/reports/{report_id}/unpublish — flip is_published=False
+# --------------------------------------------------------------------- #
+
+
+@router.post("/api/reports/{report_id}/unpublish", response_model=Report)
+def unpublish_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """Take the report back to draft state. The public URL becomes
+    invisible again. ``manual_overrides`` content is preserved —
+    re-publishing restores the same edited text.
+    """
+    row = db.get(ReportRow, report_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    if (
+        user.role is AdminRole.CUSTOMER_ADMIN
+        and row.customer_id != user.customer_id
+    ):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    row.is_published = False
+    db.commit()
+    db.refresh(row)
+    return Report(
+        id=row.id,
+        project_id=row.project_id,
+        template_id=row.template_id,
+        title=row.title,
+        scope_text=row.scope_text,
+        share_token=row.share_token,
+        period_start=row.period_start,
+        period_end=row.period_end,
+        baseline_date=row.baseline_date,
+        baseline_rate=row.baseline_rate,
+        manual_overrides=row.manual_overrides or {},
+        is_published=row.is_published,
+        generated_by_id=row.generated_by_id,
+        generated_by_name=row.generated_by_name,
+        generated_at=row.created_at,
     )
 
 
