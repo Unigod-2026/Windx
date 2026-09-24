@@ -30,6 +30,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -66,6 +67,23 @@ def get_public_report_snapshot(
     row = db.query(ReportRow).filter(ReportRow.share_token == share_token).first()
     if row is None:
         raise HTTPException(status_code=404, detail="report not found")
+
+    if not row.is_published:
+        # The report exists and the token is valid, but the operator
+        # hasn't published it yet. We return 200 + a clear flag so
+        # the public page can render a "尚未发布" notice without
+        # treating the situation as "token wrong" (which would
+        # confuse legitimate URL recipients).
+        return JSONResponse(
+            status_code=200,
+            content={
+                "unpublished": True,
+                "share_token": row.share_token,
+                "title": row.title,
+                "period_start": row.period_start.isoformat(),
+                "period_end": row.period_end.isoformat(),
+            },
+        )
 
     project = db.get(Project, row.project_id)
     if project is None:
