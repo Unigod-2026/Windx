@@ -88,7 +88,10 @@ export interface ReportMeta {
   project_id: number;
   template_id: string;
   title: string;
+  manual_overrides: Record<string, string | null>;
+  is_published: boolean;
   scope_text: string;
+  share_token: string;
   period_start: string;
   period_end: string;
   baseline_date: string | null;
