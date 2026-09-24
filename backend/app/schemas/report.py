@@ -128,8 +128,9 @@ class UpdateReportIn(BaseModel):
     """Request body for ``PATCH /api/reports/{report_id}``.
 
     Saves the operator's narrative edits to the report's
-    ``manual_overrides``. Replaces the dict wholesale — the operator
-    is expected to send the full desired state, not a partial merge.
+    ``manual_overrides``. Merged into the existing dict — the UI
+    saves one block per request, so unspecified keys keep their
+    previously-saved value.
 
     Validation: keys not in the active template's
     ``TEMPLATE_FIELDS`` are rejected at the router layer (422).

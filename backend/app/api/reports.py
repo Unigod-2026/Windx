@@ -71,15 +71,6 @@ def _project_dir(project_id: int) -> Path:
     return _REPORTS_ROOT / str(project_id)
 
 
-def _abs_path(rel: str) -> Path:
-    """Resolve a path stored in ``geo_reports.file_path`` to absolute.
-
-    The stored value is relative to ``backend/`` so moving the backend
-    directory in deploy doesn't require a table rewrite.
-    """
-    return (Path(__file__).resolve().parents[2] / rel).resolve()
-
-
 def _generate_unique_share_token(db: Session, *, attempts: int = 5) -> str:
     """Generate a URL-safe random token that doesn't collide with any
     existing ``geo_reports.share_token``.
@@ -553,7 +544,12 @@ def update_report(
 ):
     """Save operator-edited narrative content (save-as-draft).
 
-    Replaces ``manual_overrides`` wholesale with the supplied dict.
+    **Merges** the supplied dict into the report's existing
+    ``manual_overrides`` — keys not present in the payload keep their
+    previously-saved value. The preview UI saves one block per
+    request, so a wholesale replace would silently erase every block
+    the operator filled in earlier.
+
     Keys must be declared in the template's ``TEMPLATE_FIELDS``; an
     unrecognized key returns 422 so a stale client doesn't sneak
     garbage into the persisted JSON.
@@ -585,7 +581,12 @@ def update_report(
             detail=f"unknown manual_overrides keys: {sorted(bad_keys)}",
         )
 
-    row.manual_overrides = payload.manual_overrides
+    # Assign a NEW dict rather than mutating in place — SQLAlchemy
+    # doesn't track in-place mutation of a JSON column.
+    row.manual_overrides = {
+        **(row.manual_overrides or {}),
+        **payload.manual_overrides,
+    }
     db.commit()
     db.refresh(row)
     return Report(
@@ -730,6 +731,16 @@ def get_report_html(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
+    """Download the report as a self-contained HTML document.
+
+    Re-renders the template and merges ``manual_overrides`` rather than
+    serving the file written at generate time — the on-disk file has no
+    operator narrative content, so a download would silently drop every
+    block the operator wrote. Same merge path as
+    ``get_report_snapshot``. The generate-time file is still written
+    (it remains the historical record) but is no longer the download
+    source.
+    """
     row = db.get(ReportRow, report_id)
     if row is None:
         raise HTTPException(status_code=404, detail="report not found")
@@ -740,7 +751,33 @@ def get_report_html(
         ) is None:
             raise HTTPException(status_code=403, detail="forbidden")
 
-    abs_path = _abs_path(row.file_path)
-    if not abs_path.is_file():
-        raise HTTPException(status_code=410, detail="report file missing on disk")
-    return HTMLResponse(abs_path.read_text(encoding="utf-8"))
+    project = db.get(Project, row.project_id)
+    if project is None:
+        raise HTTPException(status_code=410, detail="project deleted")
+
+    days = (row.period_end - row.period_start).days + 1
+    try:
+        template_fn = report_templates.get(row.template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+
+    ctx = report_templates.BuildContext(
+        db=db,
+        project=project,
+        period_start=row.period_start,
+        period_end_exclusive=row.period_end + timedelta(days=1),
+        previous_start=row.period_start - timedelta(days=days),
+        previous_end_exclusive=row.period_start,
+        baseline_date=row.baseline_date,
+        baseline_rate=row.baseline_rate,
+        generated_by=user,
+        generated_at=row.created_at,
+        prompts=None,
+        platform_codes=None,
+    )
+    snapshot = template_fn(ctx)
+    # Historical record, not "now" — see ``get_report_snapshot``.
+    snapshot["generated_by"] = row.generated_by_name
+    snapshot["generated_at"] = row.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    merge_overrides(snapshot, row.manual_overrides or {})
+    return HTMLResponse(render_html(snapshot=snapshot, template_id=row.template_id))

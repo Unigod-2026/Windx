@@ -305,13 +305,20 @@ function PublicSectionFive({
   );
 }
 
-function PublicSectionAttribution(_props: {
+function PublicSectionAttribution({
+  snapshot,
+}: {
   snapshot: ReportSnapshotOut["snapshot"];
 }) {
+  const text = snapshot.attribution ?? null;
   return (
     <section>
       <ChapterHeading title="5.3 核心归因" />
-      <EmptyBlock message="暂无数数据" />
+      {text ? (
+        <p style={{ whiteSpace: "pre-wrap" }}>{text}</p>
+      ) : (
+        <EmptyBlock message="暂无数数据" />
+      )}
     </section>
   );
 }
