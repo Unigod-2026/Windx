@@ -706,7 +706,7 @@ def _materialise_wizard_payload(
     must not silently flip it.
     """
     # Project-row fields owned by the wizard.
-    project.brand = payload.brand.name
+    project.brand = payload.brand.product
     project.aliases = list(payload.brand.aliases)
     project.sentiment_enabled = payload.sentiment == "on"
     project.region_strategy = (
@@ -956,7 +956,7 @@ def put_wizard_draft(
     project = _get_project(db, project_id)
     if project.status is ProjectStatus.REJECTED:
         raise HTTPException(
-            409, "wizard draft cannot be saved while project is rejected"
+            409, "已驳回的项目不能修改"
         )
     if (
         project.status is ProjectStatus.ACTIVE
@@ -964,8 +964,7 @@ def put_wizard_draft(
     ):
         raise HTTPException(
             409,
-            "wizard draft cannot be saved while the project is actively scheduled; "
-            "pause it on the list page first",
+            "调度中的项目不能修改",
         )
     _assert_customer_access(user, project)
     _materialise_wizard_payload(

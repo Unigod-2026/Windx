@@ -196,10 +196,16 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
 
   // 问题集 —— 项目配置的监控问题(prompts),下拉里 checkbox 多选。
   const [projectPrompts, setProjectPrompts] = useState<PromptOut[]>([]);
+  // 项目分类字典 —— 决定问题下拉的分组顺序。null 时不打头标,空分类也展示。
+  const [categoryTaxonomy, setCategoryTaxonomy] = useState<string[]>([]);
   const [appliedPrompts, setAppliedPrompts] = useState<Set<number>>(new Set());
   const [stagedPrompts, setStagedPrompts] = useState<Set<number>>(new Set());
   const [promptsLoading, setPromptsLoading] = useState(false);
   const [promptMenuOpen, setPromptMenuOpen] = useState(false);
+  // 分类展开态 —— 每次打开下拉重置为全折叠(避免遗留上次会话状态)。
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     if (!visible || projectId === null) {
@@ -209,6 +215,8 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
       setProjectPrompts([]);
       setAppliedPrompts(new Set());
       setStagedPrompts(new Set());
+      setCategoryTaxonomy([]);
+      setExpandedCategories(new Set());
       return;
     }
     let cancelled = false;
@@ -233,6 +241,7 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
         setProjectPrompts(activePrompts);
         setAppliedPrompts(allPrompts);
         setStagedPrompts(allPrompts);
+        setCategoryTaxonomy(d.category_taxonomy ?? []);
         // 「应用」状态也一并同步到 Context:首次进入时 selectedModels
         // 是 null (= 全部),这里把全选结果写回,保证首次 OverviewTab
         // 拉的也是「全平台」,而不是某种奇怪的 null 路径。
@@ -247,6 +256,8 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
           setProjectPrompts([]);
           setAppliedPrompts(new Set());
           setStagedPrompts(new Set());
+          setCategoryTaxonomy([]);
+          setExpandedCategories(new Set());
         }
       })
       .finally(() => {
@@ -326,10 +337,9 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
   const partialSelected =
     !allSelected && allModelKeys.some((k) => stagedModels.has(k));
 
-  // 早期返回必须放在所有 hook 之后 —— visible=false 时不要渲染菜单,
-  // 但 hook 数量必须保持稳定,否则 React 会报「Rendered fewer hooks
-  // than expected」。
-  if (!visible) return null;
+  // 早期返回(visible=false)挪到所有 hook 与 helper 之后;见 line 750
+  // 附近。原 line 343 这条早返回后面还有两个 useMemo,会导致 hook 数
+  // 不稳定,React 报 "Rendered fewer hooks than expected"。
 
   // AntD Menu 的 items —— Header 是 group(纯展示),模型复选框是普通项,
   // 「应用」放在 group 里。MenuProps["items"] 类型与渲染均交给 AntD,
@@ -536,90 +546,195 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
       return next;
     });
 
-  const promptDropdownItems: MenuProps["items"] = [
-    {
-      key: "header",
-      type: "group",
-      label: (
-        <div
-          className="gt-model-menu-head"
-          onClick={(e) => e.stopPropagation()}
+  // 按 category 分组 prompts。null category 落到 "__uncategorized__" 桶,
+  // 排序时统一映射成 "未分类" 显示。
+  const UNCAT_KEY = "__uncategorized__";
+  const UNCAT_LABEL = "未分类";
+  const promptsByCategory = useMemo(() => {
+    const groups: Record<string, PromptOut[]> = {};
+    for (const p of projectPrompts) {
+      const cat = p.category ?? UNCAT_KEY;
+      (groups[cat] ??= []).push(p);
+    }
+    return groups;
+  }, [projectPrompts]);
+
+  // 分类下拉的展示顺序:跟 taxonomy 一致,补上 taxonomy 之外、实际有问题的桶
+  // (比如老 prompt 的 category 被删了)。空分类不展示。
+  const categoryList = useMemo(() => {
+    const result: { key: string; label: string }[] = [];
+    const seen = new Set<string>();
+    for (const cat of categoryTaxonomy) {
+      if ((promptsByCategory[cat]?.length ?? 0) > 0) {
+        result.push({ key: cat, label: cat });
+        seen.add(cat);
+      }
+    }
+    for (const cat of Object.keys(promptsByCategory)) {
+      if (!seen.has(cat)) {
+        result.push({
+          key: cat,
+          label: cat === UNCAT_KEY ? UNCAT_LABEL : cat,
+        });
+      }
+    }
+    return result;
+  }, [categoryTaxonomy, promptsByCategory]);
+
+  const toggleCategoryExpansion = (cat: string) => {
+    setExpandedCategories((s) => {
+      const next = new Set(s);
+      if (next.has(cat)) next.delete(cat);
+      else next.add(cat);
+      return next;
+    });
+  };
+
+  // 分类整行 toggle —— 全选 → 全不选,部分/全无 → 全选。
+  // 同时强制展开,让用户看到刚改的明细;chevron 单独负责折叠。
+  const toggleCategorySelection = (prompts: PromptOut[], cat: string) => {
+    const allSelected =
+      prompts.length > 0 && prompts.every((p) => stagedPrompts.has(p.id));
+    setStagedPrompts((s) => {
+      const next = new Set(s);
+      if (allSelected) {
+        for (const p of prompts) next.delete(p.id);
+      } else {
+        for (const p of prompts) next.add(p.id);
+      }
+      return next;
+    });
+    setExpandedCategories((s) => new Set(s).add(cat));
+  };
+
+  const renderPromptDropdown = () => (
+    <div className="gt-prompt-dropdown-content">
+      <div
+        className="gt-prompt-head"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Checkbox
+          checked={promptAllSelected}
+          indeterminate={promptPartial}
+          onChange={(e) => {
+            if (e.target.checked) {
+              setStagedPrompts(new Set(allPromptIds));
+            } else {
+              setStagedPrompts(new Set());
+            }
+          }}
         >
-          <Checkbox
-            checked={promptAllSelected}
-            indeterminate={promptPartial}
-            onChange={(e) => {
-              if (e.target.checked) {
-                setStagedPrompts(new Set(allPromptIds));
-              } else {
-                setStagedPrompts(new Set());
-              }
-            }}
-          >
-            全选
-          </Checkbox>
-          <span className="gt-model-menu-count">
-            {stagedPrompts.size}/{allPromptIds.length}
-          </span>
-        </div>
-      ),
-    },
-    { type: "divider" },
-    ...projectPrompts.map((p) => ({
-      key: `prompt-${p.id}`,
-      label: (
-        <div onClick={(e) => e.stopPropagation()}>
-          <Tooltip
-            title={p.prompt.length > 50 ? p.prompt : ""}
-            placement="left"
-          >
-            <Checkbox
-              checked={stagedPrompts.has(p.id)}
-              onChange={() => togglePrompt(p.id)}
-            >
-              <span className="gt-prompt-text">{truncatePrompt(p.prompt)}</span>
-            </Checkbox>
-          </Tooltip>
-        </div>
-      ),
-    })),
-    { type: "divider" },
-    {
-      key: "apply",
-      type: "group",
-      label: (
-        <div
-          className="gt-model-menu-foot"
-          onClick={(e) => e.stopPropagation()}
+          全选
+        </Checkbox>
+        <span className="gt-prompt-head-count">
+          {stagedPrompts.size}/{allPromptIds.length}
+        </span>
+      </div>
+      <div className="gt-prompt-body">
+        {categoryList.map(({ key, label }) => {
+          const prompts = promptsByCategory[key] ?? [];
+          const expanded = expandedCategories.has(key);
+          const selectedInCategory = prompts.filter((p) =>
+            stagedPrompts.has(p.id),
+          ).length;
+          const catAllSelected =
+            prompts.length > 0 &&
+            prompts.every((p) => stagedPrompts.has(p.id));
+          const catPartial =
+            !catAllSelected && selectedInCategory > 0;
+          return (
+            <div key={key} className="gt-prompt-category">
+              <div
+                className="gt-prompt-category-head"
+                onClick={() => toggleCategorySelection(prompts, key)}
+              >
+                <span
+                  className="gt-prompt-category-checkbox-wrap"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Checkbox
+                    checked={catAllSelected}
+                    indeterminate={catPartial}
+                    onChange={() =>
+                      toggleCategorySelection(prompts, key)
+                    }
+                  />
+                </span>
+                <span className="gt-prompt-category-label">{label}</span>
+                <span className="gt-prompt-category-count">
+                  {selectedInCategory > 0
+                    ? `已选 ${selectedInCategory}/${prompts.length}`
+                    : `${prompts.length} 个`}
+                </span>
+                <span
+                  className="gt-prompt-category-chevron"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleCategoryExpansion(key);
+                  }}
+                >
+                  {expanded ? "▾" : "▸"}
+                </span>
+              </div>
+              {expanded && (
+                <div className="gt-prompt-category-body">
+                  {prompts.map((p) => (
+                    <div
+                      key={p.id}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Tooltip
+                        title={p.prompt.length > 50 ? p.prompt : ""}
+                        placement="left"
+                      >
+                        <Checkbox
+                          checked={stagedPrompts.has(p.id)}
+                          onChange={() => togglePrompt(p.id)}
+                        >
+                          <span className="gt-prompt-text">
+                            {truncatePrompt(p.prompt)}
+                          </span>
+                        </Checkbox>
+                      </Tooltip>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div
+        className="gt-prompt-foot"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Button
+          type="primary"
+          size="small"
+          block
+          onClick={() => {
+            const isFullSelection =
+              stagedPrompts.size === allPromptIds.length &&
+              allPromptIds.length > 0;
+            setAppliedPrompts(new Set(stagedPrompts));
+            toolbar.apply({
+              selectedPromptIds: isFullSelection
+                ? null
+                : Array.from(stagedPrompts),
+            });
+            message.success(
+              isFullSelection
+                ? "已应用:全部问题"
+                : `已应用:已选 ${stagedPrompts.size} 个问题`,
+            );
+            setPromptMenuOpen(false);
+          }}
         >
-          <Button
-            type="primary"
-            size="small"
-            block
-            onClick={() => {
-              const isFullSelection =
-                stagedPrompts.size === allPromptIds.length &&
-                allPromptIds.length > 0;
-              setAppliedPrompts(new Set(stagedPrompts));
-              toolbar.apply({
-                selectedPromptIds: isFullSelection
-                  ? null
-                  : Array.from(stagedPrompts),
-              });
-              message.success(
-                isFullSelection
-                  ? "已应用:全部问题"
-                  : `已应用:已选 ${stagedPrompts.size} 个问题`,
-              );
-              setPromptMenuOpen(false);
-            }}
-          >
-            应用
-          </Button>
-        </div>
-      ),
-    },
-  ];
+          应用
+        </Button>
+      </div>
+    </div>
+  );
 
   const promptValueLabel = promptsLoading
     ? "加载中…"
@@ -630,6 +745,12 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
         : appliedPrompts.size === 0
           ? "未选"
           : `已选 ${appliedPrompts.size}`;
+
+  // 早期返回必须放在所有 hook(useMemo / useEffect 等)之后 —— 之前
+  // 这条 early return 在第 343 行,后面还有两个 useMemo;visible 切换
+  // 时 hook 数量会变,React 报 "Rendered fewer hooks than expected"。
+  // 修法:把可见性判断挪到所有 hook 与 helper 之后,JSX 渲染之前。
+  if (!visible) return null;
 
   return (
     <div className="gt">
@@ -661,16 +782,19 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
         </Dropdown>
 
         <Dropdown
-          menu={{ items: promptDropdownItems }}
+          dropdownRender={renderPromptDropdown}
           open={promptMenuOpen}
           onOpenChange={(next, info) => {
-            if (next) setStagedPrompts(new Set(appliedPrompts));
+            if (next) {
+              setStagedPrompts(new Set(appliedPrompts));
+              setExpandedCategories(new Set());
+            }
             if (!next && info?.source === "menu") return; // 保留多选
             setPromptMenuOpen(next);
           }}
           trigger={["click"]}
           disabled={projectPrompts.length === 0}
-          overlayClassName="gt-model-dropdown gt-prompt-dropdown"
+          overlayClassName="gt-prompt-dropdown"
           placement="bottomLeft"
         >
           <Button className="gt-btn" icon={<QuestionCircleOutlined />}>

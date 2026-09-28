@@ -9,6 +9,7 @@ import {
   BookOutlined,
   FileSearchOutlined,
   FundProjectionScreenOutlined,
+  FileTextOutlined,
   InboxOutlined,
   LinkOutlined,
   SettingOutlined,
@@ -48,6 +49,7 @@ type ProjectTabKey =
   | "self-articles"
   | "citation"
   | "answer"
+  | "report"
   | "settings";
 
 interface NavLeaf {
@@ -78,6 +80,7 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
   },
   citation: { key: "citation", label: "引用源分析", icon: <LinkOutlined /> },
   answer: { key: "answer", label: "答案质量分析", icon: <FileSearchOutlined /> },
+  report: { key: "report", label: "周报", icon: <FileTextOutlined /> },
   settings: { key: "settings", label: "设置", icon: <SettingOutlined /> },
 };
 
@@ -86,7 +89,7 @@ const PROJECT_GROUP_LAYOUT: { title: string; keys: ProjectTabKey[] }[] = [
     title: "数据洞察",
     keys: ["overview", "question", "competitor", "source", "self-articles", "citation"],
   },
-  { title: "数据中心", keys: ["answer"] },
+  { title: "数据中心", keys: ["answer", "report"] },
   { title: "系统", keys: ["settings"] },
 ];
 
@@ -476,7 +479,19 @@ export default function AppLayout() {
             ToolbarFilterProvider 把「应用」按钮触发的筛选版本号下发给
             各数据 Tab(OverviewTab / QuestionTab ...),保证点确认就刷新。 */}
         <ToolbarFilterProvider>
-          <GlobalToolbar visible={currentProjectId !== null && location.pathname.startsWith("/admin/projects/")} />
+          {/* 报告预览页(/admin/projects/:id/reports/:reportId)是出版
+              物阅读器,spec §3.4 明确不接 toolbar —— 顶部只留返回 +
+              打印按钮。 */}
+          {(() => {
+            const isPreviewRoute = /^\/admin\/projects\/\d+\/reports\/\d+/.test(
+              location.pathname,
+            );
+            const visible =
+              currentProjectId !== null &&
+              location.pathname.startsWith("/admin/projects/") &&
+              !isPreviewRoute;
+            return <GlobalToolbar visible={visible} />;
+          })()}
           <Content className="app-content">
             <Outlet />
           </Content>

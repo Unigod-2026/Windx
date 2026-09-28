@@ -662,6 +662,12 @@
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* 让 AntD Input 在 w-field 里走与 w-input / w-tag-input 一致的 40px 高度,
+   与兄弟 w-tag-input 等高对齐(原本 AntD 默认 32px 比 tag-input 矮)。 */
+.w-field .ant-input {
+  height: 40px;
+}
+
 .w-input:focus {
   outline: none;
   border-color: var(--w-brand);

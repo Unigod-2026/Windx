@@ -11,12 +11,17 @@ import Dashboard from "./pages/Dashboard";
 import Customers from "./pages/Customers";
 import ProjectsList from "./pages/Projects/List";
 import ProjectDetail from "./pages/Projects/Detail";
+import PublicReportPreview from "./pages/PublicReportPreview";
 import NewProjectPage from "./pages/Projects/NewProject";
 import PendingProjectsList from "./pages/PendingProjects/List";
 
 const router = createBrowserRouter([
   { path: "/login", element: <Login /> },
   { path: "/", element: <Navigate to="/admin" replace /> },
+  // 公开报告预览 —— 无需登录,任何人凭 share_token 都能看。
+  // 路径独立于 /admin/*,不走 RequireAuth,不走 AppLayout
+  // (接收者通常不在 app 内,侧边栏/工具栏是噪音)。
+  { path: "/public/reports/:token", element: <PublicReportPreview /> },
   {
     path: "/admin",
     element: (

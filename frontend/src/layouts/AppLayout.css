@@ -901,10 +901,17 @@ body.windx-new-project .app-content {
   width: 260px;
   padding: 8px 4px;
 }
-/* 问题下拉 —— 同样的多选结构,但需要更宽以容纳 prompt 文本(超 50 字省略)。 */
-.gt-prompt-dropdown .ant-dropdown-menu {
-  width: 360px;
-  padding: 8px 4px;
+/* 问题下拉 —— 自定义渲染(默认折叠,按分类展开)。比模型下拉更宽,
+   因为 prompt 文本超 50 字省略需要横向空间。 */
+.gt-prompt-dropdown .gt-prompt-dropdown-content {
+  width: 380px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  max-height: 540px;
+  overflow: hidden;
 }
 .gt-model-dropdown .gt-model-menu {
   display: flex;
@@ -915,9 +922,84 @@ body.windx-new-project .app-content {
   width: 100%;
   padding: 4px 4px;
 }
-.gt-prompt-dropdown .ant-dropdown-menu-item .ant-checkbox-wrapper {
+.gt-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0);
+}
+.gt-prompt-head-count {
+  font-size: 12px;
+  color: var(--text-tertiary, #8c8c8c);
+}
+.gt-prompt-body {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 6px 8px;
+}
+.gt-prompt-category {
+  margin-top: 2px;
+  min-width: 0;
+}
+.gt-prompt-category-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.gt-prompt-category-head:hover {
+  background: #f5f5f5;
+}
+/* 分类行最左侧的复选框 —— 阻止冒泡到行的全选 toggle,只走自己的 onChange。 */
+.gt-prompt-category-checkbox-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.gt-prompt-category-chevron {
+  font-size: 11px;
+  color: var(--text-tertiary, #8c8c8c);
+  width: 12px;
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 2px;
+}
+.gt-prompt-category-label {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #1f1f1f);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gt-prompt-category-count {
+  font-size: 12px;
+  color: var(--text-tertiary, #8c8c8c);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.gt-prompt-category-body {
+  padding: 2px 8px 4px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.gt-prompt-category-body .ant-checkbox-wrapper {
   width: 100%;
   padding: 4px 8px;
+  min-width: 0;
+}
+.gt-prompt-foot {
+  border-top: 1px solid var(--border-light, #f0f0f0);
+  padding: 8px 12px;
 }
 /* 日期下拉 —— 4 个预设 + 自定义 RangePicker。RangePicker 需要更宽。 */
 .gt-date-dropdown .ant-dropdown-menu {

@@ -203,7 +203,7 @@ class WizardQuestion(BaseModel):
 
 class WizardBrand(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
-    product: str | None = Field(default=None, max_length=255)
+    product: str = Field(..., min_length=1, max_length=255)
     aliases: list[str] = Field(default_factory=list)
 
 

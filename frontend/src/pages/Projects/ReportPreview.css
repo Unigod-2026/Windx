@@ -1,0 +1,709 @@
+/*
+ * 周报视觉 token —— 对齐 docs/参芪十一味颗粒-GEO周报-20260814.pdf。
+ *
+ * 关键色:
+ *   --rp-paper        全局底色(暖白)
+ *   --rp-ink          正文深色
+ *   --rp-ink-soft     副文字
+ *   --rp-ink-mute     占位灰
+ *   --rp-rule         表格 / 卡片边框
+ *   --rp-navy         标题 + KPI 数字(深藏青)
+ *   --rp-blue         折线 + 关键点(中蓝)
+ *   --rp-blue-soft    折线 Y/X 轴标签
+ *   --rp-bar          章节标题左侧橙条
+ *   --rp-callout-bg   章节底部米黄色总结框
+ */
+
+:root {
+  --rp-paper: #FCFCFA;
+  --rp-card: #FFFFFF;
+  --rp-ink: #1F1F1F;
+  --rp-ink-soft: #666666;
+  --rp-ink-mute: #BFBFBF;
+  --rp-rule: #E8E8E8;
+  --rp-navy: #1F3A8A;
+  --rp-blue: #2E5BFF;
+  --rp-blue-soft: #C7D2FE;
+  --rp-bar: #E8A33D;
+  --rp-header-bg: #EEF2F8;
+  --rp-callout-bg: #FFF8E1;
+  --rp-callout-rule: #F0DFA8;
+  --rp-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.report-preview {
+  min-height: 100vh;
+  background: var(--rp-paper);
+  color: var(--rp-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+  padding: 0 24px 80px;
+}
+
+/* ===== Toolbar ===== */
+
+.report-preview-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--rp-rule);
+}
+
+.report-preview-bar button,
+.report-preview-bar .ant-btn {
+  font-family: inherit;
+}
+
+/* ===== 头部:top bar + title ===== */
+
+.report-preview-body {
+  max-width: 760px;
+  margin: 0 auto;
+  padding-top: 32px;
+}
+
+.report-preview-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  font-size: 12px;
+  color: var(--rp-ink-soft);
+  padding: 16px 20px;
+  background: linear-gradient(to right, #FFFFFF 0%, var(--rp-callout-bg) 100%);
+  border-radius: 6px;
+  margin-bottom: 24px;
+  border: 1px solid var(--rp-callout-rule);
+}
+
+.report-preview-topbar-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.report-preview-topbar-brand {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--rp-navy);
+}
+
+.report-preview-topbar-tagline {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--rp-ink-soft);
+}
+
+.report-preview-topbar-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  text-align: right;
+}
+
+.report-preview-topbar-project {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--rp-ink);
+}
+
+.report-preview-topbar-period {
+  font-size: 11px;
+  color: var(--rp-ink-soft);
+}
+
+.report-preview-title {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--rp-navy);
+  margin: 24px 0 0 0;
+  letter-spacing: 1px;
+  padding-bottom: 12px;
+  border-bottom: 3px solid var(--rp-navy);
+}
+
+.report-preview-subtitle {
+  display: none; /* PDF 把副信息压成单行 meta,不再用大字号 subtitle */
+}
+
+.report-preview-meta {
+  font-size: 12px;
+  color: var(--rp-ink-soft);
+  margin-bottom: 32px;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-preview-meta-sep {
+  color: var(--rp-ink-mute);
+  margin: 0 6px;
+}
+
+/* ===== 章节 ===== */
+
+.report-preview-body section {
+  margin-top: 40px;
+}
+
+.report-preview-h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--rp-ink);
+  border-left: 4px solid var(--rp-bar);
+  padding: 2px 0 2px 12px;
+  margin: 0 0 16px 0;
+  background: transparent;
+}
+
+.report-preview-h3 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 18px 0 10px 0;
+  color: var(--rp-ink);
+}
+
+/* 5.2 每个变化桶的小标题(新增突破 / 上升 / 回落·失守 / 完全失守)
+   —— 比同级 .report-preview-h3 小一档,区分「章节子标题」与「表标题」 */
+.report-preview-h4 {
+  font-size: 11px;
+  font-weight: 600;
+  margin: 14px 0 6px 0;
+  color: var(--rp-ink);
+}
+
+/* ===== KPI cards ===== */
+
+.report-preview-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.report-preview-kpi {
+  background: var(--rp-card);
+  border: 1px solid var(--rp-rule);
+  border-radius: 4px;
+  padding: 14px 16px;
+  box-shadow: var(--rp-shadow);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.report-preview-kpi-label {
+  font-size: 11px;
+  color: var(--rp-ink-soft);
+  margin-top: 6px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.report-preview-kpi-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--rp-navy);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+}
+
+.report-preview-kpi-num {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.report-preview-kpi-unit {
+  font-size: 13px;
+  font-weight: 600;
+  margin-left: 2px;
+  color: inherit;
+  opacity: 0.9;
+}
+
+.report-preview-kpi-value.up   { color: var(--rp-up, #CF1322); }
+.report-preview-kpi-value.down { color: var(--rp-down, #3F8600); }
+.report-preview-kpi-value.flat { color: var(--rp-ink-mute); }
+
+/* ===== Sparkline (echarts) ===== */
+
+.report-preview-spark {
+  width: 100%;
+  height: 240px;
+  border: 1px solid var(--rp-rule);
+  border-radius: 4px;
+  background: var(--rp-card);
+  margin-top: 8px;
+  box-sizing: border-box;
+  box-shadow: var(--rp-shadow);
+}
+
+/* ===== 总结 callout ===== */
+
+.report-preview-callout {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: var(--rp-callout-bg);
+  border: 1px solid var(--rp-callout-rule);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--rp-ink);
+}
+
+/* 5.2 callout 内的粗体小标题(「本周边际变化解读」) */
+.report-preview-callout-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+/* 5.3 核心归因 —— 绿色底(色值取自示例 PDF 实测:#F0FDF4 / #BAF6D0) */
+.report-preview-callout--green {
+  background: #F0FDF4;
+  border-color: #BAF6D0;
+}
+
+/* ===== 表格 / 列表 / 块(沿用旧风格,后续章节再调) ===== */
+
+.report-preview-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-preview-table th,
+.report-preview-table td {
+  border-bottom: 1px solid var(--rp-rule);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.report-preview-table th {
+  background: #FAFAFA;
+  color: #374151;
+  font-weight: 500;
+}
+
+.report-preview-table td.num {
+  text-align: right;
+}
+
+.report-preview-table td.mark-yes {
+  background: #E6F7E6;
+  color: #389E0D;
+  font-weight: 700;
+  text-align: center;
+}
+
+.report-preview-table td.mark-no {
+  background: #FFE7D6;
+  color: #D4380D;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* 3.1 平台周环比 — 深蓝表头 + 隔行底色 + 单元格竖线(对齐 PDF) */
+.report-preview-table-31 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-bottom-color: var(--rp-navy);
+}
+
+.report-preview-table-31 tbody tr:nth-child(even) {
+  background: #F5F6F8;
+}
+
+.report-preview-table-31 th,
+.report-preview-table-31 td {
+  border-right: 1px solid #D9DCE0;
+}
+
+.report-preview-table-31 th:last-child,
+.report-preview-table-31 td:last-child {
+  border-right: none;
+}
+
+/* 3.2 问题×平台 矩阵 — 深蓝表头白字 + # 列 + 隔行底色 + ✓ 绿 / — 橙 */
+.report-preview-matrix {
+  table-layout: fixed;
+}
+
+.report-preview-matrix thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-right: 1px solid #D9DCE0;
+}
+
+.report-preview-matrix thead th:last-child {
+  border-right: none;
+}
+
+.report-preview-matrix th.matrix-num,
+.report-preview-matrix td.matrix-num {
+  width: 12px;
+  text-align: center;
+  color: var(--rp-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.report-preview-matrix tbody td {
+  padding: 4px 4px;
+  font-size: 12px;
+}
+
+.report-preview-matrix tbody tr.matrix-row-alt td {
+  background: #F8F9FA;
+}
+
+.report-preview-matrix th.matrix-num {
+  color: #FFFFFF; /* # 列头用白字 */
+  font-size: 10px;
+}
+
+.report-preview-matrix th.matrix-question-head {
+  text-align: left;
+  font-size: 10px;
+}
+
+.report-preview-matrix th.matrix-col-head {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 6px 2px;
+  vertical-align: top;
+  white-space: nowrap;
+  width: 48px; /* 模型列 48px */
+}
+
+.report-preview-matrix th.matrix-col-head div {
+  white-space: nowrap;
+}
+
+.report-preview-matrix .matrix-question {
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  border-right: 1px solid #D9DCE0;
+}
+
+.report-preview-matrix tbody tr.matrix-row-alt {
+  background: #F8F9FA;
+}
+
+.report-preview-matrix td {
+  border-right: 1px solid #D9DCE0;
+  border-left: 1px solid #D9DCE0;
+}
+
+.report-preview-matrix tr > *:first-child {
+  border-left: none;
+}
+.report-preview-matrix tr > *:last-child {
+  border-right: none;
+}
+
+/* 3.3 稳定提及的前 N 个问题 */
+.report-preview-table-33 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-right: 1px solid #D9DCE0;
+  font-size: 10px;
+  padding: 6px 8px;
+}
+
+.report-preview-table-33 thead th:last-child {
+  border-right: none;
+}
+
+.report-preview-table-33 th.stable-rank-head {
+  width: 32px;
+  padding: 4px 2px !important;
+  line-height: 1.15;
+  font-size: 10px;
+}
+
+.report-preview-table-33 th.stable-rank-head div {
+  white-space: nowrap;
+}
+.report-preview-table-33 th.stable-tag-head {
+  width: 70px;
+}
+.report-preview-table-33 th.stable-coverage-head {
+  width: 90px;
+}
+
+.report-preview-table-33 tbody td {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.report-preview-table-33 tbody tr.matrix-row-alt td {
+  background: #F8F9FA;
+}
+
+.report-preview-table-33 td {
+  border-right: 1px solid #D9DCE0;
+  border-left: 1px solid #D9DCE0;
+}
+
+.report-preview-table-33 tr > *:first-child {
+  border-left: none;
+}
+.report-preview-table-33 tr > *:last-child {
+  border-right: none;
+}
+
+.report-preview-table-33 td.stable-rank {
+  text-align: center;
+  color: var(--rp-ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.report-preview-table-33 td.stable-question {
+  text-align: left;
+}
+
+.report-preview-table-33 td.stable-coverage {
+  text-align: center;
+  color: var(--rp-ink);
+}
+
+.report-preview-table-33 .stable-tag {
+  display: inline-block;
+  padding: 1px 10px;
+  background: #E6F7E6;
+  color: #389E0D;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 5.1 持续未提及问题 — 与 3.3 同款(navy 表头 + 隔行 + 标签),2 列 */
+.report-preview-table-51 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-right: 1px solid #D9DCE0;
+  font-size: 10px;
+  padding: 6px 8px;
+}
+
+.report-preview-table-51 thead th:last-child {
+  border-right: none;
+}
+
+.report-preview-table-51 th.zm-status-head {
+  width: 90px;
+}
+
+.report-preview-table-51 th.zm-rank-head {
+  width: 32px;
+  padding: 4px 2px !important;
+  line-height: 1.15;
+  font-size: 10px;
+}
+
+.report-preview-table-51 tbody td {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-right: 1px solid #D9DCE0;
+  border-left: 1px solid #D9DCE0;
+}
+
+.report-preview-table-51 tbody tr.matrix-row-alt td {
+  background: #F8F9FA;
+}
+
+.report-preview-table-51 tr > *:first-child {
+  border-left: none;
+}
+.report-preview-table-51 tr > *:last-child {
+  border-right: none;
+}
+
+.report-preview-table-51 td.zm-rank {
+  text-align: center;
+  color: var(--rp-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.report-preview-table-51 td.zm-question {
+  text-align: left;
+}
+
+.report-preview-table-51 td.zm-status {
+  text-align: center;
+}
+
+.report-preview-table-51 .zm-tag {
+  display: inline-block;
+  padding: 1px 10px;
+  background: #FFE6E6;
+  color: #D4380D;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 5.2 本周边际变化 — 2 列(问题 / 覆盖变化),navy 表头 + 隔行底色 */
+.report-preview-table-52 {
+  margin-bottom: 4px;
+}
+
+.report-preview-table-52 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-right: 1px solid #D9DCE0;
+  font-size: 10px;
+  padding: 6px 8px;
+}
+
+.report-preview-table-52 thead th:last-child {
+  border-right: none;
+}
+
+.report-preview-table-52 th.chg-rank-head {
+  width: 32px;
+  padding: 4px 2px;
+}
+
+.report-preview-table-52 th.chg-delta-head {
+  width: 110px;
+}
+
+.report-preview-table-52 td.chg-rank {
+  text-align: center;
+  color: var(--rp-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.report-preview-table-52 tbody td {
+  padding: 6px 8px;
+  font-size: 12px;
+  border-right: 1px solid #D9DCE0;
+  border-left: 1px solid #D9DCE0;
+}
+
+.report-preview-table-52 tbody tr.matrix-row-alt td {
+  background: #F8F9FA;
+}
+
+.report-preview-table-52 tr > *:first-child {
+  border-left: none;
+}
+.report-preview-table-52 tr > *:last-child {
+  border-right: none;
+}
+
+.report-preview-table-52 td.chg-question {
+  text-align: left;
+}
+
+.report-preview-table-52 td.chg-delta {
+  text-align: center;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.report-preview-table-52 td.chg-up   { color: #389E0D; }
+.report-preview-table-52 td.chg-down { color: #D4380D; }
+
+/* ===== 二、本周总结 ===== */
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.summary-block {
+  background: var(--rp-card);
+  border: 1px solid var(--rp-rule);
+  border-radius: 4px;
+  padding: 14px 16px;
+  box-shadow: var(--rp-shadow);
+  border-left-width: 4px;
+  border-left-style: solid;
+}
+
+.summary-block--core {
+  grid-column: 1 / -1;
+  background: #E8F5E9;
+  border-left-color: #4CAF50;
+}
+
+.summary-block--blue   { border-left-color: var(--rp-blue); }
+.summary-block--orange { border-left-color: var(--rp-bar); }
+.summary-block--green  { border-left-color: #4CAF50; }
+
+.summary-block-head {
+  margin-bottom: 8px;
+}
+
+.summary-block-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.summary-block--core .summary-block-title   { color: #2E7D32; }
+.summary-block--blue .summary-block-title   { color: var(--rp-blue); }
+.summary-block--orange .summary-block-title { color: var(--rp-bar); }
+.summary-block--green .summary-block-title  { color: #2E7D32; }
+
+.summary-block p {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--rp-ink);
+}
+
+.report-preview-empty {
+  border: 1px dashed var(--rp-ink-mute);
+  border-radius: 4px;
+  padding: 24px;
+  text-align: center;
+  color: var(--rp-ink-mute);
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+/* 页脚 —— 左对齐两行,色值取自示例 PDF 实测(文字 #6A7280 / 分隔线 #E4E7EB) */
+.report-preview-footer {
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 1px solid #E4E7EB;
+  color: #6A7280;
+  font-size: 11px;
+  line-height: 1.9;
+}
+
+@media print {
+  .report-preview-bar { display: none; }
+  .report-preview { padding: 0; background: #FFFFFF; }
+  .report-preview-kpi,
+  .report-preview-table { break-inside: avoid; }
+  .report-preview-h2 { break-after: avoid; }
+}

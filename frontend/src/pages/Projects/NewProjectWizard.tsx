@@ -128,7 +128,7 @@ interface WizardState {
   customerId: number | null;
 }
 
-const initialBrand = (): WizardBrand => ({ name: "", product: null, aliases: [] });
+const initialBrand = (): WizardBrand => ({ name: "", product: "", aliases: [] });
 const initialMonitor = (): WizardMonitor => ({
   devices: [],
   modes: [],
@@ -529,11 +529,11 @@ function BrandsStep({
       <div className="w-block">
         <div className="w-block-head">
           <h3>自有品牌</h3>
-          <span className="w-required">品牌名必填</span>
+          <span className="w-required">监控名称 + 监控品牌均必填</span>
         </div>
         <div className="w-form-grid">
           <label className="w-field">
-            <span className="w-label">品牌名 *</span>
+            <span className="w-label">监控名称 *</span>
             <Input
               value={state.brand.name}
               placeholder="如:薇诺娜"
@@ -541,14 +541,14 @@ function BrandsStep({
             />
           </label>
           <label className="w-field">
-            <span className="w-label">产品名</span>
+            <span className="w-label">监控品牌 *</span>
             <Input
-              value={state.brand.product ?? ""}
+              value={state.brand.product}
               placeholder="如:舒敏保湿特护霜"
               onChange={(e) =>
                 setBrand({
                   ...state.brand,
-                  product: e.target.value.trim() ? e.target.value : null,
+                  product: e.target.value,
                 })
               }
             />
@@ -581,9 +581,9 @@ function BrandsStep({
                   删除
                 </Button>
               </div>
-              <div className="w-form-grid">
+              <div className="w-form-grid" style={{ gridTemplateColumns: "1fr 2fr" }}>
                 <label className="w-field">
-                  <span className="w-label">品牌名</span>
+                  <span className="w-label">品牌名 *</span>
                   <Input
                     value={c.name}
                     placeholder="如:珂润"
@@ -597,38 +597,19 @@ function BrandsStep({
                   />
                 </label>
                 <label className="w-field">
-                  <span className="w-label">产品名</span>
-                  <Input
-                    value={c.product ?? ""}
-                    placeholder="如:润浸保湿面霜"
-                    onChange={(e) =>
+                  <span className="w-label">别名</span>
+                  <AliasesEditor
+                    aliases={c.aliases}
+                    onChange={(next) =>
                       setCompetitors(
                         state.competitors.map((x, i) =>
-                          i === idx
-                            ? {
-                                ...x,
-                                product: e.target.value.trim() ? e.target.value : null,
-                              }
-                            : x,
+                          i === idx ? { ...x, aliases: next } : x,
                         ),
                       )
                     }
                   />
                 </label>
               </div>
-              <label className="w-field">
-                <span className="w-label">别名</span>
-                <AliasesEditor
-                  aliases={c.aliases}
-                  onChange={(next) =>
-                    setCompetitors(
-                      state.competitors.map((x, i) =>
-                        i === idx ? { ...x, aliases: next } : x,
-                      ),
-                    )
-                  }
-                />
-              </label>
             </div>
           ))
         )}
@@ -933,7 +914,7 @@ function ModeScheduleCard({
         <div className="w-block-head">
           <h3>{modeName}模式调度</h3>
         </div>
-        <p className="w-desc">未启用 —— 不会在 cron 中触发。</p>
+        <p className="w-desc">未启用 —— 不会被调度。</p>
         <Button
           type="default"
           onClick={() => onChange({ freq: "w1", days: [] })}
@@ -1325,7 +1306,7 @@ function SummaryStep({
         <div className="w-sum-card">
           <div className="w-sum-head">品牌与竞品</div>
           {row("自有品牌", state.brand.name.trim() || "—")}
-          {row("产品名", state.brand.product?.trim() || "—")}
+          {row("产品名", state.brand.product.trim() || "—")}
           {row(
             "别名",
             state.brand.aliases.length > 0 ? (
@@ -1527,7 +1508,12 @@ export default function NewProjectWizard(_props: Props) {
       case "categories":
         return null;
       case "brands":
-        if (!state.brand.name.trim()) return "请填写自有品牌名";
+        if (!state.brand.name.trim()) return "请填写监控名称";
+        if (!state.brand.product.trim()) return "请填写监控品牌";
+        for (let i = 0; i < state.competitors.length; i++) {
+          if (!state.competitors[i].name.trim())
+            return `请填写第 ${i + 1} 个竞品的品牌名`;
+        }
         return null;
       case "models":
         if (state.models.length === 0) return "请至少选择 1 个监控模型";

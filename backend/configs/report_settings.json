@@ -1,0 +1,31 @@
+{
+  "projects": [
+    {
+      "project_id": 2,
+      "baseline_date": "2026-08-23",
+      "baseline_rate": 0.42
+    },
+    {
+      "project_id": 35,
+      "baseline_date": "2026-09-10",
+      "baseline_rate": 0.12
+    },
+    {
+      "project_id": 38,
+      "baseline_date": "2026-06-01",
+      "baseline_rate": 0.0083
+    },
+    {
+      "project_id": 46,
+      "baseline_date": "2026-09-01",
+      "baseline_rate": 0.0012
+    }
+  ],
+  "templates": [
+    {
+      "id": "weekly_summary",
+      "name": "周报",
+      "description": "AI平台提及率分析"
+    }
+  ]
+}

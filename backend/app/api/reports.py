@@ -621,11 +621,10 @@ def publish_report(
 ):
     """Publish the report: makes its public URL accessible.
 
-    Validation: every field declared in this template's
-    ``TEMPLATE_FIELDS`` must have a non-empty value in
-    ``manual_overrides``. Empty values publish anyway but render as
-    the "暂无数数据" placeholder — but we choose to require
-    non-empty so the public URL never shows a half-finished report.
+    No field-level validation — partial overrides are allowed and
+    unfilled sections render as "暂无数数据" on the public page.
+    Operator workflow: publish early, fill later (also via
+    ``unpublish`` → edit → ``publish``).
     """
     row = db.get(ReportRow, report_id)
     if row is None:
@@ -635,22 +634,6 @@ def publish_report(
         and row.customer_id != user.customer_id
     ):
         raise HTTPException(status_code=403, detail="forbidden")
-
-    # Collect required fields for this template.
-    fields = TEMPLATE_FIELDS.get(row.template_id, [])
-    overrides = row.manual_overrides or {}
-    missing = [
-        f["key"]
-        for f in fields
-        if not (overrides.get(f["key"]) or "").strip()
-    ]
-    if missing:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"cannot publish: missing or empty fields: {missing}"
-            ),
-        )
 
     row.is_published = True
     db.commit()
@@ -722,6 +705,9 @@ def unpublish_report(
 
 # --------------------------------------------------------------------- #
 # GET /api/reports/{report_id}/html — stream HTML
+# ⚠️  功能已取消(2026-09-28):HTML 下载不在产品范围内。保留路由 + 函数
+#    以避免破坏遗留 URL/客户端引用;不再维护。整套 HTML 渲染链路
+#    (report_render.render_html + data/reports/*.html 文件) 都不再迭代。
 # --------------------------------------------------------------------- #
 
 
@@ -732,6 +718,9 @@ def get_report_html(
     user: AdminUser = Depends(get_current_user),
 ):
     """Download the report as a self-contained HTML document.
+
+    ⚠️  功能已取消:此端点不再用于产品流程,保留仅为兜底。后期可整体删除
+        (路由 + frontend fetchReportHtml + report_render.render_html)。
 
     Re-renders the template and merges ``manual_overrides`` rather than
     serving the file written at generate time — the on-disk file has no

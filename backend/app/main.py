@@ -19,12 +19,15 @@ from starlette.routing import Route
 
 from app.api import (
     admin_media_dictionary,
+    admin_report_templates,
     auth,
     config,
     customers,
     dashboard,
     molizhishu,
     projects,
+    public_reports,
+    reports,
     tasks,
 )
 from app.config import get_settings
@@ -86,6 +89,9 @@ app.include_router(tasks.router)
 app.include_router(dashboard.router)
 app.include_router(molizhishu.router)
 app.include_router(admin_media_dictionary.router)
+app.include_router(reports.router)
+app.include_router(public_reports.router)
+app.include_router(admin_report_templates.router)
 
 
 @app.get("/health")

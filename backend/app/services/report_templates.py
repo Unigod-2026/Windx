@@ -86,25 +86,34 @@ def weekly_summary(ctx: BuildContext) -> dict:
     Aggregates per-day mention rate and per-platform current-vs-previous
     rate, then shapes them into the snapshot dict the renderer expects.
     """
+    # 1.1 走势:从基线日期画到今天 — 包含到 today 的最新数据,便于看实时趋势
+    # 窗口延到 max(period_end_exclusive, today+1day),这样快照里有今天的数据点。
+    # KPI 仍只看 period_end 那天的数据(用 snapshot.period.end 在前端过滤),不混用。
+    from app.models.common import now_local
+    chart_window_start = ctx.baseline_date or ctx.period_start
+    today_excl = now_local().date() + timedelta(days=1)
+    chart_window_end = max(ctx.period_end_exclusive, today_excl)
     daily_raw = report_metrics.daily_mention_rate(
         ctx.db,
         project_id=ctx.project.id,
-        window_start=ctx.period_start,
-        window_end_exclusive=ctx.period_end_exclusive,
+        window_start=chart_window_start,
+        window_end_exclusive=chart_window_end,
         platform_codes=ctx.platform_codes,
         prompts=ctx.prompts,
     )
-    daily = report_metrics.fill_window_gaps(
-        daily_raw, ctx.period_start, ctx.period_end_exclusive
-    )
+    daily = daily_raw  # 不补零天,保持「只显示有数据的快照日期」
+    chart_end_date = (chart_window_end - timedelta(days=1)).isoformat()
 
+    # 3.1 章节口径:仅取周期末日(period.end)与「上周同日」(period.start - 1)的
+    # 单日数据 — 不是窗口均值。窗口长度由用户在 GenerateReportIn.period_start/end
+    # 决定,3.1 比较的是两端点这两个具体日期。
     breakdown_raw = report_metrics.platform_breakdown(
         ctx.db,
         project_id=ctx.project.id,
-        current_start=ctx.period_start,
+        current_start=ctx.period_end_exclusive - timedelta(days=1),
         current_end_exclusive=ctx.period_end_exclusive,
-        previous_start=ctx.previous_start,
-        previous_end_exclusive=ctx.previous_end_exclusive,
+        previous_start=ctx.period_start - timedelta(days=1),
+        previous_end_exclusive=ctx.period_start,
         platform_codes=ctx.platform_codes,
         prompts=ctx.prompts,
     )
@@ -130,81 +139,104 @@ def weekly_summary(ctx: BuildContext) -> dict:
     zero_prompts = report_metrics.zero_mention_prompts(
         ctx.db,
         project_id=ctx.project.id,
-        since_date=ctx.period_start,
+        since_date=ctx.baseline_date or ctx.period_start,
         platform_codes=ctx.platform_codes,
         prompts=ctx.prompts,
     )
 
     # ---- Section 三.3: 问题×平台 矩阵 ----
-    platform_codes_in_window = sorted({
-        r[0] for r in ctx.db.execute(
-            select(Subtask.platform).distinct()
-        ).all() if r[0]
-    })
+    # 3.2 章节(每个问题的具体提及率)— 数据源只 BrandMention,不复用 Subtask。
+    # 列 = (platform, delivery, thinking_mode) 组合 — 包含「整窗内出现过该组合但本周 0 提及」的列。
+    # 行 = 项目配置的 prompt。
+    matrix_keys: list[tuple[str, str, str]] = []
+    mentioned_by_prompt: dict[str, set[tuple]] = {}
+
+    # 1. 先列全集:窗口内所有出现过的 (platform, delivery, thinking_mode) 组合,
+    #    与 is_mention 无关(总提及率 = 0 的列也要显示)。
+    all_combo_rows = ctx.db.execute(
+        select(
+            BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
+        ).where(
+            BrandMention.project_id == ctx.project.id,
+            BrandMention.is_self == True,
+            BrandMention.extract_status != ExtractStatus.PENDING,
+            BrandMention.created_at >= ctx.period_start,
+            BrandMention.created_at < ctx.period_end_exclusive,
+            *([BrandMention.platform.in_(ctx.platform_codes)] if ctx.platform_codes else []),
+        ).distinct()
+    ).all()
+    seen: set[tuple] = set()
+    for p_code, delivery, thinking in all_combo_rows:
+        key = (p_code or "", (delivery or "web").lower(), "think" if thinking else "fast")
+        if key not in seen:
+            matrix_keys.append(key)
+            seen.add(key)
+
+    # 2. 再查提及明细:is_mention=1 的 (prompt, combo) 关系
+    rows = ctx.db.execute(
+        select(
+            BrandMention.platform,
+            BrandMention.delivery_mode,
+            BrandMention.thinking_mode,
+            BrandMention.prompt,
+        ).where(
+            BrandMention.project_id == ctx.project.id,
+            BrandMention.is_self == True,
+            BrandMention.is_mention == 1,
+            BrandMention.extract_status != ExtractStatus.PENDING,
+            BrandMention.created_at >= ctx.period_start,
+            BrandMention.created_at < ctx.period_end_exclusive,
+            *([BrandMention.platform.in_(ctx.platform_codes)] if ctx.platform_codes else []),
+            *([BrandMention.prompt.in_(ctx.prompts)] if ctx.prompts else []),
+        )
+    ).all()
+    for p_code, delivery, thinking, p_text in rows:
+        if not p_text:
+            continue
+        key = (p_code or "", (delivery or "web").lower(), "think" if thinking else "fast")
+        mentioned_by_prompt.setdefault(p_text, set()).add(key)
+
+    proj_prompts_rows = ctx.db.execute(
+        select(ProjectPrompt.id, ProjectPrompt.prompt).where(
+            ProjectPrompt.project_id == ctx.project.id
+        ).order_by(ProjectPrompt.sort)
+    ).all()
     matrix_rows: list[dict] = []
-    if platform_codes_in_window:
-        rows = ctx.db.execute(
-            select(Subtask.prompt, Subtask.platform)
-            .join(Task, Task.task_id == Subtask.task_id)
-            .join(Project, Project.id == Task.project_id)
-            .join(
-                BrandMention,
-                (BrandMention.subtask_id == Subtask.subtask_id)
-                & (BrandMention.brand == func.coalesce(Project.brand, ""))
-            )
-            .where(
-                Task.project_id == ctx.project.id,
-                Task.created_local_at >= ctx.period_start,
-                Task.created_local_at < ctx.period_end_exclusive,
-                BrandMention.extract_status == ExtractStatus.SUCCESS,
-                Subtask.platform.in_(platform_codes_in_window),
-                *([Subtask.platform.in_(ctx.platform_codes)] if ctx.platform_codes else []),
-                *([Subtask.prompt.in_(ctx.prompts)] if ctx.prompts else []),
-            )
-        ).all()
-        mentioned_by_prompt: dict[str, set[str]] = {}
-        for p_text, p_code in rows:
-            mentioned_by_prompt.setdefault(p_text, set()).add(p_code)
-
-        proj_prompts_rows = ctx.db.execute(
-            select(ProjectPrompt.id, ProjectPrompt.prompt).where(
-                ProjectPrompt.project_id == ctx.project.id
-            ).order_by(ProjectPrompt.sort)
-        ).all()
-        for pid, p_text in proj_prompts_rows:
-            mentioned = mentioned_by_prompt.get(p_text, set())
-            matrix_rows.append({
-                "prompt_id": pid,
-                "prompt_text": p_text,
-                "per_platform": {
-                    pc: (pc in mentioned) for pc in platform_codes_in_window
-                },
-            })
-
-    # ---- Section 三.2: 平台简评 ----
-    platform_summary: list[dict] = []
-    for r in breakdown:
-        if r["delta_pp"] > 0.0005:
-            direction = "↑"
-        elif r["delta_pp"] < -0.0005:
-            direction = "↓"
-        else:
-            direction = "="
-        sign = "+" if r["delta_pp"] > 0 else ""
-        platform_summary.append({
-            "platform_code": r["platform_code"],
-            "platform_label": r["platform_label"],
-            "note": (
-                f"{r['platform_label']}: 本期 {r['current_mentioned']}/{r['current_total']} "
-                f"提及 {direction} {sign}{r['delta_pp'] * 100:.1f}pp"
-            ),
+    for pid, p_text in proj_prompts_rows:
+        mentioned = mentioned_by_prompt.get(p_text, set())
+        matrix_rows.append({
+            "prompt_id": pid,
+            "prompt_text": p_text,
+            "per_platform": {
+                f"{pc}|{d}|{t}": ((pc, d, t) in mentioned)
+                for (pc, d, t) in matrix_keys
+            },
         })
+
+    # ---- (删)平台简评 3.2 — 产品决策移除,不再生成 platform_summary 字段
+
+    # ---- Section 三.4: 稳定提及的前 N 个问题(基线至今累计) ----
+    # 窗口:基线日期 → 今天(实时累计),与 1.1 走势图同步
+    stable_window_end = max(ctx.period_end_exclusive, now_local().date() + timedelta(days=1))
+    stable_result = report_metrics.top_stable_prompts(
+        ctx.db,
+        project_id=ctx.project.id,
+        window_start=ctx.baseline_date or ctx.period_start,
+        window_end_exclusive=stable_window_end,
+        top_n=5,
+        platform_codes=ctx.platform_codes,
+        prompts=ctx.prompts,
+    )
 
     return {
         "project": {
             "id": ctx.project.id,
             "name": ctx.project.name,
             "brand": ctx.project.brand,
+            # 页脚「所属公司 X / 仅供 X 内部使用」用 —— 客户主体,对应示例 PDF 的「山高制药」
+            "customer_name": ctx.project.customer.name,
         },
         "period": {
             "start": ctx.period_start.isoformat(),
@@ -221,6 +253,10 @@ def weekly_summary(ctx: BuildContext) -> dict:
         "title": default_title(
             ctx.project.name, ctx.period_start, ctx.period_end_exclusive - timedelta(days=1)
         ),
+        # 图表 X 轴终点(实时延伸到今天),用于 Sparkline 定位 — KPI 仍按 period_end 取数
+        "chart_end_date": chart_end_date,
+        # 上一周期末日(供 3.1 表格表头)— 与 period 长度同步
+        "previous_end_date": (ctx.previous_end_exclusive - timedelta(days=1)).isoformat(),
         "generated_by": ctx.generated_by.display_name,
         "generated_at": ctx.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
         "daily_mention_rate": [
@@ -233,10 +269,20 @@ def weekly_summary(ctx: BuildContext) -> dict:
             for row in daily
         ],
         "platform_breakdown": breakdown,
-        "platform_summary": platform_summary,
         "prompt_platform_matrix": matrix_rows,
         "weekly_changes": changes,
         "zero_mention_prompts": zero_prompts,
+        # ---- 1.1 走势说明(图表下方那段文字,运营手填) ----
+        "weekly_chart_summary": None,
+        # ---- 3.3 稳定提及的前 N 个问题 ----
+        "stable_prompts": stable_result["stable_prompts"],
+        "total_monitor_days": stable_result["total_monitor_days"],
+        # ---- 3.1 平台周环比说明(3.1 表格下方那段文字,运营手填) ----
+        "weekly_platform_summary": None,
+        # ---- 5.1 持续未提及说明(5.1 表格下方那段文字,运营手填) ----
+        "weekly_zero_mention_summary": None,
+        # ---- 5.2 本周边际变化解读(5.2 四张表下方那段文字,运营手填) ----
+        "weekly_change_summary": None,
         # ---- 二、本周总结 (4 块,运营手填) ----
         "weekly_summary": {
             "core_finding": None,
@@ -244,8 +290,17 @@ def weekly_summary(ctx: BuildContext) -> dict:
             "content_result": None,
             "scene_coverage": None,
         },
-        # ---- 四、内容运营 (no data source yet) ----
-        "content_ops": None,
+        # ---- 四、内容运营 ----
+        # KPI「本周发布独立标题」已接 geo_own_articles.publish_date;
+        # 4.x 章节其余字段(发布明细 / 引用分布 / TOP10)仍为 None —— spec §9 明确不做。
+        "content_ops": {
+            "weekly_post_count": report_metrics.weekly_post_count(
+                ctx.db,
+                project_id=ctx.project.id,
+                window_start=ctx.period_start,
+                window_end_exclusive=ctx.period_end_exclusive,
+            ),
+        },
         # ---- 5.3 核心归因 (运营手填) ----
         "attribution": None,
     }
@@ -281,6 +336,26 @@ TEMPLATES: dict[str, TemplateFn] = {
 TEMPLATE_FIELDS: dict[str, list[dict]] = {
     "weekly_summary": [
         {
+            "key": "weekly_chart_summary",
+            "label": "1.1 走势说明",
+            "hint": "图表下方的说明文字,描述本期走势要点",
+        },
+        {
+            "key": "weekly_platform_summary",
+            "label": "3.1 平台周环比说明",
+            "hint": "3.1 表格下方的说明文字,描述平台层面要点",
+        },
+        {
+            "key": "weekly_zero_mention_summary",
+            "label": "5.1 持续未提及说明",
+            "hint": "5.1 表格下方的说明文字,描述本期持续未提及问题的运营关注点",
+        },
+        {
+            "key": "weekly_change_summary",
+            "label": "5.2 本周边际变化解读",
+            "hint": "5.2 四张表下方的说明文字,解读本周问题覆盖的正向突破与回落风险",
+        },
+        {
             "key": "weekly_core_finding",
             "label": "本周核心结论",
             "hint": "1-2 句话总结本周监控结果",
@@ -303,7 +378,7 @@ TEMPLATE_FIELDS: dict[str, list[dict]] = {
         {
             "key": "attribution",
             "label": "5.3 核心归因",
-            "hint": "下一阶段重点关注的归因分析",
+            "hint": "本期空白问题与头部回落的归因说明",
         },
     ],
 }

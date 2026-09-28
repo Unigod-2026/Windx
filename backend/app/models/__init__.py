@@ -44,6 +44,7 @@ from app.models.project import (  # noqa: F401
     ProjectPlatform,
     ProjectPrompt,
 )
+from app.models.report import Report  # noqa: F401
 from app.models.schedule import ScheduleRun  # noqa: F401
 from app.models.task import (  # noqa: F401
     CallbackEvent,

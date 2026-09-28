@@ -10,7 +10,8 @@
  * 操作:
  *   - 生成周报 → GenerateReportModal(模板 + 基线两个必填)
  *   - 打开全屏 → 公开 URL(/public/reports/{share_token}),新标签页
- *   - 下载 HTML → blob URL(浏览器原生,Ctrl+P 转 PDF)
+ *   - 复制链接 → 同一 URL 写入剪贴板
+ *   - 取消发布 → 仅已发布报告可见(对应 admin 操作的归属,公开页不放)
  */
 
 import { useEffect, useState } from "react";
@@ -29,12 +30,12 @@ import {
 import { CopyOutlined, PlusOutlined } from "@ant-design/icons";
 import dayjs, { Dayjs } from "dayjs";
 import {
-  fetchReportHtml,
   generateReport,
   getProjectBaseline,
   listReports,
   listTemplates,
   publicReportUrl,
+  unpublishReport,
   type Report,
   type ReportTemplate,
 } from "../../api/reports";
@@ -139,18 +140,13 @@ export default function ReportTab({ projectId }: Props) {
     }
   };
 
-  const downloadHtml = async (id: number) => {
+  const unpublish = async (id: number) => {
     try {
-      const html = await fetchReportHtml(id);
-      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `report-${id}.html`;
-      a.click();
-      URL.revokeObjectURL(url);
+      await unpublishReport(id);
+      message.success("已取消发布");
+      reload();
     } catch (err) {
-      message.error((err as Error).message || "下载失败");
+      message.error((err as Error).message || "取消发布失败");
     }
   };
 
@@ -223,7 +219,9 @@ export default function ReportTab({ projectId }: Props) {
                 >
                   复制链接
                 </Button>
-                <Button onClick={() => downloadHtml(r.id)}>下载 HTML</Button>
+                {r.is_published && (
+                  <Button onClick={() => unpublish(r.id)}>取消发布</Button>
+                )}
               </div>
             </li>
           ))}

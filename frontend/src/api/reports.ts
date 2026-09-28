@@ -72,7 +72,11 @@ export async function generateReport(
 }
 
 /** Open / preview a report. Returns the HTML string with auth header
- *  attached; caller is responsible for rendering it. */
+ *  attached; caller is responsible for rendering it.
+ *
+ *  ⚠️  功能已取消(2026-09-28):HTML 下载不在产品范围内。保留函数仅为
+ *      兜底;没有调用方在使用。可以从代码库删除。
+ */
 export async function fetchReportHtml(reportId: number): Promise<string> {
   const res = await client.get<string>(`/reports/${reportId}/html`, {
     responseType: "text",
@@ -101,13 +105,41 @@ export interface ReportMeta {
   generated_at: string;
 }
 
+/** One row in a 5.2 本周边际变化 表格. ``from``/``to`` are the distinct
+ *  platform counts that mentioned this prompt in the previous / current
+ *  window (0→1 = 新增突破, 2→0 = 完全失守). */
+export interface ChangeRow {
+  prompt_id: number;
+  prompt_text: string;
+  from: number;
+  to: number;
+}
+
 export interface ReportSnapshot {
-  project: { id: number; name: string; brand: string | null };
+  project: {
+    id: number;
+    name: string;
+    brand: string | null;
+    /** 客户主体名 —— 页脚「所属公司 X / 仅供 X 内部使用」 */
+    customer_name: string;
+  };
   period: { start: string; end: string };
+  /** 图表 X 轴终点 = max(period.end, today),便于看实时趋势 */
+  chart_end_date?: string;
+  /** 上一周期末日 — 3.1 表格表头日期显示用 */
+  previous_end_date?: string;
   baseline: { date: string | null; rate: number | null };
   title: string;
   generated_by: string;
   generated_at: string;
+  /** 1.1 走势说明 — 图表下方说明文字,运营手填 */
+  weekly_chart_summary?: string | null;
+  /** 3.1 平台周环比说明 — 3.1 表格下方说明文字,运营手填 */
+  weekly_platform_summary?: string | null;
+  /** 5.1 持续未提及说明 — 5.1 表格下方说明文字,运营手填 */
+  weekly_zero_mention_summary?: string | null;
+  /** 5.2 本周边际变化解读 — 5.2 四张表下方说明文字,运营手填 */
+  weekly_change_summary?: string | null;
   daily_mention_rate: Array<{
     date: string;
     total: number;
@@ -116,6 +148,10 @@ export interface ReportSnapshot {
   }>;
   platform_breakdown: Array<{
     platform_code: string;
+    /** "web" / "mobile" — NULL 数据落到 web */
+    delivery_mode: string;
+    /** "fast" / "think" — NULL 数据落到 fast */
+    thinking_mode: string;
     platform_label: string;
     current_total: number;
     current_mentioned: number;
@@ -124,21 +160,38 @@ export interface ReportSnapshot {
     previous_mentioned: number;
     previous_rate: number;
     delta_pp: number;
+    /** 3.1 章节用:每平台按 thinking_mode 分解 (快速/思考) */
+    current_fast_mentioned: number;
+    current_fast_total: number;
+    current_fast_rate: number;
+    current_think_mentioned: number;
+    current_think_total: number;
+    current_think_rate: number;
+    previous_fast_mentioned: number;
+    previous_fast_total: number;
+    previous_fast_rate: number;
+    previous_think_mentioned: number;
+    previous_think_total: number;
+    previous_think_rate: number;
+    delta_fast: number;
+    delta_think: number;
   }>;
   // ---- Added in 2026-09-24 full-template refactor ----
-  /** Section 三.2 — one-line summary per platform. */
-  platform_summary?: Array<{
-    platform_code: string;
-    platform_label: string;
-    note: string;
-  }>;
-  /** Section 三.3 — prompt × platform matrix. Each row is one prompt;
-   *  per_platform is { platform_code: was_mentioned }. */
+  /** Section 三.2 — prompt × platform matrix. Each row is one prompt;
+   *  per_platform key is "${platform_code}|${delivery}|${thinking}". */
   prompt_platform_matrix?: Array<{
     prompt_id: number;
     prompt_text: string;
     per_platform: Record<string, boolean>;
   }>;
+  /** Section 三.3 — top N prompts ranked by mention-day coverage (baseline → today). */
+  stable_prompts?: Array<{
+    prompt_id: number | null;
+    prompt_text: string;
+    mention_days: number;
+  }>;
+  /** 3.3 章节表头分母 — 基线到今天(实时延伸)的监测日数 */
+  total_monitor_days?: number;
   /** Section 二 — operator-written prose, four blocks. */
   weekly_summary?: {
     core_finding: string | null;
@@ -148,20 +201,10 @@ export interface ReportSnapshot {
   };
   /** Section 五 — each bucket's array may be empty. */
   weekly_changes?: {
-    new_mentions: Array<{ prompt_id: number; prompt_text: string }>;
-    increased: Array<{
-      prompt_id: number;
-      prompt_text: string;
-      from: number;
-      to: number;
-    }>;
-    decreased: Array<{
-      prompt_id: number;
-      prompt_text: string;
-      from: number;
-      to: number;
-    }>;
-    lost_mentions: Array<{ prompt_id: number; prompt_text: string }>;
+    new_mentions: Array<ChangeRow>;
+    increased: Array<ChangeRow>;
+    decreased: Array<ChangeRow>;
+    lost_mentions: Array<ChangeRow>;
   };
   /** Section 五.1 — prompts with zero mentions across the window. */
   zero_mention_prompts?: Array<{
@@ -180,17 +223,6 @@ export interface ReportSnapshotOut {
   meta: ReportMeta;
   template_id: string;
   snapshot: ReportSnapshot;
-  /** Set to ``true`` when the public URL is reached but the operator
-   *  hasn't published the report yet. ``undefined`` means the
-   *  report is published and ``snapshot`` is populated. */
-  unpublished?: true;
-  /** Present only when ``unpublished === true``. Echoes the
-   *  share_token and basic metadata so the public page can render
-   *  a friendly "尚未发布" notice without a second round-trip. */
-  share_token?: string;
-  title?: string;
-  period_start?: string;
-  period_end?: string;
 }
 
 export async function getReportSnapshot(id: number): Promise<ReportSnapshotOut> {

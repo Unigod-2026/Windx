@@ -336,6 +336,7 @@ function CategoryAssignModal(props: {
         style={{
           display: "grid",
           gridTemplateColumns: "220px 1fr",
+          gridTemplateRows: "minmax(0, 1fr)",
           gap: 14,
           minHeight: 420,
           maxHeight: "70vh",
@@ -629,7 +630,8 @@ function hydrateFromWizardPayload(payload: WizardPayload) {
     questionsText: questionLines.join("\n"),
     questionCategories,
     categoryTaxonomy: payload.categories ?? [],
-    brand: payload.brand.name,
+    brand: payload.brand.product,
+    brandName: payload.brand.name,
     brandAliases: payload.brand.aliases ?? [],
     competitors: payload.competitors ?? [],
     modelsConfig,
@@ -706,8 +708,8 @@ function synthesizeWizardPayloadFromDetail(
       tag: null,
     })),
     brand: {
-      name: d.brand || "",
-      product: null,
+      name: d.name || "",
+      product: d.brand || "",
       aliases: d.aliases || [],
     },
     // ``note`` ↔ ``product`` 是后端 CompetitorOut 与前端 WizardCompetitor
@@ -902,6 +904,7 @@ function buildWizardPayloadFromForm(opts: {
   questionCategories: Record<string, string | null>;
   categoryTaxonomy: string[];
   brand: string;
+  brandName: string;
   brandAliases: string[];
   competitors: WizardCompetitor[];
   modelsConfig: WizardModelConfig[];
@@ -931,7 +934,8 @@ function buildWizardPayloadFromForm(opts: {
     questions,
     brand: {
       ...opts.original.brand,
-      name: opts.brand.trim(),
+      name: opts.brandName.trim(),
+      product: opts.brand.trim(),
       aliases: opts.brandAliases,
     },
     competitors: opts.competitors
@@ -2318,6 +2322,7 @@ export default function BatchQuestionModal({
       questionCategories,
       categoryTaxonomy,
       brand,
+      brandName: name,
       brandAliases,
       competitors: wizardCompetitors,
       modelsConfig: wizardModelsConfig,
@@ -2455,6 +2460,7 @@ export default function BatchQuestionModal({
             questionCategories,
             categoryTaxonomy,
             brand,
+            brandName: name,
             brandAliases,
             competitors: wizardCompetitors,
             modelsConfig: wizardModelsConfig,

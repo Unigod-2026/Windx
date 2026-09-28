@@ -1,21 +1,36 @@
 /**
- * 公开报告预览页 —— 无需登录,任何人拿到 share_token 链接都能看。
+ * 周报统一入口 —— 公开 URL `/public/reports/:token`。
  *
- * 与 ReportPreview 渲染同一章节树(参见 docs/参芪十一味颗粒-GEO周报
- * 模板),只换数据源(public endpoint)与 toolbar bar(无返回按钮)。
+ * 编辑权限由 DB 的 `is_published` 决定,不判断登录态:
+ * - `is_published=false` → canEdit=true,显示内联编辑器 + 「发布」按钮,
+ *   运营通过 share_token 链接修改本周总结等字段并发布。
+ * - `is_published=true` → canEdit=false,所有章节只读,显示「取消发布」按钮。
+ *
+ * JWT 在 localStorage 时 PATCH / publish / unpublish 调用自然带 token 走
+ * [client.ts](../api/client.ts) 的拦截器;无 JWT 时 PATCH 401 被拦截器
+ * 重定向到 /login。
+ *
+ * 章节组件统一从 [ReportSections](./Projects/ReportSections.tsx) 导入。
  */
 
 import { useEffect, useState } from "react";
-import { Alert, Skeleton } from "antd";
+import { Alert, Button, Skeleton, Space, message } from "antd";
 import { useParams } from "react-router-dom";
-import { getPublicReportSnapshot, type ReportSnapshotOut } from "../api/reports";
 import {
-  PlatformTable,
-  Sparkline,
-  deltaClass,
-  pct,
-  pp,
-} from "./Projects/ReportPreview";
+  getPublicReportSnapshot,
+  publishReport,
+  updateReport,
+  type Report,
+  type ReportSnapshotOut,
+} from "../api/reports";
+import {
+  SectionAttribution,
+  SectionFiveWeeklyChanges,
+  SectionFourContentOps,
+  SectionOneOverall,
+  SectionThreeBreakdown,
+  SectionTwoSummary,
+} from "./Projects/ReportSections";
 import "./Projects/ReportPreview.css";
 
 export default function PublicReportPreview() {
@@ -49,6 +64,34 @@ export default function PublicReportPreview() {
     };
   }, [token]);
 
+  const [publishing, setPublishing] = useState(false);
+
+  const saveDraft = async (overrides: Record<string, string | null>) => {
+    if (!data) return;
+    try {
+      await updateReport(data.meta.id, overrides);
+      message.success("草稿已保存");
+      const fresh = await getPublicReportSnapshot(token);
+      setData(fresh);
+    } catch (err) {
+      message.error((err as Error).message || "保存失败");
+    }
+  };
+
+  const publish = async () => {
+    if (!data) return;
+    setPublishing(true);
+    try {
+      const updated: Report = await publishReport(data.meta.id);
+      message.success("已发布");
+      setData((prev) => (prev ? { ...prev, meta: updated } : prev));
+    } catch (err) {
+      message.error((err as Error).message || "发布失败");
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="report-preview">
@@ -65,260 +108,85 @@ export default function PublicReportPreview() {
   }
   if (!data) return null;
 
-  if (data.unpublished) {
-    return (
-      <div className="report-preview">
-        <div className="report-preview-bar">
-          <span />
-        </div>
-        <article className="report-preview-body">
-          <h1 className="report-preview-title">报告尚未发布</h1>
-          <p style={{ color: "#666", marginTop: 24 }}>
-            {data.title ?? ""} 的报告周期 {data.period_start} 至 {data.period_end}{" "}
-            尚未补充完成,生成者还在编辑中。请稍后重试,或联系报告创建者。
-          </p>
-        </article>
-      </div>
-    );
-  }
-
   const { meta, snapshot } = data;
+  const canEdit = !meta.is_published;
+  // 页脚口径分母 = 题数 × (平台×终端×模式) 组合数,即 3.2 矩阵的总格子数
+  const matrix = snapshot.prompt_platform_matrix ?? [];
+  const denominator =
+    matrix.length > 0
+      ? matrix.length * Object.keys(matrix[0].per_platform).length
+      : 0;
+  const company = snapshot.project.customer_name;
+  const reportYear = meta.period_end.slice(0, 4);
+
   return (
     <div className="report-preview">
       <div className="report-preview-bar">
-        <span /> {/* spacer, no 返回 button */}
-        <button onClick={() => window.print()}>打印 / PDF</button>
+        <span /> {/* spacer, no 返回 button — public page is standalone */}
+        <Space>
+          {canEdit && (
+            <Button type="primary" onClick={publish} loading={publishing}>
+              发布
+            </Button>
+          )}
+          <Button onClick={() => window.print()}>打印 / PDF</Button>
+        </Space>
       </div>
 
       <article className="report-preview-body">
-        <h1 className="report-preview-title">{snapshot.project.name}</h1>
-        <h2 className="report-preview-subtitle">GEO 周报</h2>
-
-        <div className="report-preview-meta">
-          报告周期 {meta.period_start} 至 {meta.period_end}
-          <span className="report-preview-meta-sep">·</span>
-          {meta.scope_text}
-          <span className="report-preview-meta-sep">·</span>
-          {meta.generated_by_name}
-          <span className="report-preview-meta-sep">·</span>
-          {snapshot.baseline.date
-            ? `基线 ${snapshot.baseline.date} ${pct(snapshot.baseline.rate ?? 0)}`
-            : "未配置基线"}
-          <span className="report-preview-meta-sep">·</span>
-          生成于 {snapshot.generated_at}
+        <div className="report-preview-topbar">
+          <div className="report-preview-topbar-left">
+            <div className="report-preview-topbar-brand">风球科技</div>
+            <div className="report-preview-topbar-tagline">AI · GEO · 数据洞察</div>
+          </div>
+          <div className="report-preview-topbar-right">
+            <div className="report-preview-topbar-project">
+              {snapshot.project.name}
+            </div>
+            <div className="report-preview-topbar-period">
+              报告周期 {meta.period_start} 至 {meta.period_end}
+              <span className="report-preview-meta-sep">｜</span>
+              基线 {snapshot.baseline.date ?? "—"}
+            </div>
+          </div>
         </div>
 
-        <PublicSectionOne snapshot={snapshot} />
-        <PublicSectionTwo snapshot={snapshot} />
-        <PublicSectionThree snapshot={snapshot} />
-        <PublicSectionFour snapshot={snapshot} />
-        <PublicSectionFive snapshot={snapshot} />
-        <PublicSectionAttribution snapshot={snapshot} />
+        <h1 className="report-preview-title">GEO 优化周报</h1>
+
+        <div className="report-preview-meta">
+          报告周期:{meta.period_start} 至 {meta.period_end}
+          <span className="report-preview-meta-sep">｜</span>
+          基线:{snapshot.baseline.date ?? "—"}
+          {snapshot.baseline.rate !== null && (
+            <>
+              <span className="report-preview-meta-sep">｜</span>
+              监测快照:{snapshot.daily_mention_rate?.[0]?.date} /{" "}
+              {snapshot.daily_mention_rate?.[snapshot.daily_mention_rate.length - 1]?.date}
+            </>
+          )}
+          <span className="report-preview-meta-sep">｜</span>
+          口径:整体提及率 = 已提及题数 ÷ 监测题数
+        </div>
+
+        <SectionOneOverall snapshot={snapshot} canEdit={canEdit} onSave={saveDraft} />
+        <SectionTwoSummary snapshot={snapshot} canEdit={canEdit} onSave={saveDraft} />
+        <SectionThreeBreakdown snapshot={snapshot} canEdit={canEdit} onSave={saveDraft} />
+        <SectionFourContentOps snapshot={snapshot} />
+        <SectionFiveWeeklyChanges snapshot={snapshot} canEdit={canEdit} onSave={saveDraft} />
+        <SectionAttribution snapshot={snapshot} canEdit={canEdit} onSave={saveDraft} />
 
         <footer className="report-preview-footer">
-          报告由风球科技 GEO 监控平台生成 ｜ 模板 {meta.template_id}
+          <div>
+            本报告由风球科技出具 ｜ 所属公司 {company} ｜ 基线{" "}
+            {snapshot.baseline.date ?? "—"} ｜ 报告周期 {meta.period_start} 至{" "}
+            {meta.period_end}
+          </div>
+          <div>
+            口径：已提及题数 ÷ {denominator || "—"} ｜ © {reportYear} 风球科技 ·
+            仅供 {company} 内部使用
+          </div>
         </footer>
       </article>
     </div>
-  );
-}
-
-function EmptyBlock({ message }: { message: string }) {
-  return <div className="report-preview-empty">{message}</div>;
-}
-
-function ChapterHeading({ title }: { title: string }) {
-  return <h2 className="report-preview-h2">{title}</h2>;
-}
-
-function PublicSectionOne({
-  snapshot,
-}: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  const daily = snapshot.daily_mention_rate;
-  if (!daily || daily.length === 0) {
-    return (
-      <section>
-        <ChapterHeading title="一、整体提及率走势" />
-        <EmptyBlock message="暂无数数据" />
-      </section>
-    );
-  }
-  const last = daily[daily.length - 1];
-  const prev = daily.length >= 2 ? daily[daily.length - 2] : null;
-  const current = last?.rate ?? 0;
-  const previous = prev?.rate ?? 0;
-  const wow = current - previous;
-  const baseline = snapshot.baseline.rate;
-  return (
-    <section>
-      <ChapterHeading title="一、整体提及率走势" />
-      <div className="report-preview-kpis">
-        <div className="report-preview-kpi">
-          <div className="report-preview-kpi-label">当前周期提及率</div>
-          <div className="report-preview-kpi-value">{pct(current)}</div>
-        </div>
-        <div className="report-preview-kpi">
-          <div className="report-preview-kpi-label">周环比</div>
-          <div className={`report-preview-kpi-value ${deltaClass(wow)}`}>
-            {pp(wow)}
-          </div>
-        </div>
-        <div className="report-preview-kpi">
-          <div className="report-preview-kpi-label">
-            {snapshot.baseline.date
-              ? `基线 (${snapshot.baseline.date})`
-              : "基线"}
-          </div>
-          <div className="report-preview-kpi-value flat">
-            {baseline !== null ? pct(baseline) : "未配置基线"}
-          </div>
-        </div>
-      </div>
-      <Sparkline points={daily} />
-    </section>
-  );
-}
-
-function PublicSectionTwo({
-  snapshot,
-}: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  const block = snapshot.weekly_summary;
-  const hasAny =
-    block &&
-    (block.core_finding || block.platform_dynamic ||
-     block.content_result || block.scene_coverage);
-  return (
-    <section>
-      <ChapterHeading title="二、本周总结" />
-      {!block || !hasAny ? (
-        <EmptyBlock message="暂无数数据" />
-      ) : (
-        <ul className="report-preview-summary-list">
-          {block.core_finding && (
-            <li>
-              <strong>本周核心结论：</strong>
-              {block.core_finding}
-            </li>
-          )}
-          {block.platform_dynamic && (
-            <li>
-              <strong>平台动态：</strong>
-              {block.platform_dynamic}
-            </li>
-          )}
-          {block.content_result && (
-            <li>
-              <strong>内容成效：</strong>
-              {block.content_result}
-            </li>
-          )}
-          {block.scene_coverage && (
-            <li>
-              <strong>场景覆盖：</strong>
-              {block.scene_coverage}
-            </li>
-          )}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function PublicSectionThree({
-  snapshot,
-}: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  const breakdown = snapshot.platform_breakdown || [];
-  const matrix = snapshot.prompt_platform_matrix || [];
-  const summary = snapshot.platform_summary || [];
-  return (
-    <section>
-      <ChapterHeading title="三、分平台周环比变化与问题级提及率明细" />
-      <h3 className="report-preview-h3">3.1 平台周环比</h3>
-      {breakdown.length === 0 ? (
-        <EmptyBlock message="暂无数数据" />
-      ) : (
-        <PlatformTable rows={breakdown} />
-      )}
-      {summary.length > 0 && (
-        <>
-          <h3 className="report-preview-h3">3.2 平台简评</h3>
-          <ul className="report-preview-summary-list">
-            {summary.map((s) => (
-              <li key={s.platform_code}>{s.note}</li>
-            ))}
-          </ul>
-        </>
-      )}
-      {matrix.length > 0 && (
-        <>
-          <h3 className="report-preview-h3">3.3 问题×平台 矩阵</h3>
-          <p style={{ color: "#666", fontSize: 12 }}>
-            （详见登录后报告详情页）
-          </p>
-        </>
-      )}
-    </section>
-  );
-}
-
-function PublicSectionFour(_props: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  return (
-    <section>
-      <ChapterHeading title="四、本周内容运营" />
-      <EmptyBlock message="暂无数数据" />
-    </section>
-  );
-}
-
-function PublicSectionFive({
-  snapshot,
-}: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  const zero = snapshot.zero_mention_prompts || [];
-  if (zero.length === 0) {
-    return (
-      <section>
-        <ChapterHeading title="五、待突破问题与本周边际变化" />
-        <EmptyBlock message="暂无数数据" />
-      </section>
-    );
-  }
-  return (
-    <section>
-      <ChapterHeading title="五、待突破问题与本周边际变化" />
-      <h3 className="report-preview-h3">5.1 持续未提及问题</h3>
-      <ul className="report-preview-summary-list">
-        {zero.map((p) => (
-          <li key={p.prompt_id}>{p.prompt_text}</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function PublicSectionAttribution({
-  snapshot,
-}: {
-  snapshot: ReportSnapshotOut["snapshot"];
-}) {
-  const text = snapshot.attribution ?? null;
-  return (
-    <section>
-      <ChapterHeading title="5.3 核心归因" />
-      {text ? (
-        <p style={{ whiteSpace: "pre-wrap" }}>{text}</p>
-      ) : (
-        <EmptyBlock message="暂无数数据" />
-      )}
-    </section>
   );
 }

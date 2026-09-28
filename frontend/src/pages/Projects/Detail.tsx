@@ -8,6 +8,7 @@ import QuestionTab from "./QuestionTab";
 import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
 import AnswerTab from "./AnswerTab";
+import ReportTab from "./ReportTab";
 import PlaceholderTab from "./PlaceholderTab";
 import SelfArticles from "./sourcePreferences/SelfArticles";
 import SourcePreferencesTab from "./SourcePreferencesTab";
@@ -21,6 +22,7 @@ const VALID_TABS = [
   "self-articles",
   "citation",
   "answer",
+  "report",
   "edit",
   "settings",
 ] as const;
@@ -117,6 +119,8 @@ export default function ProjectDetail() {
         return <CitationAnalysisTab projectId={projectId} />;
       case "answer":
         return <AnswerTab projectId={projectId} />;
+      case "report":
+        return <ReportTab projectId={projectId} />;
       case "edit":
         return <EditProjectTab projectId={projectId} />;
       case "settings":

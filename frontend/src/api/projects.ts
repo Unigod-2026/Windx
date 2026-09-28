@@ -1507,7 +1507,7 @@ export interface WizardQuestion {
 
 export interface WizardBrand {
   name: string;
-  product: string | null;
+  product: string;
   aliases: string[];
 }
 

@@ -1,0 +1,113 @@
+/* 周报 tab — 视觉 token(spec §3.2) */
+:root {
+  --report-bg: #FAFAF7;
+  --report-surface: #FFFFFF;
+  --report-ink: #1A1A1A;
+  --report-ink-soft: #555550;
+  --report-ink-mute: #8E8E86;
+  --report-rule: #E8E6DE;
+  --report-accent: #3D5A40;
+  --report-accent-soft: #E8EFE5;
+  --report-warn-up: #B85C38;
+  --report-warn-down: #3F8600;
+  --report-shadow: 0 1px 2px rgba(60, 60, 50, 0.06);
+}
+
+.report-tab {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 32px;
+  background: var(--report-bg);
+  color: var(--report-ink);
+  font-family: "Inter", -apple-system, "PingFang SC", sans-serif;
+}
+
+.report-tab-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--report-rule);
+  padding-bottom: 16px;
+  margin-bottom: 0;
+}
+
+.report-tab-title {
+  font-family: "Source Serif 4", "Source Serif Pro", Georgia, serif;
+  font-size: 22px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+.report-tab-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.report-tab-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.report-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--report-rule);
+  align-items: start;
+}
+
+.report-row:hover {
+  background: rgba(0, 0, 0, 0.015);
+}
+
+.report-row-main {
+  min-width: 0;
+}
+
+.report-row-title {
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--report-ink);
+  margin: 0 0 6px 0;
+}
+
+.report-row-meta {
+  font-size: 12px;
+  color: var(--report-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.report-row-meta-sep {
+  color: var(--report-ink-mute);
+  margin: 0 6px;
+}
+
+.report-row-time {
+  font-size: 12px;
+  color: var(--report-ink-mute);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: start;
+}
+
+.report-tab-empty {
+  text-align: center;
+  padding: 80px 0;
+  color: var(--report-ink-mute);
+  font-size: 14px;
+}
+
+/* antd 按钮在暖色背景上的微调 */
+.report-tab-actions .ant-btn-primary {
+  background: var(--report-ink);
+  border-color: var(--report-ink);
+}
