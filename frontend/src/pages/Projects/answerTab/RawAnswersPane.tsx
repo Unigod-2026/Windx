@@ -178,6 +178,19 @@ export default function RawAnswersPane({
     [brands],
   );
 
+  // 「本答案品牌位次」白名单 —— 只展示项目自身 + confirmed 状态的竞品,
+  // 其它无关品牌不进入 footer 的位次胶囊。
+  // 一次性算好,后续每条 AnswerMergedItem 通过 filterRankingsByWhitelist 调用,
+  // 避免每行重建 Set(16 条回答 × 8 品牌 = 128 次重建,代价不必要)。
+  const rankingsWhitelist = useMemo(() => {
+    const set = new Set<string>();
+    if (selfBrand) set.add(selfBrand);
+    for (const c of competitors) {
+      if (c.status === "confirmed") set.add(c.name);
+    }
+    return set;
+  }, [selfBrand, competitors]);
+
   const loading = answersLoading && brandsLoading && sortedAnswers.length === 0 && brands.length === 0;
   if (loading) return <Skeleton active paragraph={{ rows: 8 }} />;
 
@@ -201,6 +214,7 @@ export default function RawAnswersPane({
                 ans={a}
                 html={a.answer_content ? renderAnswerHtml(a.answer_content, groups) : ""}
                 selfBrand={selfBrand}
+                whitelist={rankingsWhitelist}
                 onOpenDetail={() => onJumpToDetail(a.subtask_id)}
               />
             ))
@@ -323,7 +337,10 @@ export default function RawAnswersPane({
         /* ===== 严格对照 index.html layout.css ===== */
         .answer-merged-layout {
           display: grid;
-          grid-template-columns: 1fr 480px;
+          /* 7fr / 3fr 比 1fr 480px 更自适应 viewport:1920 → 左 1260 / 右 540,
+             1440 → 左 945 / 右 405,均给左列「各模型 AI 回答原文」更多横向空间,
+             右列「关心内容命中率 + 整体排名」紧凑展示。 */
+          grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
           gap: 16px;
           /* stretch 让右列与左列等高 —— 右侧 hitrate + rank 才能配合
              flex:1 把 rank 撑满左列剩余高度。 */
@@ -543,29 +560,6 @@ export default function RawAnswersPane({
         .rank-pill.rank-2 { background: linear-gradient(135deg, #d9d9d9, #f0f0f0); color: #595959; }
         .rank-pill.rank-3 { background: linear-gradient(135deg, #d48806, #e8b339); color: white; }
         .rank-pill.rank-other { background: #fafafa; color: #8c8c8c; border: 1px solid #f0f0f0; }
-        /* 情感倾向 tag —— 复用 layout.css .tag-positive / .tag-negative /
-           .tag-warn 的三色语义(绿=positive / 红=negative / 黄=warn/neutral) */
-        .answer-sentiment-tag {
-          display: inline-flex;
-          align-items: center;
-          gap: 3px;
-          padding: 3px 10px;
-          border-radius: 12px;
-          font-size: var(--fs-xs, 12px);
-          font-weight: 500;
-        }
-        .answer-sentiment-tag.tag-positive {
-          background: var(--color-success-light, #e6f7ee);
-          color: var(--color-success, #2ba471);
-        }
-        .answer-sentiment-tag.tag-negative {
-          background: var(--color-danger-light, #fff1f0);
-          color: var(--color-danger, #d54941);
-        }
-        .answer-sentiment-tag.tag-warn {
-          background: var(--color-warning-light, #fff7e6);
-          color: var(--color-warning, #faad14);
-        }
         .answer-merged-item-error {
           font-size: var(--fs-sm, 14px);
           color: var(--color-danger, #d54941);
@@ -628,13 +622,13 @@ export default function RawAnswersPane({
           text-align: center;
           border-bottom: 1px solid var(--border-light, #f0f0f0);
           white-space: nowrap;
-          max-width: 80px;
+          max-width: 70px;
           overflow: hidden;
           text-overflow: ellipsis;
         }
         .hitrate-table th:first-child {
           text-align: left;
-          max-width: 120px;
+          max-width: 100px;
         }
         .hitrate-table td {
           padding: 8px 6px;
@@ -645,7 +639,7 @@ export default function RawAnswersPane({
         .hitrate-table td:first-child {
           text-align: left;
           white-space: nowrap;
-          max-width: 130px;
+          max-width: 110px;
           overflow: hidden;
           text-overflow: ellipsis;
           font-weight: 500;
@@ -798,10 +792,13 @@ interface AnswerMergedItemProps {
   /** 项目自有品牌名(``project.brand``)—— 用于在排名列表里给自身一行挂
    *  「自身」徽章 + Top 颜色高亮。无 brand 时按字符串相等不做高亮。 */
   selfBrand: string | null;
+  /** 品牌位次白名单(自身 + confirmed 竞品);all_rankings 命中其一才展示,
+   *  过滤掉其它无关品牌,避免 footer 一行挂 8 个无关胶囊。 */
+  whitelist: Set<string>;
   onOpenDetail: () => void;
 }
 
-function AnswerMergedItem({ ans, html, selfBrand, onOpenDetail }: AnswerMergedItemProps) {
+function AnswerMergedItem({ ans, html, selfBrand, whitelist, onOpenDetail }: AnswerMergedItemProps) {
   const failed = ans.status && /failed|error|stopped/i.test(ans.status);
   const dotColor =
     ans.status === "success"
@@ -816,6 +813,11 @@ function AnswerMergedItem({ ans, html, selfBrand, onOpenDetail }: AnswerMergedIt
   // 重复两遍后缀的视觉冗余。
   const compound = parseOverviewKey(compoundKeyFor(ans.platform, ans.mode));
   const name = modelNameFor(ans.platform, ans.mode);
+  // 本答案品牌位次:只显示自身 + confirmed 竞品,其它无关品牌不进 footer 胶囊。
+  // 全按 LLM allRankings 顺序保留,避免「只显示白名单但乱序」。
+  const filteredRankings = (ans.all_rankings ?? []).filter(
+    (r) => whitelist.size === 0 || whitelist.has(r.name),
+  );
   return (
     <div className="answer-merged-item">
       <div className="answer-merged-item-header">
@@ -858,32 +860,14 @@ function AnswerMergedItem({ ans, html, selfBrand, onOpenDetail }: AnswerMergedIt
       )}
 
       <div className="answer-merged-item-footer">
-        {/* 情感倾向 tag(取自 LLM 抽取返回的 polarity,见
-            BrandMention.sentiment)。positive=绿 / negative=红 / 中性或缺失
-            不渲染,避免给空数据画一个误导性徽章。 */}
-        {ans.self_sentiment === "positive" && (
-          <span className="answer-sentiment-tag tag-positive">
-            情感倾向 · 正面
-          </span>
-        )}
-        {ans.self_sentiment === "negative" && (
-          <span className="answer-sentiment-tag tag-negative">
-            情感倾向 · 负面
-          </span>
-        )}
-        {ans.self_sentiment === "neutral" && (
-          <span className="answer-sentiment-tag tag-warn">
-            情感倾向 · 中性
-          </span>
-        )}
-        {/* 本答案品牌位次 —— 直接按 LLM ``allRankings`` 顺序展开完整列表,
-            每项 ``#N 品牌名``,Top1-3 用奖牌色高亮;项目自有品牌(selfBrand)
-            所在那一行额外挂一个「自身」蓝徽章。无 allRankings 数据时不渲染
-            整块(后端 _extract_all_rankings 已经过滤脏数据)。 */}
-        {ans.all_rankings && ans.all_rankings.length > 0 && (
+        {/* 本答案品牌位次 —— 只展示白名单命中的品牌(自身 + confirmed 竞品),
+            按 LLM ``allRankings`` 原始顺序展开,每项 ``#N 品牌名``,Top1-3 用
+            奖牌色高亮;项目自有品牌(selfBrand)所在那一行额外挂一个「自身」
+            蓝徽章。allRankings 为空 / 白名单为空 / 过滤后 0 行均不渲染。 */}
+        {filteredRankings.length > 0 && (
           <span className="answer-rankings-row">
             <span className="answer-rankings-label">本答案品牌位次</span>
-            {ans.all_rankings.map((r) => {
+            {filteredRankings.map((r) => {
               const isSelf = !!selfBrand && r.name === selfBrand;
               const rankCls =
                 r.rank === 1

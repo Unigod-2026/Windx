@@ -12,11 +12,26 @@ import client from "../api/client";
 
 export type Role = "super_admin" | "customer_admin";
 
+/** 「个人中心」三件套 — 2026-10-08 PATCH /api/auth/me 真实落库后,AuthProvider
+ *  从 ``/auth/me`` 拿到的不再只是 id/username/role,还带 email / phone /
+ *  notification_prefs,SettingsPane 直接消费。 */
+export interface NotificationPrefs {
+  mention: boolean;
+  drop: boolean;
+  report: boolean;
+  system: boolean;
+}
+
 export interface User {
   id: number;
   username: string;
+  display_name?: string | null;
+  status?: "active" | "disabled";
   role: Role;
   customer_id: number | null;
+  email?: string | null;
+  phone?: string | null;
+  notification_prefs?: NotificationPrefs | null;
 }
 
 interface AuthCtx {

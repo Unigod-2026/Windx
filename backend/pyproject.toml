@@ -17,6 +17,9 @@ dependencies = [
   "passlib[bcrypt]>=1.7",
   "anthropic>=1.0",
   "openpyxl>=3.1",
+  # publish 时用 headless Chromium 渲染 admin 视图 → 公网静态 HTML。
+  # 见 app/services/report_render.py::_render_admin_html_via_browser
+  "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

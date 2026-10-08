@@ -1031,43 +1031,55 @@ class CompetitorTrendBlock(BaseModel):
     series: list[CompetitorTrendSeries]
 
 
-class QuadrantPoint(BaseModel):
-    # ``platform`` 是 ``${platform_code}__${delivery_mode}__${thinking}`` 复合 key,
-    # 与 Overview / 问题提及分析 tab 的 compound key 口径一致;前端用
-    # ``parseOverviewKey`` 解出 (code, delivery, thinking) 再渲染展示名。
-    # ``delivery_mode`` / ``thinking_mode`` 是冗余字段,方便前端直接读而不必
-    # 二次解析,跟 QuestionPlatformStat 字段设计对齐。
-    platform: str
-    delivery_mode: str | None = None
-    thinking_mode: bool | None = None
-    self_mention_rate: float
-    competitor_avg_mention_rate: float
+class DiffBrandRow(BaseModel):
+    """单张品牌卡内一行(一个 platform)的 PC / 移动 / 整体提及率,单位 0-100。
 
-
-class ModelDiff(BaseModel):
-    platform: str
-    delivery_mode: str | None = None
-    thinking_mode: bool | None = None
-    self_mention_rate: float
-    self_top1_rate: float
-    self_top3_rate: float
-    competitor_mention_rate: float
-    competitor_top1_rate: float
-    competitor_top3_rate: float
-
-
-class DiffCore(BaseModel):
-    """核心指标对比柱状图数据,三个值一一对应 ``labels``,单位 0-100。
-
-    ``self`` 不能直接做字段名(与 ``BaseModel.__init__`` 的位置参数撞名),
-    所以内部叫 ``self_values``,靠 alias 保持 JSON 键仍是 ``self``。
+    - ``pc_rate`` / ``mobile_rate`` 由后端按 (platform_code, delivery_mode) 共享分母
+      计算(分母是该 platform × delivery 在窗口内的 distinct subtask 数),
+      所以同一行的自身品牌和竞品之间可直接横向比较。
+    - ``overall`` 是 (该 platform 的 web 命中数 + mobile 命中数) / 项目级
+      total_subtasks(整个项目窗口的 distinct subtask 数),分母与 pc/mobile
+      不同 —— 这条列反映"该品牌在该 platform 的所有 delivery 上被提 1 次或
+      以上的 subtask 占比",是 per-model 跨 delivery 的合并率。
+    - ``platform_code`` 是剥离 ``_mobile`` 后缀后的逻辑模型名
+      (``doubao_mobile`` / ``doubao`` 都折叠成 ``doubao``),与前端
+      ``WIZARD_MODELS.value`` 对齐。
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    platform_code: str
+    pc_rate: float = 0.0
+    mobile_rate: float = 0.0
+    overall: float = 0.0
 
-    labels: list[str]
-    self_values: list[float] = Field(alias="self")
-    competitor_avg: list[float]
+
+class DiffBrandCard(BaseModel):
+    """差异化分析 15 张卡中的一张:1 个 metric × 1 个品牌。
+
+    ``metric`` ∈ ``{"mention", "top1", "top3"}``,``brand`` 是展示名(自
+    身为「自身」,竞品为 ``ProjectCompetitor.name``)。``head_value`` 是
+    Σ(pc × 0.42 + mobile × 0.58) / N_platform,后端算好,前端不重复算。
+    """
+
+    metric: Literal["mention", "top1", "top3"]
+    brand: str
+    brand_canonical: str
+    is_self: bool
+    color: str
+    head_value: float
+    rows: list[DiffBrandRow] = Field(default_factory=list)
+
+
+class DiffBrandOut(BaseModel):
+    """差异化分析整块数据,挂在 ``CompetitorAnalysisOut.diff_brand`` 上。
+
+    ``cards`` 长度 = 3 × (1 + |competitors|),self 永远在前,竞品按
+    ``CompetitorKpi.is_mention`` 倒序。``metrics`` 是三个指标的元信息
+    (id / name / desc / unit),前端用于渲染区头标题与描述。
+    """
+
+    metrics: list[dict] = Field(default_factory=list)
+    self_brand_canonical: str | None = None
+    cards: list[DiffBrandCard] = Field(default_factory=list)
 
 
 class CompetitorAnalysisOut(BaseModel):
@@ -1087,10 +1099,8 @@ class CompetitorAnalysisOut(BaseModel):
     # been picked up yet.
     competitors: list[CompetitorKpi]
     trend: CompetitorTrendBlock
-    # — 新增 — 详见 spec §1.3
-    diff_core: DiffCore
-    diff_model: list[ModelDiff]
-    diff_quadrant: list[QuadrantPoint]
+    # — 差异化分析(逐品牌罗列,见 docs/风球GEO监控平台UI-261005 v3.2) —
+    diff_brand: DiffBrandOut
     previous_window_start: date | None
     previous_window_end: date | None
 
@@ -1505,6 +1515,9 @@ class OwnArticleIn(BaseModel):
     url: str = Field(..., max_length=512)
     title: str = Field("", max_length=512)
     publish_date: date | None = None
+    # 分发渠道 —— xlsx 第 4 列,必填;长度 64 跟 ORM 列对齐,超出会被
+    # MySQL strict mode 拒为 500(暂时,没有专门的 reason code)。
+    channel: str = Field("", max_length=64)
 
 
 class OwnArticleOut(BaseModel):
@@ -1514,6 +1527,7 @@ class OwnArticleOut(BaseModel):
       ``app.services.own_articles.compute_cite_stats`` 在 toolbar 过滤
       窗口内注入;没有任何引用时分别落 ``False / 0 / [] / "—"``。
     - ``created_at`` 来自 ORM 列;service 写入时设置,前端无需关心。
+    - ``channel`` 历史行(2026-09-28 之前的导入)由迁移落 '' ,显示为 '—'。
     """
     model_config = ConfigDict(from_attributes=True)
 
@@ -1522,11 +1536,25 @@ class OwnArticleOut(BaseModel):
     title: str
     publish_date: date | None
     remind: bool
+    channel: str = ""
     created_at: datetime
     cited: bool = False
     cite_count: int = 0
     cite_models: list[str] = []
     last_cited: str = "—"
+
+
+class OwnArticleUpdate(BaseModel):
+    """PATCH /projects/{id}/own-articles/{aid} body。
+
+    只暴露「可编辑」的两列 —— URL / 标题作为声明项不应被后期手改篡改,
+    错了应该删了重新声明。``publish_date`` 允许 ``null``(表示清空日期);
+    ``channel`` 沿用导入时的「非空」口径,空串由端点校验后转 400。
+    ``remind`` 不在 body 里 —— 旧 toggle 端点已删,字段保留在 DB 是给
+    历史行兜底,不再被 UI 读写。
+    """
+    publish_date: date | None = None
+    channel: str | None = Field(default=None, max_length=64)
 
 
 class OwnArticleListOut(BaseModel):

@@ -12,15 +12,15 @@ from fastapi import HTTPException
 from sqlalchemy import and_, case, func, select, tuple_
 
 from app.models.common import now_local
-from app.models.project import BrandMention, ProjectCompetitor
+from app.models.project import BrandMention, ProjectCompetitor, ProjectPlatform
 from app.schemas.project import (
     CompetitorAnalysisOut,
     CompetitorKpi,
     CompetitorTrendBlock,
     CompetitorTrendSeries,
-    DiffCore,
-    ModelDiff,
-    QuadrantPoint,
+    DiffBrandCard,
+    DiffBrandOut,
+    DiffBrandRow,
 )
 
 
@@ -103,186 +103,259 @@ def _build_brand_filter(
     return out
 
 
-def _compute_diff_core(
-    self_kpi: CompetitorKpi | None,
-    competitor_kpis: list[CompetitorKpi],
-) -> DiffCore:
-    """核心指标对比 — 3 个指标(mention_rate / top1_rate / top3_rate)的自身 vs 竞品均值,
-    单位 0-100(已乘 100),便于 UI 直接画柱状图。spec §2.3。
-    """
-    labels = ["提及率", "Top1", "Top3"]
-    if not self_kpi or not competitor_kpis:
-        return DiffCore(
-            labels=labels, self_values=[0.0, 0.0, 0.0], competitor_avg=[0.0, 0.0, 0.0]
-        )
-    n = len(competitor_kpis)
-    return DiffCore(
-        labels=labels,
-        self_values=[
-            self_kpi.mention_rate * 100,
-            self_kpi.top1_rate * 100,
-            self_kpi.top3_rate * 100,
-        ],
-        competitor_avg=[
-            sum(c.mention_rate for c in competitor_kpis) / n * 100,
-            sum(c.top1_rate for c in competitor_kpis) / n * 100,
-            sum(c.top3_rate for c in competitor_kpis) / n * 100,
-        ],
-    )
+# ——— 差异化分析(逐品牌罗列) ——————————————————————————————————————
+#
+# 设计目标:把"自身 vs 竞品均值"展开为「3 指标 × N 品牌 = 最多 15 张卡」,
+# 每张卡是单个品牌在单个指标下的完整明细(头部 KPI + N 行 × 6 列模型表)。
+# 见 docs/风球GEO监控平台UI-261005 v3.2 changelog。
+#
+# 关键口径:
+# - 数据源只用 geo_brand_mentions 一张表(不引入新表)。
+# - 分母按 (platform_code, delivery_mode) 共享,自身/竞品在同一行内可横向
+#   比较;platform_code 通过剥离 _mobile 后缀得到。
+# - 卡片总数 = (1 + |competitors|) × 3;每张卡 N 行 = toolbar 当前选中的
+#   model 集合(toolbar 全选时回退到项目配置的 platform 集合)。
+
+DIFF_BRAND_COLORS: dict[str, str] = {
+    "自身":   "#344e8d",
+    "薇诺娜": "#344e8d",  # 自有品牌 fallback
+    "珂润":   "#935939",
+    "玉泽":   "#2f745d",
+    "雅漾":   "#5f3b91",
+    "理肤泉": "#317d7d",
+}
+DEFAULT_SELF_COLOR = "#344e8d"
+DEFAULT_COMP_COLOR = "#6b7280"
+
+_DIFF_METRIC_META = [
+    {"id": "mention", "name": "整体提及率", "desc": "该品牌被提及的答案占比", "unit": "%"},
+    {"id": "top1",    "name": "Top1 提及率", "desc": "该品牌排在答案第 1 位的占比", "unit": "%"},
+    {"id": "top3",    "name": "Top3 提及率", "desc": "该品牌进入答案前三的占比", "unit": "%"},
+]
+_DIFF_METRIC_KEYS = ("mention", "top1", "top3")
 
 
-def _compute_diff_model(
+def _compute_diff_brand(
     db,
-    project_id,
+    project_id: int,
     win_start_dt,
     win_end_dt,
-    selected_triples: set[tuple[str, str, bool]] | None = None,
-    selected_prompt_texts: list[str] | None = None,
-):
-    """模型维度提及率 — 每个 (platform_code, delivery_mode, thinking_mode) triple
-    一行,自身 vs 竞品均值。spec §2.4。
+    self_kpi: CompetitorKpi | None,
+    competitor_kpis: list[CompetitorKpi],
+    selected_triples: set[tuple[str, str, bool]] | None,
+    selected_prompt_texts: list[str] | None,
+) -> DiffBrandOut:
+    """差异化分析(逐品牌罗列) — 3 指标 × N 品牌 = 最多 15 张卡。
 
-    分母统一用「该 triple 在窗口内的 distinct subtask 数」,与 is_self 无关 —
-    同行的两条 bar 必须共用一个分母才能横向比较。竞品侧是「各竞品 brand 在
-    该 triple 上的 rate」的算术平均,所以即一行有多家竞品被同时提到,均值
-    也不会超过 1。
-
-    之前的实现把 (platform, is_self) 子集的 distinct subtask 数作为分母:
-    竞品侧分母 = 该 platform 下「至少被任一竞品提到」的 subtask 数,远小于
-    真实 subtask 数;再把多家竞品的 matched 直接相加,rate 就被放大到 > 1。
-
-    2026-09 起按 triple 拆(与 Overview / 问题提及分析 tab 口径一致),
-    output 行数 = 「项目配置的 ProjectPlatform 行数」,每行用 compound key
-    表示,前端按 ``platformLabel`` 渲染展示名(「千问-网页-快速」等)。
+    每张卡 = (metric, brand) → DiffBrandCard;rows 数 = |selected_codes|,顺序
+    后端按字母序排稳定序,前端会用 WIZARD_MODELS 索引重排展示顺序。
+    head_value 跟"全部竞品"tab 同口径:``CompetitorKpi.{mention,top1,top3}_rate``,
+    品牌级单值(``matched / 项目级 total_subtasks``)。
+    每张卡 rows 内的 ``overall`` 列 = (该 platform 的 web 命中数 + mobile 命中数) /
+    该 platform 的 (web + mobile) subtask 数,per-platform 跨 delivery 的合并率,
+    分母与 PC / 移动列的 per-(model, delivery) 细分率**不同**(分子相同,分母合并)。
 
     selected_triples / selected_prompt_texts 与主函数同语义:None = 不筛;
-    非 None = 严格按 triple + prompt 文本过滤,跟 toolbar 联动口径一致。
+    非 None = 严格过滤(三元组 / prompt 文本 IN-list)。
     """
-    brand_filter = _build_brand_filter(selected_triples, selected_prompt_texts)
-    # Per-triple total subtask count — common denominator for both sides.
-    total_rows = db.execute(
-        select(
-            BrandMention.platform,
-            BrandMention.delivery_mode,
-            BrandMention.thinking_mode,
-            func.count(func.distinct(BrandMention.subtask_id)).label("total"),
+    if self_kpi is None:
+        return DiffBrandOut(
+            metrics=_DIFF_METRIC_META,
+            self_brand_canonical=None,
+            cards=[],
         )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-            BrandMention.platform.is_not(None),
-            *brand_filter,
-        )
-        .group_by(
-            BrandMention.platform,
-            BrandMention.delivery_mode,
-            BrandMention.thinking_mode,
-        )
-    ).all()
-    # key = compound key, value = distinct subtask count
-    total_by_triple: dict[str, int] = {
-        compound_key(r.platform, r.delivery_mode, bool(r.thinking_mode)):
-            int(r.total or 0)
-        for r in total_rows
-    }
 
-    # Per-(triple, brand) rollup. Self side has at most one brand
-    # per triple; comp side may have many — we average their per-brand rates.
+    selected_codes = _resolve_selected_codes(db, project_id, selected_triples)
+    sorted_codes = sorted(selected_codes)
+
+    brand_filter = _build_brand_filter(selected_triples, selected_prompt_texts)
+    common_where = [
+        BrandMention.project_id == project_id,
+        BrandMention.created_at >= win_start_dt,
+        BrandMention.created_at <= win_end_dt,
+        BrandMention.platform.is_not(None),
+        *brand_filter,
+    ]
+
+    # Query A — per-(brand, platform_code, delivery_mode) 命中数
+    platform_code_expr = case(
+        (
+            BrandMention.platform.like("%_mobile"),
+            func.substr(
+                BrandMention.platform,
+                1,
+                func.length(BrandMention.platform) - len("_mobile"),
+            ),
+        ),
+        else_=BrandMention.platform,
+    ).label("platform_code")
+
     brand_rows = db.execute(
         select(
-            BrandMention.platform,
-            BrandMention.delivery_mode,
-            BrandMention.thinking_mode,
             BrandMention.brand,
             BrandMention.is_self,
+            platform_code_expr,
+            BrandMention.delivery_mode,
             func.sum(case((BrandMention.is_mention > 0, 1), else_=0)).label("matched"),
-            func.sum(case((and_(BrandMention.is_mention > 0, BrandMention.rank_position == 1), 1), else_=0)).label("top1"),
-            func.sum(case((and_(BrandMention.is_mention > 0,
-                                  BrandMention.rank_position.is_not(None),
-                                  BrandMention.rank_position <= 3), 1), else_=0)).label("top3"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.is_mention > 0,
+                            BrandMention.rank_position == 1,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("top1"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            BrandMention.is_mention > 0,
+                            BrandMention.rank_position.is_not(None),
+                            BrandMention.rank_position <= 3,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("top3"),
         )
-        .where(
-            BrandMention.project_id == project_id,
-            BrandMention.created_at >= win_start_dt,
-            BrandMention.created_at <= win_end_dt,
-            BrandMention.platform.is_not(None),
-            *brand_filter,
-        )
+        .where(*common_where)
         .group_by(
-            BrandMention.platform,
-            BrandMention.delivery_mode,
-            BrandMention.thinking_mode,
             BrandMention.brand,
             BrandMention.is_self,
+            "platform_code",
+            BrandMention.delivery_mode,
         )
     ).all()
 
-    by_triple: dict[str, dict[str, list[dict[str, float]]]] = {}
-    delivery_by_triple: dict[str, str] = {}
-    thinking_by_triple: dict[str, bool] = {}
+    # Query B — per-(platform_code, delivery_mode) 窗口分母(self/竞品共享)
+    total_rows = db.execute(
+        select(
+            platform_code_expr,
+            BrandMention.delivery_mode,
+            func.count(func.distinct(BrandMention.subtask_id)).label("total"),
+        )
+        .where(*common_where)
+        .group_by("platform_code", BrandMention.delivery_mode)
+    ).all()
+    total_by_pd: dict[tuple[str, str], int] = {
+        (r.platform_code, r.delivery_mode): int(r.total or 0) for r in total_rows
+    }
+
+    # 索引命中数 (brand, platform_code, delivery_mode) → {mention, top1, top3}
+    by_bpd: dict[tuple[str, str, str], dict[str, int]] = {}
     for r in brand_rows:
-        key = compound_key(r.platform, r.delivery_mode, bool(r.thinking_mode))
-        delivery_by_triple[key] = r.delivery_mode
-        thinking_by_triple[key] = bool(r.thinking_mode)
-        denom = total_by_triple.get(key) or 1
-        by_triple.setdefault(key, {"self": [], "comp": []})
-        side = "self" if r.is_self else "comp"
-        by_triple[key][side].append({
-            "mention_rate": int(r.matched or 0) / denom,
-            "top1_rate": int(r.top1 or 0) / denom,
-            "top3_rate": int(r.top3 or 0) / denom,
-        })
+        by_bpd[(r.brand, r.platform_code, r.delivery_mode)] = {
+            "mention": int(r.matched or 0),
+            "top1": int(r.top1 or 0),
+            "top3": int(r.top3 or 0),
+        }
 
-    def _avg(rows: list[dict[str, float]], key: str) -> float:
-        if not rows:
-            return 0.0
-        n = len(rows)
-        return sum(r[key] for r in rows) / n
+    def _row_rate(brand: str, code: str, metric: str) -> tuple[float, float, float]:
+        """返回 (pc_rate, mobile_rate, overall),单位 0-100。
+        - pc_rate / mobile_rate:per-(platform, delivery) 细分率,分母是
+          该 platform × delivery 在窗口内的 distinct subtask 数
+        - overall:per-platform 跨 delivery 合并率,
+          (web 命中 + mobile 命中) / 该 platform 的 (web + mobile) subtask 数
+        """
+        d_pc = max(1, total_by_pd.get((code, "web"), 0))
+        d_mb = max(1, total_by_pd.get((code, "mobile"), 0))
+        cnt_pc = by_bpd.get((brand, code, "web"), {}).get(metric, 0)
+        cnt_mb = by_bpd.get((brand, code, "mobile"), {}).get(metric, 0)
+        overall_denom = max(
+            1, total_by_pd.get((code, "web"), 0) + total_by_pd.get((code, "mobile"), 0)
+        )
+        overall = (cnt_pc + cnt_mb) / overall_denom * 100
+        return cnt_pc / d_pc * 100, cnt_mb / d_mb * 100, overall
 
-    # 排序:按 (delivery_mode web→mobile, thinking_mode fast→think, platform_code)
-    # 让四象限 / BarChartH 的「网页快速 / 网页思考 / 手机快速 / 手机思考」分组
-    # 在视觉上连成一片。
-    delivery_order = {"web": 0, "mobile": 1}
-    thinking_order = {False: 0, True: 1}
-    sorted_keys = sorted(
-        by_triple.keys(),
-        key=lambda k: (
-            delivery_order.get(delivery_by_triple.get(k, ""), 99),
-            thinking_order.get(thinking_by_triple.get(k, False), 99),
-            k,
-        ),
+    brand_list: list[CompetitorKpi] = [self_kpi, *competitor_kpis]
+
+    cards: list[DiffBrandCard] = []
+    # head_value 跟 "全部竞品" tab 同口径:`CompetitorKpi.{mention,top1,top3}_rate`
+    # 是 matched / total_subtasks(品牌级单值,不分 platform / 终端),差异化
+    # 卡的卡头 KPI 直接复用,不再做 pc/mobile 加权。卡内表格的 PC/移动/均值
+    # 列是 per-model 的明细,跟 KPI 不同口径,各自独立。
+    metric_to_attr = {
+        "mention": "mention_rate",
+        "top1":    "top1_rate",
+        "top3":    "top3_rate",
+    }
+    for metric in _DIFF_METRIC_KEYS:
+        attr = metric_to_attr[metric]
+        for bkpi in brand_list:
+            rows: list[DiffBrandRow] = [
+                DiffBrandRow(
+                    platform_code=code,
+                    pc_rate=pc,
+                    mobile_rate=mb,
+                    overall=overall,
+                )
+                for code in sorted_codes
+                for pc, mb, overall in [_row_rate(bkpi.brand, code, metric)]
+            ]
+            head = getattr(bkpi, attr) * 100
+            cards.append(DiffBrandCard(
+                metric=metric,  # type: ignore[arg-type]
+                brand=bkpi.name,
+                brand_canonical=bkpi.brand,
+                is_self=bkpi.is_self,
+                color=brand_color_for(bkpi.name, bkpi.is_self),
+                head_value=round(head, 1),
+                rows=rows,
+            ))
+
+    return DiffBrandOut(
+        metrics=_DIFF_METRIC_META,
+        self_brand_canonical=self_kpi.brand,
+        cards=cards,
     )
 
-    out: list[ModelDiff] = []
-    for key in sorted_keys:
-        sides = by_triple[key]
-        out.append(ModelDiff(
-            platform=key,
-            delivery_mode=delivery_by_triple.get(key),
-            thinking_mode=thinking_by_triple.get(key),
-            self_mention_rate=_avg(sides["self"], "mention_rate"),
-            self_top1_rate=_avg(sides["self"], "top1_rate"),
-            self_top3_rate=_avg(sides["self"], "top3_rate"),
-            competitor_mention_rate=_avg(sides["comp"], "mention_rate"),
-            competitor_top1_rate=_avg(sides["comp"], "top1_rate"),
-            competitor_top3_rate=_avg(sides["comp"], "top3_rate"),
-        ))
-    return out
+
+def _strip_mobile(platform_code: str | None) -> str:
+    """``doubao_mobile`` → ``doubao``。platform_code 为 None/空时原样返回。"""
+    if not platform_code:
+        return platform_code or ""
+    return (
+        platform_code[:-len("_mobile")]
+        if platform_code.endswith("_mobile")
+        else platform_code
+    )
 
 
-def _compute_diff_quadrant(diff_model):
-    """四象限 — 从 per-triple 抽 mention_rate 点。每个 triple 一个点。"""
-    return [
-        QuadrantPoint(
-            platform=m.platform,
-            delivery_mode=m.delivery_mode,
-            thinking_mode=m.thinking_mode,
-            self_mention_rate=m.self_mention_rate,
-            competitor_avg_mention_rate=m.competitor_mention_rate,
+def brand_color_for(brand_name: str, is_self: bool) -> str:
+    """差异化分析卡头左条 / KPI 数字的取色;unknown 竞品走灰色兜底。"""
+    if is_self:
+        return DIFF_BRAND_COLORS.get(brand_name, DEFAULT_SELF_COLOR)
+    return DIFF_BRAND_COLORS.get(brand_name, DEFAULT_COMP_COLOR)
+
+
+def _resolve_selected_codes(
+    db,
+    project_id: int,
+    selected_triples: set[tuple[str, str, bool]] | None,
+) -> set[str]:
+    """决定差异化卡片表格的"行集合"。
+
+    - ``selected_triples`` 非 None 且非空 → 用 toolbar 选中的 platform_code 集合
+      (空集 ``set()`` 是合法的"用户显式全清"语义,返回 ``set()``,前端显示空态)
+    - ``selected_triples is None`` (toolbar 全选) → fallback 到项目配置的
+      ``geo_project_platforms.platform_code``(剥离 _mobile 去重)
+    """
+    if selected_triples is not None:
+        return {code for code, _, _ in selected_triples}
+    rows = db.execute(
+        select(ProjectPlatform.platform_code).where(
+            ProjectPlatform.project_id == project_id
         )
-        for m in diff_model
-    ]
+    ).all()
+    return {_strip_mobile(r.platform_code) for r in rows if r.platform_code}
+
+
+# ——— 差异化分析(逐品牌罗列)— end ———
 
 
 def compute_competitor_analysis(
@@ -297,14 +370,13 @@ def compute_competitor_analysis(
     selected_prompt_texts: list[str] | None = None,
 ) -> CompetitorAnalysisOut:
     """Drives the 竞品分析 tab. Returns a ``CompetitorAnalysisOut``
-    populated with self + competitors + trend + diff trio (diff_core /
-    diff_model / diff_quadrant) + previous window dates. The 4 deltas on
-    each KPI and ``previous_window_*`` are None when ``days < 7``
-    (spec §1.3).
+    populated with self + competitors + trend + diff_brand + previous
+    window dates. The 4 deltas on each KPI and ``previous_window_*``
+    are None when ``days < 7`` (spec §1.3).
 
     selected_triples / selected_prompt_texts 都是 toolbar 联动的筛选口径:
     None 表示「不筛」;非 None 表示严格过滤(三元组 / prompt 文本 IN-list)。
-    当前 / 上一窗口、trend、diff_model、diff_quadrant 都共享同一组筛选条件。
+    当前 / 上一窗口、trend、diff_brand 都共享同一组筛选条件。
     """
     win_start, win_end = _resolve_competitor_window(days, start, end)
     win_start_dt = datetime.combine(win_start, time.min)
@@ -644,18 +716,16 @@ def compute_competitor_analysis(
 
     trend_block = CompetitorTrendBlock(labels=labels, series=series)
 
-    diff_core = _compute_diff_core(self_kpi, competitor_kpis)
-
-    diff_model = _compute_diff_model(
+    diff_brand = _compute_diff_brand(
         db,
         project_id,
         win_start_dt,
         win_end_dt,
+        self_kpi,
+        competitor_kpis,
         selected_triples=selected_triples,
         selected_prompt_texts=selected_prompt_texts,
     )
-
-    diff_quadrant = _compute_diff_quadrant(diff_model)
 
     return CompetitorAnalysisOut(
         project_id=project_id,
@@ -666,9 +736,7 @@ def compute_competitor_analysis(
         self_brand=self_kpi,
         competitors=competitor_kpis,
         trend=trend_block,
-        diff_core=diff_core,
-        diff_model=diff_model,
-        diff_quadrant=diff_quadrant,
+        diff_brand=diff_brand,
         previous_window_start=prev_window_start_d,
         previous_window_end=prev_window_end_d,
     )

@@ -399,6 +399,10 @@ class OwnArticle(Base):
     title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     publish_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     remind: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 分发渠道 —— 用户在导入 xlsx 时声明(微信公众号 / 知乎 / 小红书 等);
+    # 64 字符覆盖所有常见渠道名 + 留余地。历史行由迁移 server_default
+    # 落 '' ,UI 显示 '—'。
+    channel: Mapped[str] = mapped_column(String(64), nullable=False, default="")
 
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()

@@ -200,7 +200,11 @@ def weekly_summary(ctx: BuildContext) -> dict:
 
     proj_prompts_rows = ctx.db.execute(
         select(ProjectPrompt.id, ProjectPrompt.prompt).where(
-            ProjectPrompt.project_id == ctx.project.id
+            ProjectPrompt.project_id == ctx.project.id,
+            # 2026-09-29 修复:运营在 toolbar 选了 N 个问题,但这里会把项目里
+            # 全部 prompt 都铺出来。``ctx.prompts`` 是生成时解析的 prompt
+            # **文本**;None/空 = 全选(向后兼容,行为同前)。
+            *([ProjectPrompt.prompt.in_(ctx.prompts)] if ctx.prompts else []),
         ).order_by(ProjectPrompt.sort)
     ).all()
     matrix_rows: list[dict] = []
@@ -229,6 +233,62 @@ def weekly_summary(ctx: BuildContext) -> dict:
         platform_codes=ctx.platform_codes,
         prompts=ctx.prompts,
     )
+
+    # ---- 四、内容运营 ----
+    # 4 张 KPI 卡片的数据源:own_articles 表 + 全信源池引用 join + 周期末日提及率。
+    # 发布明细表 / 引用分布表 / TOP10 仍为 None —— spec §9 明确不做。
+    # 周期末日提及率 = period.end 单日数据(同 Section 一 的「整体提及率」口径)。
+    content_ops_period_end = report_metrics.daily_mention_rate(
+        ctx.db,
+        project_id=ctx.project.id,
+        window_start=ctx.period_end_exclusive - timedelta(days=1),
+        window_end_exclusive=ctx.period_end_exclusive,
+        platform_codes=ctx.platform_codes,
+        prompts=ctx.prompts,
+    )
+    period_end_rate: float | None = None
+    if content_ops_period_end:
+        period_end_rate = float(content_ops_period_end[0]["rate"])
+    citation_metrics = report_metrics.compute_citation_metrics(
+        ctx.db,
+        project_id=ctx.project.id,
+        window_start=ctx.period_start,
+        window_end_exclusive=ctx.period_end_exclusive,
+        platform_codes=ctx.platform_codes,
+        prompts=ctx.prompts,
+        top_n=10,
+    )
+    content_ops = {
+        "weekly_post_count": report_metrics.weekly_post_count(
+            ctx.db,
+            project_id=ctx.project.id,
+            window_start=ctx.period_start,
+            window_end_exclusive=ctx.period_end_exclusive,
+        ),
+        "distribution_count": report_metrics.weekly_distribution_count(
+            ctx.db,
+            project_id=ctx.project.id,
+            window_start=ctx.period_start,
+            window_end_exclusive=ctx.period_end_exclusive,
+        ),
+        "channel_count": report_metrics.weekly_channel_count(
+            ctx.db,
+            project_id=ctx.project.id,
+            window_start=ctx.period_start,
+            window_end_exclusive=ctx.period_end_exclusive,
+        ),
+        "citation_count": citation_metrics["citation_count"],
+        "period_end_mention_rate": period_end_rate,
+        # 4.1 表(发布明细)+ 4.2 ①(引用按平台分布)+ 4.2 ②(引用 TOP10)
+        "publish_detail": report_metrics.weekly_publish_detail(
+            ctx.db,
+            project_id=ctx.project.id,
+            window_start=ctx.period_start,
+            window_end_exclusive=ctx.period_end_exclusive,
+        ),
+        "citation_by_platform": citation_metrics["citation_by_platform"],
+        "citation_top_articles": citation_metrics["citation_top_articles"],
+    }
 
     return {
         "project": {
@@ -274,6 +334,8 @@ def weekly_summary(ctx: BuildContext) -> dict:
         "zero_mention_prompts": zero_prompts,
         # ---- 1.1 走势说明(图表下方那段文字,运营手填) ----
         "weekly_chart_summary": None,
+        # ---- 4.1 发布明细说明(4.1 表格下方那段文字,运营手填) ----
+        "weekly_publish_summary": None,
         # ---- 3.3 稳定提及的前 N 个问题 ----
         "stable_prompts": stable_result["stable_prompts"],
         "total_monitor_days": stable_result["total_monitor_days"],
@@ -290,17 +352,7 @@ def weekly_summary(ctx: BuildContext) -> dict:
             "content_result": None,
             "scene_coverage": None,
         },
-        # ---- 四、内容运营 ----
-        # KPI「本周发布独立标题」已接 geo_own_articles.publish_date;
-        # 4.x 章节其余字段(发布明细 / 引用分布 / TOP10)仍为 None —— spec §9 明确不做。
-        "content_ops": {
-            "weekly_post_count": report_metrics.weekly_post_count(
-                ctx.db,
-                project_id=ctx.project.id,
-                window_start=ctx.period_start,
-                window_end_exclusive=ctx.period_end_exclusive,
-            ),
-        },
+        "content_ops": content_ops,
         # ---- 5.3 核心归因 (运营手填) ----
         "attribution": None,
     }
@@ -339,6 +391,11 @@ TEMPLATE_FIELDS: dict[str, list[dict]] = {
             "key": "weekly_chart_summary",
             "label": "1.1 走势说明",
             "hint": "图表下方的说明文字,描述本期走势要点",
+        },
+        {
+            "key": "weekly_publish_summary",
+            "label": "4.1 发布明细说明",
+            "hint": "4.1 表格下方的说明文字,描述本周发布/分发策略要点",
         },
         {
             "key": "weekly_platform_summary",

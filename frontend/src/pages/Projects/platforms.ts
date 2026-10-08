@@ -24,20 +24,29 @@ export interface ModelCardMeta {
   bg: string;
   fg: string;
   chartColor: string;
+  /** 12px 文字变体(同色相压暗);柱状图数值标签等小字场景用,
+   *  对齐 v3.7(2026-10-05)docs/风球GEO监控平台UI-261005/overview.md 降饱和 7 色板。 */
+  inkColor: string;
 }
 
 export const PLATFORM_CATALOG: ModelCardMeta[] = [
-  { key: "doubao", name: "豆包", logo: "豆", bg: "#1e40af", fg: "#ffffff", chartColor: "#1a55e8" },
-  { key: "yuanbao", name: "元宝", logo: "元", bg: "#dc2626", fg: "#ffffff", chartColor: "#ff6b1a" },
-  { key: "deepseek", name: "DeepSeek", logo: "D", bg: "#0891b2", fg: "#ffffff", chartColor: "#13c2c2" },
-  { key: "wenxinyiyan", name: "百度文心", logo: "文", bg: "#2563eb", fg: "#ffffff", chartColor: "#eb2f96" },
-  { key: "qianwen", name: "通义千问", logo: "通", bg: "#7c3aed", fg: "#ffffff", chartColor: "#52c41a" },
-  { key: "hunyuan", name: "腾讯混元", logo: "混", bg: "#059669", fg: "#ffffff", chartColor: "#faad14" },
-  { key: "doubao_mobile", name: "抖音豆包", logo: "抖", bg: "#0f172a", fg: "#ffffff", chartColor: "#4d80f0" },
-  { key: "kimi", name: "Kimi", logo: "K", bg: "#0f172a", fg: "#ffffff", chartColor: "#722ed1" },
-  { key: "quark", name: "夸克", logo: "夸", bg: "#7c3aed", fg: "#ffffff", chartColor: "#9254de" },
-  { key: "zhipu", name: "智谱清言", logo: "智", bg: "#ea580c", fg: "#ffffff", chartColor: "#fa8c16" },
-  { key: "meta", name: "秘塔AI", logo: "M", bg: "#1f2937", fg: "#ffffff", chartColor: "#595959" },
+  { key: "doubao", name: "豆包", logo: "豆", bg: "#1e40af", fg: "#ffffff", chartColor: "#3f6bc4", inkColor: "#456ebf" },
+  { key: "yuanbao", name: "元宝", logo: "元", bg: "#dc2626", fg: "#ffffff", chartColor: "#c9803a", inkColor: "#a46932" },
+  { key: "deepseek", name: "DeepSeek", logo: "D", bg: "#0891b2", fg: "#ffffff", chartColor: "#2b8b9b", inkColor: "#2b7e8c" },
+  // wenxinyiyan 与 baiduai 经 PLATFORM_CODE_ALIASES 同名,沿用文心降饱和色。
+  { key: "wenxinyiyan", name: "百度文心", logo: "文", bg: "#2563eb", fg: "#ffffff", chartColor: "#b4487e", inkColor: "#ae4c7d" },
+  { key: "qianwen", name: "通义千问", logo: "通", bg: "#7c3aed", fg: "#ffffff", chartColor: "#3d9070", inkColor: "#3c8066" },
+  // hunyuan 不在 doc 7 色,按暖橙系派生(深色温下不与蚂蚁阿福 #8c3a2c 撞色)。
+  { key: "hunyuan", name: "腾讯混元", logo: "混", bg: "#059669", fg: "#ffffff", chartColor: "#b87544", inkColor: "#95603a" },
+  // doubao_mobile 与 web 豆包同色(v3.7 内部约定)。
+  { key: "doubao_mobile", name: "抖音豆包", logo: "抖", bg: "#0f172a", fg: "#ffffff", chartColor: "#3f6bc4", inkColor: "#456ebf" },
+  { key: "kimi", name: "Kimi", logo: "K", bg: "#0f172a", fg: "#ffffff", chartColor: "#8250bd", inkColor: "#8456b8" },
+  // quark 紫系派生,与 Kimi #8250bd 同色相但 L+30% 区分。
+  { key: "quark", name: "夸克", logo: "夸", bg: "#7c3aed", fg: "#ffffff", chartColor: "#a47fc6", inkColor: "#8a6aa8" },
+  // zhipu 暖橙系派生,与元宝 #c9803a 同色相但 S 稍低避免撞色。
+  { key: "zhipu", name: "智谱清言", logo: "智", bg: "#ea580c", fg: "#ffffff", chartColor: "#b87648", inkColor: "#96633c" },
+  // meta 灰系保留(本来就是中性,无需降饱和)。
+  { key: "meta", name: "秘塔AI", logo: "M", bg: "#1f2937", fg: "#ffffff", chartColor: "#595959", inkColor: "#39424f" },
 ];
 
 // Map legacy / display-name strings (e.g. "豆包", "DeepSeek") back to the
@@ -197,7 +206,10 @@ export function platformLabel(raw: string): string {
 
 // Unknown platforms cycle the prototype palette so a newly supported model
 // still gets a stable colour instead of falling back to echarts defaults.
-const FALLBACK_PALETTE = ["#1a55e8", "#ff6b1a", "#52c41a", "#722ed1", "#13c2c2", "#eb2f96", "#faad14"];
+// 同步 v3.7(2026-10-05)降饱和 7+1 色板,保证后端突然冒出未登记的 modelCode 时
+// 仍走降饱和口径,不回退到饱和老色。
+const FALLBACK_PALETTE = ["#3f6bc4", "#c9803a", "#3d9070", "#8250bd", "#2b8b9b", "#b4487e", "#8c3a2c", "#4a8e84"];
+const FALLBACK_PALETTE_INK = ["#456ebf", "#a46932", "#3c8066", "#8456b8", "#2b7e8c", "#ae4c7d", "#883d30", "#467a72"];
 
 /** ``platformColor`` 取色优先级:WIZARD_MODELS.color > PLATFORM_CATALOG.chartColor > FALLBACK_PALETTE。
  *  WIZARD_MODELS 命中的 web 与 mobile 同色 —— 与模型卡片编辑器的同色
@@ -211,4 +223,17 @@ export function platformColor(raw: string, index = 0): string {
   const meta = PLATFORM_CATALOG.find((m) => m.key === platformToKey(base));
   if (meta) return meta.chartColor;
   return FALLBACK_PALETTE[index % FALLBACK_PALETTE.length];
+}
+
+/** ``platformInkColor`` 取色优先级与 ``platformColor`` 对齐(graphic → ink 变体);
+ *  用于柱状图 12px 数值标签等小字场景 —— 降饱和 graphic 色做文字对比度不足 4.5,
+ *  需要同色相压暗版。取不到 ink 时回退 graphic 色(向后兼容老调用点)。 */
+export function platformInkColor(raw: string, index = 0): string {
+  const compound = parseOverviewKey(raw);
+  const base = compound ? compound.code : raw;
+  const w = wizardByCode(base);
+  if (w) return w.entry.inkColor ?? w.entry.color;
+  const meta = PLATFORM_CATALOG.find((m) => m.key === platformToKey(base));
+  if (meta) return meta.inkColor;
+  return FALLBACK_PALETTE_INK[index % FALLBACK_PALETTE_INK.length];
 }

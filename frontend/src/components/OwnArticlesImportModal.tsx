@@ -4,11 +4,13 @@
  * 对应 index.html:1303 「导入 URL 列表」按钮。流程跟
  * :file:`./MediaDictionaryImportModal.tsx` 同款三段结构:
  * 1. 上传:antd Upload 接住 .xlsx,beforeUpload 调 preview 接口
- * 2. 预览:URL / 标题 / 发布日期 / 状态(新增|更新)表格 + 无效行折叠
+ * 2. 预览:URL / 标题 / 发布日期 / 分发渠道 / 状态(新增|更新)表格 + 无效行折叠
  * 3. 确认:POST /import 单事务 upsert,返回 inserted / updated / total
  *
  * 字段差异:
- * - xlsx 列固定 3 列:URL / 标题 / 发布日期(YYYY-MM-DD,可空)
+ * - xlsx 列固定 4 列:URL / 标题 / 发布日期(YYYY-MM-DD)/ 分发渠道;四列任一为空
+ *   → 后端 400「导入失败,以下行四列缺一不可」整份拒绝。列数 < 4 → 400
+ *   「文件格式不正确」。
  * - preview / result shape 见 :file:`../api/projects.ts` 的
  *   ``OwnArticleImportPreview`` / ``OwnArticleImportResult``。
  */
@@ -97,7 +99,15 @@ export default function OwnArticlesImportModal({
         setPreview(prev);
         setPhase("previewed");
       } catch (err) {
-        message.error((err as Error).message || "解析失败");
+        // FastAPI 4xx/5xx 在 ``err.response.data.detail`` 里带具体文案
+        // (列数不足 → "文件格式不正确...";缺列缺值 → 行级报错)—— 优先用
+        // 它,回落到 axios 默认 ``err.message``,最后才是「解析失败」。
+        const e = err as { response?: { data?: { detail?: unknown } }; message?: string };
+        message.error(
+          (typeof e?.response?.data?.detail === "string" && e.response.data.detail) ||
+            e?.message ||
+            "解析失败",
+        );
         setPhase("idle");
         setStagedFile(null);
       }
@@ -121,7 +131,12 @@ export default function OwnArticlesImportModal({
       reset();
       onClose();
     } catch (err) {
-      message.error((err as Error).message || "导入失败");
+      const e = err as { response?: { data?: { detail?: unknown } }; message?: string };
+      message.error(
+        (typeof e?.response?.data?.detail === "string" && e.response.data.detail) ||
+          e?.message ||
+          "导入失败",
+      );
     } finally {
       setImporting(false);
     }
@@ -129,7 +144,10 @@ export default function OwnArticlesImportModal({
 
   const entriesWithStatus = preview
     ? preview.entries.map((e) => ({
-        ...e,
+        url: e.url,
+        title: e.title,
+        publish_date: e.publish_date,
+        channel: e.channel,
         status: preview.update_urls.includes(e.url) ? "更新" : "新增",
       }))
     : [];
@@ -156,7 +174,7 @@ export default function OwnArticlesImportModal({
             type="info"
             showIcon
             message="支持格式"
-            description="仅 .xlsx 文件,大小 5MB 以内。文件需包含三列:URL、标题、发布日期(YYYY-MM-DD,可空)。"
+            description="仅 .xlsx 文件,大小 5MB 以内。文件需包含四列:URL、标题、发布日期(YYYY-MM-DD)、分发渠道;任一列缺失或单元格为空将整份拒绝。"
           />
           <Upload {...uploadProps}>
             <Button icon={<UploadOutlined />}>选择 .xlsx 文件</Button>
@@ -187,6 +205,7 @@ interface PreviewBlockProps {
     url: string;
     title: string;
     publish_date: string | null;
+    channel: string;
     status: string;
   }>;
   onChangeFile: () => void;
@@ -273,6 +292,12 @@ function PreviewBlock({ preview, entriesWithStatus, onChangeFile }: PreviewBlock
             dataIndex: "publish_date",
             width: 120,
             render: (d: string | null) => d ?? "—",
+          },
+          {
+            title: "分发渠道",
+            dataIndex: "channel",
+            width: 130,
+            render: (c: string) => c || "—",
           },
           {
             title: "状态",

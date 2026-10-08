@@ -972,34 +972,43 @@ export interface CompetitorTrendBlock {
   series: CompetitorTrendSeries[];
 }
 
-export interface QuadrantPoint {
-  /** Compound key: ``${platform_code}__${delivery_mode}__${thinking}``。 */
-  platform: string;
-  delivery_mode: "web" | "mobile" | null;
-  thinking_mode: boolean | null;
-  self_mention_rate: number;
-  competitor_avg_mention_rate: number;
+export interface DiffBrandRow {
+  /** WIZARD_MODELS 里的 base code(``doubao`` / ``qianwen`` 等),不带
+   *  ``_mobile`` 后缀。后端 ``_strip_mobile`` 折叠 web + mobile 后输出的
+   *  统一 code;前端 ``sortRowsByWizard`` 按 WIZARD_MODELS 索引重排。 */
+  platform_code: string;
+  /** 0-100,后端分母 = 窗口内该 (code, web) 的 distinct subtask 数。 */
+  pc_rate: number;
+  /** 0-100,后端分母 = 窗口内该 (code, mobile) 的 distinct subtask 数。 */
+  mobile_rate: number;
+  /** 0-100,该 platform 跨 web+mobile 合并率(分母 = 项目级 total_subtasks),
+   * 与 pc_rate / mobile_rate 分母不同。 */
+  overall: number;
 }
 
-export interface ModelDiff {
-  /** Compound key: ``${platform_code}__${delivery_mode}__${thinking}``。
-   *  2026-09 起按 triple 拆,与 Overview / 问题提及分析 tab 口径一致;
-   *  前端用 ``platformLabel`` 渲染展示名。 */
-  platform: string;
-  delivery_mode: "web" | "mobile" | null;
-  thinking_mode: boolean | null;
-  self_mention_rate: number;
-  self_top1_rate: number;
-  self_top3_rate: number;
-  competitor_mention_rate: number;
-  competitor_top1_rate: number;
-  competitor_top3_rate: number;
+export type DiffBrandMetric = "mention" | "top1" | "top3";
+
+export interface DiffBrandCard {
+  metric: DiffBrandMetric;
+  /** 展示名(后端用 CompetitorKpi.name,与 DiffBrandCard.brand_canonical 区分)。 */
+  brand: string;
+  /** 数据库原始 brand(主键),localStorage key 用,防「珂润」/「珂润 Curel」漂移。 */
+  brand_canonical: string;
+  is_self: boolean;
+  /** 品牌色,直接 inline 渲染左条 / 头部色点 / KPI 数字。 */
+  color: string;
+  /** Σ(pc × 0.42 + mobile × 0.58) / N_platform,1 位小数;后端算。 */
+  head_value: number;
+  /** 动态 N 行(rows 数 = toolbar 当前选中的模型数,顺序由前端按
+   *  WIZARD_MODELS 索引重排)。 */
+  rows: DiffBrandRow[];
 }
 
-export interface DiffCore {
-  labels: string[];
-  self: number[];
-  competitor_avg: number[];
+export interface DiffBrandOut {
+  metrics: Array<{ id: string; name: string; desc: string; unit: string }>;
+  self_brand_canonical: string | null;
+  /** 长度 = 3 × (1 + |competitors|);最多 15 张。 */
+  cards: DiffBrandCard[];
 }
 
 export interface CompetitorAnalysisOut {
@@ -1011,9 +1020,7 @@ export interface CompetitorAnalysisOut {
   self_brand: CompetitorKpi | null;
   competitors: CompetitorKpi[];
   trend: CompetitorTrendBlock;
-  diff_core: DiffCore;
-  diff_model: ModelDiff[];
-  diff_quadrant: QuadrantPoint[];
+  diff_brand: DiffBrandOut;
   previous_window_start: string | null;
   previous_window_end: string | null;
 }
@@ -1373,6 +1380,7 @@ export interface OwnArticleIn {
   url: string;
   title: string;
   publish_date: string | null;
+  channel: string;
 }
 
 export interface OwnArticleOut {
@@ -1380,6 +1388,7 @@ export interface OwnArticleOut {
   url: string;
   title: string;
   publish_date: string | null;
+  channel: string;
   remind: boolean;
   created_at: string;
   cited: boolean;
@@ -1470,13 +1479,15 @@ export function importOwnArticles(
   return _postOwnArticlesFile(projectId, "import", file) as Promise<OwnArticleImportResult>;
 }
 
-export function toggleOwnArticleRemind(
+export function updateOwnArticle(
   projectId: number,
   articleId: number,
+  patch: { publish_date?: string | null; channel?: string },
 ): Promise<OwnArticleOut> {
   return client
-    .post<OwnArticleOut>(
-      `/projects/${projectId}/own-articles/${articleId}/remind`,
+    .patch<OwnArticleOut>(
+      `/projects/${projectId}/own-articles/${articleId}`,
+      patch,
     )
     .then((r) => r.data);
 }

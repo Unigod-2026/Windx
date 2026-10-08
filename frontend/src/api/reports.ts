@@ -134,6 +134,8 @@ export interface ReportSnapshot {
   generated_at: string;
   /** 1.1 走势说明 — 图表下方说明文字,运营手填 */
   weekly_chart_summary?: string | null;
+  /** 4.1 发布明细说明 — 4.1 表格下方说明文字,运营手填 */
+  weekly_publish_summary?: string | null;
   /** 3.1 平台周环比说明 — 3.1 表格下方说明文字,运营手填 */
   weekly_platform_summary?: string | null;
   /** 5.1 持续未提及说明 — 5.1 表格下方说明文字,运营手填 */

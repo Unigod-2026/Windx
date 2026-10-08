@@ -262,6 +262,29 @@ export default function AnswerDetailPane({
     setHitItems((prev) => prev.filter((it) => it.id !== id));
   };
 
+  // 当前问题的原文 —— 头部标题直接展示问题本身(不再是「品牌相关回答」)。
+  const currentPrompt =
+    project.prompts?.find((p) => p.id === promptId)?.prompt ?? "";
+
+  // 「本答案品牌位次」白名单(自身 + confirmed 竞品),与 RawAnswersPane 同款:
+  // 选中答案后只展示白名单命中的品牌,其它无关品牌不进位次胶囊。
+  // 必须放在 early return 之前 —— useMemo 顺序不能跨 render 改变,否则
+  // React 报 "Rendered more hooks than during the previous render"。
+  const rankingsWhitelist = useMemo(() => {
+    const set = new Set<string>();
+    if (project.brand) set.add(project.brand);
+    for (const c of competitors) {
+      if (c.status === "confirmed") set.add(c.name);
+    }
+    return set;
+  }, [project.brand, competitors]);
+  const filteredRankings = useMemo(() => {
+    if (!selected) return [];
+    return (selected.all_rankings ?? []).filter(
+      (r) => rankingsWhitelist.size === 0 || rankingsWhitelist.has(r.name),
+    );
+  }, [selected, rankingsWhitelist]);
+
   if (answersLoading && answers.length === 0) {
     return <Skeleton active paragraph={{ rows: 6 }} />;
   }
@@ -269,10 +292,6 @@ export default function AnswerDetailPane({
   if (answers.length === 0) {
     return <Empty description="该问题在当前窗口内暂无 AI 回答" />;
   }
-
-  // 当前问题的原文 —— 头部标题直接展示问题本身(不再是「品牌相关回答」)。
-  const currentPrompt =
-    project.prompts?.find((p) => p.id === promptId)?.prompt ?? "";
 
   return (
     <div className="ad-root">
@@ -319,52 +338,6 @@ export default function AnswerDetailPane({
                 </div>
               </div>
             </div>
-            {/* 答案正文高亮图例 —— 单行,每个品牌一行:
-                  ■ 监控品牌(别名1、别名2)   ■ 竞品(别名1、别名2)   ■ 竞品2
-                每行主名前置一块方色块(蓝 = 监控 / 黄 = 竞品),色块高度对齐
-                主名 chip;别名 chip 用对应浅色版,与正文 hl-* alias 颜色一致。
-                视觉上扫一眼色块就能区分监控 vs 竞品。别名用半角 ();跟
-                中文 chip 同行时视觉更紧凑。 */}
-            <div className="ad-hl-legend">
-              {project.brand && (
-                <span className="ad-hl-row ad-hl-row-self">
-                  <span className="ad-hl-stripe ad-hl-stripe-self" />
-                  <span className="ad-hl-token hl-self">{project.brand}</span>
-                  {project.aliases && project.aliases.length > 0 && (
-                    <span className="ad-hl-aliases">
-                      (
-                      {project.aliases.map((a, i) => (
-                        <span key={a}>
-                          {i > 0 && "、"}
-                          <span className="ad-hl-token hl-self-alias">{a}</span>
-                        </span>
-                      ))}
-                      )
-                    </span>
-                  )}
-                </span>
-              )}
-              {competitors
-                .filter((c) => c.status === "confirmed")
-                .map((c) => (
-                  <span key={c.id} className="ad-hl-row ad-hl-row-comp">
-                    <span className="ad-hl-stripe ad-hl-stripe-comp" />
-                    <span className="ad-hl-token hl-competitor">{c.name}</span>
-                    {c.aliases && c.aliases.length > 0 && (
-                      <span className="ad-hl-aliases">
-                        (
-                        {c.aliases.map((a, i) => (
-                          <span key={a}>
-                            {i > 0 && "、"}
-                            <span className="ad-hl-token hl-competitor-alias">{a}</span>
-                          </span>
-                        ))}
-                        )
-                      </span>
-                    )}
-                  </span>
-                ))}
-            </div>
             <div className="ad-body">
               {detailLoading ? (
                 <Skeleton active paragraph={{ rows: 6 }} />
@@ -380,6 +353,38 @@ export default function AnswerDetailPane({
               )}
             </div>
           </div>
+
+          {/* 本答案品牌位次 —— 与 RawAnswersPane footer 胶囊对齐:
+               只显示自身 + confirmed 竞品,其它无关品牌不进位次胶囊。
+               位置放在 ad-keywords 行之上,与 doc 截图「关键词行 + 位次行」一致。 */}
+          {filteredRankings.length > 0 && (
+            <div className="ad-rankings">
+              <span className="answer-rankings-label">本答案品牌位次</span>
+              <span className="answer-rankings-row">
+                {filteredRankings.map((r) => {
+                  const isSelf = !!project.brand && r.name === project.brand;
+                  const rankCls =
+                    r.rank === 1
+                      ? "rank-pill rank-1"
+                      : r.rank === 2
+                        ? "rank-pill rank-2"
+                        : r.rank === 3
+                          ? "rank-pill rank-3"
+                          : "rank-pill rank-other";
+                  return (
+                    <span
+                      key={`${r.rank}-${r.name}`}
+                      className={`answer-rank-item${isSelf ? " answer-rank-item-self" : ""}`}
+                    >
+                      <span className={rankCls}>#{r.rank}</span>
+                      <span className="answer-rank-name">{r.name}</span>
+                      {isSelf && <span className="answer-rank-self-tag">自身</span>}
+                    </span>
+                  );
+                })}
+              </span>
+            </div>
+          )}
 
           {/* 关键词行 */}
           <div className="ad-keywords">
@@ -629,81 +634,6 @@ export default function AnswerDetailPane({
           padding: 0 3px;
           border-radius: 3px;
         }
-        /* 高亮图例 —— 单行 flex:每个品牌一行,主名前置一块方色块(蓝 =
-           监控 / 黄 = 竞品)作为组语义锚点;主名 chip 主色 + 别名 chip
-           浅色,与正文 hl-* 1:1 对应;整行套对应组的轻底色,横向一眼能
-           区分监控 vs 竞品。 */
-        .ad-hl-legend {
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: 6px 14px;
-          padding: 8px 14px;
-          background: var(--bg-secondary, #fafafa);
-          border-bottom: 1px solid var(--border-light, #f0f0f0);
-          font-size: 12px;
-          line-height: 1.6;
-        }
-        .ad-hl-row {
-          display: inline-flex;
-          align-items: stretch;
-          gap: 4px;
-          flex-wrap: wrap;
-          padding: 2px 8px 2px 4px;
-          border-radius: 4px;
-        }
-        /* 行底色按组上色 —— 监控 = 淡蓝、竞品 = 淡黄,色块高度顶满 chip */
-        .ad-hl-row-self { background: rgba(29, 78, 216, 0.06); }
-        .ad-hl-row-comp { background: rgba(202, 138, 4, 0.06); }
-        /* 主名前的方色块 —— 蓝 / 黄,与组语义对齐;高度顶满主名 chip */
-        .ad-hl-stripe {
-          display: inline-block;
-          width: 4px;
-          border-radius: 2px;
-          align-self: stretch;
-          flex-shrink: 0;
-        }
-        .ad-hl-stripe-self { background: #1d4ed8; }
-        .ad-hl-stripe-comp { background: #ca8a04; }
-        .ad-hl-token {
-          display: inline-flex;
-          align-items: center;
-          padding: 0 6px;
-          border-radius: 3px;
-          font-size: 12px;
-          font-weight: 500;
-          line-height: 1.7;
-        }
-        /* 图例区域内的 hl-* chip 配色 —— 与正文 (.ad-content) 走同一套蓝 /
-           黄主色 + 同色系浅色别名。注意:这套规则只覆盖图例;正文 hl-* 由
-           上面 .ad-content 选择器管,两套 CSS 颜色必须严格一致,否则同一
-           token 在图例 vs 正文里颜色会不一致。 */
-        .ad-hl-legend .hl-self {
-          background: #dbeafe;
-          color: #1d4ed8;
-        }
-        .ad-hl-legend .hl-self-alias {
-          background: #e0f2fe;
-          color: #0369a1;
-        }
-        .ad-hl-legend .hl-competitor {
-          background: #fef3c7;
-          color: #a16207;
-        }
-        .ad-hl-legend .hl-competitor-alias {
-          background: #fef9c3;
-          color: #854d0e;
-        }
-        .ad-hl-aliases {
-          color: var(--text-tertiary, rgba(0,0,0,0.45));
-          font-size: 12px;
-          display: inline-flex;
-          align-items: baseline;
-          flex-wrap: wrap;
-        }
-        .ad-hl-aliases .ad-hl-token {
-          margin: 0 1px;
-        }
         .ad-keywords {
           background: #fff;
           border: 1px solid var(--border-light, #f0f0f0);
@@ -713,6 +643,76 @@ export default function AnswerDetailPane({
         }
         .ad-kw-label { font-size: 12px; color: var(--text-tertiary); }
         .ad-kw-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+        /* 本答案品牌位次 —— 与 RawAnswersPane footer 同一套 className,
+           这里只新加 ad-rankings 容器样式;胶囊 / 排名 / 自身徽章的样式
+           与 RawAnswersPane 共享,见下面 .answer-rankings-row 等。 */
+        .ad-rankings {
+          background: #fff;
+          border: 1px solid var(--border-light, #f0f0f0);
+          border-radius: 8px;
+          padding: 10px 14px;
+          display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        }
+        .ad-rankings .answer-rankings-label {
+          font-size: 12px;
+          color: var(--text-tertiary);
+        }
+        /* 与 RawAnswersPane 同一套胶囊样式(复制到这里,两份 <style> 块各自
+           渲染,组件挂载时都生效,避免单边 import 不到)。 */
+        .answer-rankings-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 14px;
+          align-items: center;
+          flex: 1;
+          min-width: 0;
+        }
+        .answer-rankings-label {
+          font-size: 12px;
+          color: var(--text-tertiary);
+          margin-right: 2px;
+        }
+        .answer-rank-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 2px 8px;
+          border-radius: 12px;
+          background: var(--bg-secondary, #f5f5f5);
+        }
+        .answer-rank-item.answer-rank-item-self {
+          background: rgba(43, 99, 255, 0.1);
+          border: 1px solid rgba(43, 99, 255, 0.35);
+        }
+        .answer-rank-name {
+          font-size: 12px;
+          color: var(--text-primary);
+          font-weight: 500;
+        }
+        .answer-rank-self-tag {
+          font-size: 11px;
+          color: var(--brand-blue, #1a55e8);
+          background: var(--brand-blue-soft, #e6efff);
+          padding: 0 6px;
+          border-radius: 8px;
+          font-weight: 500;
+        }
+        .rank-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 30px;
+          height: 18px;
+          padding: 0 6px;
+          border-radius: 9px;
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1;
+        }
+        .rank-pill.rank-1 { background: linear-gradient(135deg, #faad14, #ffc069); color: white; }
+        .rank-pill.rank-2 { background: linear-gradient(135deg, #d9d9d9, #f0f0f0); color: #595959; }
+        .rank-pill.rank-3 { background: linear-gradient(135deg, #d48806, #e8b339); color: white; }
+        .rank-pill.rank-other { background: #fafafa; color: #8c8c8c; border: 1px solid #f0f0f0; }
         .ad-right-tabs {
           display: flex; gap: 0;
           border-bottom: 1px solid var(--border-light, #f0f0f0);

@@ -1125,4 +1125,63 @@ body.windx-new-project .app-content {
   }
 }
 
+/* 日期 Popover — 参照 docs/风球GEO监控平台UI-261005 v3.x
+   4 个预设按钮平铺 + 2 个 DatePicker 横向(原型用 <input type="date">,
+   项目里用 AntD DatePicker 保留单日历 + 横排 2 选)。 */
+.gt-date-menu {
+  min-width: 280px;
+  background: var(--bg-card, #fff);
+  border-radius: 6px;
+  padding: 0;
+}
+.gt-date-presets {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0);
+}
+.gt-date-preset {
+  flex: 1;
+  padding: 8px 0;
+  border: 1px solid #dcdcdc;
+  border-radius: 6px;
+  background: var(--bg-page, #f5f6f8);
+  font-size: 14px;
+  color: var(--text-secondary, #4f4f4f);
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.gt-date-preset:hover {
+  border-color: var(--brand-blue, #1a55e8);
+  color: var(--brand-blue, #1a55e8);
+}
+.gt-date-preset.active {
+  background: var(--brand-blue, #1a55e8);
+  color: #fff;
+  border-color: var(--brand-blue, #1a55e8);
+}
+.gt-date-custom {
+  padding: 12px 14px;
+}
+.gt-date-custom label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-tertiary, #8c8c8c);
+  margin-bottom: 8px;
+}
+.gt-date-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gt-date-inputs .ant-picker {
+  flex: 1;
+  min-width: 0;
+}
+.gt-date-inputs span {
+  color: var(--text-tertiary, #8c8c8c);
+}
+
 

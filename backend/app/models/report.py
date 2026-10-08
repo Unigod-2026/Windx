@@ -52,7 +52,18 @@ class Report(Base):
     baseline_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     # Stored relative to backend/ so the directory can move in deploy.
-    file_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    # NULL = 草稿还没有渲染产物(publish 时才写)。不能用空串充当这个
+    # 哨兵值:``uq_reports_file_path`` 是 UNIQUE,而 UNIQUE 允许多个
+    # NULL、只允许一个 ``''`` —— 那样第二份未发布草稿会直接撞约束。
+    file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 生成时刻的检索筛选 —— 2026-09-28 的回归修复:之前 toolbar 选的
+    # 模型 / 问题只在 ``scope_text`` 的文案里出现过,真正算指标时被丢弃。
+    # ``filter_prompts`` 存解析后的 prompt **文本**(不是 ID),GET 时
+    # 不必再查 ``geo_project_prompts``,且历史报告不受 prompt 重命名影响。
+    filter_prompts: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    filter_platform_codes: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True
+    )
     # Human-readable scope string assembled at generate time, e.g.
     # ``近 7 天 · 5 档模型 · 8 个问题``. Stored on the row so historical
     # reports don't drift when toolbar options are added/removed later.

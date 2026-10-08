@@ -44,7 +44,8 @@ export function deltaClass(
  *  无法识别的 unit 直接整串放 num,unit 为空。 */
 function splitValue(s: string): { num: string; unit: string } {
   if (!s || s === "—") return { num: s, unit: "" };
-  for (const u of ["%", "篇", "pp"]) {
+  // 长 unit 优先匹配 —— 避免 "10 渠道次" 被错切成 "10 渠" + "道次"
+  for (const u of ["%", "篇", "pp", "渠道", "次"]) {
     if (s.endsWith(u)) return { num: s.slice(0, -u.length), unit: u };
   }
   return { num: s, unit: "" };
@@ -263,15 +264,22 @@ function MatrixTable({
     }
   }
   // 用 WIZARD_MODELS 做 platform_code → 显示名映射
+  // 同时匹配 ``value``(PC 端 code,如 ``doubao``)和 ``mobileCode``(移动端 code,
+  // 如 ``doubao_mobile``)—— matrix 的 key 直接来自 BrandMention.platform,
+  // 移动端那列的 code 形如 ``doubao_mobile|mobile|fast``,只会查 ``mobileCode``。
   const modelLabel = (code: string): string =>
-    WIZARD_MODELS.find((m) => m.value === code)?.name ?? code;
+    WIZARD_MODELS.find((m) => m.value === code || m.mobileCode === code)?.name ?? code;
 
   // 把 key 拆成 3 行 header:模型名 / 网页|移动 / 快速|思考
-  const splitKey = (k: string): [string, string, string] => {
+  // 返回 [label, delivery, thinking, width],width 按模型名长度给 — "DeepSeek" 这种
+  // 8 字长名用 48px,"豆包" 这种 2 字短名用 32px,问题列吃剩余空间。
+  const splitKey = (k: string): [string, string, string, number] => {
     const [code, delivery, thinking] = k.split("|");
     const deliveryLabel = delivery === "mobile" ? "移动" : "网页";
     const thinkingLabel = thinking === "think" ? "思考" : "快速";
-    return [modelLabel(code), deliveryLabel, thinkingLabel];
+    const name = modelLabel(code);
+    const width = name.length > 4 ? 50 : 30;
+    return [name, deliveryLabel, thinkingLabel, width];
   };
 
   return (
@@ -281,9 +289,9 @@ function MatrixTable({
           <th className="matrix-num">#</th>
           <th className="matrix-question-head">问题</th>
           {platforms.map((pc) => {
-            const [code, d, t] = splitKey(pc);
+            const [code, d, t, w] = splitKey(pc);
             return (
-              <th key={pc} className="matrix-col-head">
+              <th key={pc} className="matrix-col-head" style={{ width: w }}>
                 <div>{code}</div>
                 <div>{d}</div>
                 <div>{t}</div>
@@ -729,7 +737,7 @@ export function SectionThreeBreakdown({
 
       {matrix.length > 0 && (
         <>
-          <h3 className="report-preview-h3">
+          <h3 className="report-preview-h3 report-preview-h3--matrix">
             3.2 每个问题的具体提及率({periodEndShort(snapshot.period.end)},
             {matrix.length}{" 题 × "}
             {Object.keys(matrix[0].per_platform).length}{" 平台"})
@@ -840,22 +848,269 @@ function StablePromptsTable({
   );
 }
 
+interface ContentOpsShape {
+  weekly_post_count?: number;
+  distribution_count?: number;
+  channel_count?: number;
+  citation_count?: number;
+  period_end_mention_rate?: number | null;
+  publish_detail?: Array<{
+    title: string;
+    distribution_count: number;
+    channels: string[];
+    dates: string[];
+  }>;
+  citation_by_platform?: Array<{
+    platform_code: string;
+    platform_label: string;
+    count: number;
+    share: number;
+  }>;
+  citation_top_articles?: Array<{
+    title: string;
+    count: number;
+    models: string[];
+  }>;
+}
+
+// 4.2 ① 可视化条色板 —— 6 个槽位按 count 降序循环,够用即可。
+const PLATFORM_BAR_PALETTE = [
+  "#EF4444", // 红(默认首位)
+  "#0E4B81", // 深藏青
+  "#21C45D", // 绿
+  "#A754F6", // 紫
+  "#F59D0A", // 橙
+  "#05B5D4", // 青
+];
+
+function platformBarColor(index: number): string {
+  return PLATFORM_BAR_PALETTE[index % PLATFORM_BAR_PALETTE.length];
+}
+
+/** 数字 → 百分比文本,2 位小数,跟 PDF 一致 */
+function sharePct(share: number): string {
+  return `${(share * 100).toFixed(1)}%`;
+}
+
+/** 「08-10/08-11」PDF 风格 —— MM-DD/MM-DD,数组 join 用「/」 */
+function shortMD(isoList: string[]): string {
+  if (!isoList || isoList.length === 0) return "—";
+  return isoList.map((s) => (s.length >= 10 ? s.slice(5) : s)).join("/");
+}
+
+/** 「39健康网、大众养生网」PDF 风格 —— 「、」分隔 */
+function joinChannels(channels: string[]): string {
+  if (!channels || channels.length === 0) return "—";
+  return channels.join("、");
+}
+
 export function SectionFourContentOps({
   snapshot,
+  canEdit,
+  onSave,
 }: {
   snapshot: ReportSnapshotOut["snapshot"];
+  canEdit: boolean;
+  onSave: (overrides: Record<string, string | null>) => Promise<void>;
 }) {
-  const ops = snapshot.content_ops;
+  const ops = (snapshot.content_ops ?? {}) as ContentOpsShape;
+  const postCount = ops.weekly_post_count ?? 0;
+  const distributionCount = ops.distribution_count ?? postCount;
+  const channelCount = ops.channel_count ?? 0;
+  const citationCount = ops.citation_count ?? 0;
+  const endRate = ops.period_end_mention_rate ?? null;
+  const publishDetail = ops.publish_detail ?? [];
+  const citationByPlatform = ops.citation_by_platform ?? [];
+  const citationTop = ops.citation_top_articles ?? [];
+  const publishSummary = snapshot.weekly_publish_summary ?? null;
+
+  const allEmpty =
+    postCount === 0 &&
+    channelCount === 0 &&
+    citationCount === 0 &&
+    endRate === null &&
+    publishDetail.length === 0 &&
+    citationByPlatform.length === 0 &&
+    citationTop.length === 0;
+
   return (
     <section>
-      <ChapterHeading title="四、本周内容运营" />
-      {ops ? (
-        <p>{typeof ops === "string" ? ops : JSON.stringify(ops)}</p>
-      ) : (
+      <ChapterHeading title="四、本周内容运营:发布与引用成效" />
+      {allEmpty ? (
         <EmptyBlock message="暂无数数据" />
+      ) : (
+        <>
+          {/* 4 张 KPI 卡片 + 中间 3 个橙色箭头(对齐 PDF 视觉) */}
+          <div className="report-preview-kpis--flow">
+            <div className="report-preview-kpi">
+              <KpiValue value={`${postCount} 篇`} />
+              <div className="report-preview-kpi-label">本周发布(独立标题)</div>
+            </div>
+            <span className="report-preview-kpi-arrow" aria-hidden>
+              →
+            </span>
+            <div className="report-preview-kpi">
+              <KpiValue value={`${channelCount} 渠道`} />
+              <div className="report-preview-kpi-sub">{distributionCount}次分发</div>
+              <div className="report-preview-kpi-sub">多渠道覆盖</div>
+            </div>
+            <span className="report-preview-kpi-arrow" aria-hidden>
+              →
+            </span>
+            <div className="report-preview-kpi">
+              <KpiValue value={`${citationCount} 次`} />
+              <div className="report-preview-kpi-label">自有文章被 AI 引用</div>
+            </div>
+            <span className="report-preview-kpi-arrow" aria-hidden>
+              →
+            </span>
+            <div className="report-preview-kpi">
+              <KpiValue value={pct(endRate)} />
+              <div className="report-preview-kpi-label">
+                {snapshot.period.end.slice(5)}整体提及率
+              </div>
+            </div>
+          </div>
+
+          {/* 4.1 发布明细 */}
+          {publishDetail.length > 0 && (
+            <>
+              <h3 className="report-preview-h3-sub">
+                <span className="marker">4.1</span>
+                本周发布(
+                {snapshot.period.start} 至 {snapshot.period.end},共 {postCount} 个独立标题 /{" "}
+                {distributionCount} 次平台分发 / 覆盖 {channelCount} 个渠道)
+                <span className="tail">——发布标题明细</span>
+              </h3>
+              <table className="report-preview-table report-preview-table-41">
+                <thead>
+                  <tr>
+                    <th className="center" style={{ width: 16 }}>#</th>
+                    <th>文章标题</th>
+                    <th className="center" style={{ width: 44 }}>
+                      分发次数
+                    </th>
+                    <th className="center" style={{ width: 64 }}>
+                      发布日期
+                    </th>
+                    <th style={{ width: 200 }}>分发渠道</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {publishDetail.map((row, idx) => (
+                    <tr key={`${row.title}-${idx}`}>
+                      <td className="center">{idx + 1}</td>
+                      <td>{row.title || "—"}</td>
+                      <td className="center">{row.distribution_count}</td>
+                      <td className="center">{shortMD(row.dates)}</td>
+                      <td>{joinChannels(row.channels)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <EditableCallout
+                value={publishSummary}
+                canEdit={canEdit}
+                onSave={(v) => onSave({ weekly_publish_summary: v })}
+              />
+            </>
+          )}
+
+          {/* 4.2 文章被引用情况 */}
+          {(citationByPlatform.length > 0 || citationTop.length > 0) && (
+            <>
+              <h3 className="report-preview-h3-sub">4.2 文章被引用情况</h3>
+
+              {citationByPlatform.length > 0 && (
+                <>
+                  <h4 className="report-preview-h3-sub">
+                    <span className="marker">①</span>
+                    自有文章被引用 {citationCount} 次 · 按 AI 平台分布
+                  </h4>
+                  <table className="report-preview-table report-preview-table-42-1">
+                    <thead>
+                      <tr>
+                        <th>AI平台</th>
+                        <th className="center" style={{ width: 90 }}>
+                          被引次数
+                        </th>
+                        <th className="center" style={{ width: 90 }}>
+                          占比
+                        </th>
+                        <th>可视化</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {citationByPlatform.map((row, idx) => (
+                        <tr key={row.platform_code}>
+                          <td>{row.platform_label}</td>
+                          <td className="center">{row.count}</td>
+                          <td className="center">{sharePct(row.share)}</td>
+                          <td>
+                            <span
+                              className="report-preview-bar-fill"
+                              style={{
+                                width: `${Math.max(row.share * 100, 6)}%`,
+                                background: platformBarColor(idx),
+                              }}
+                            >
+                              {sharePct(row.share)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
+              {citationTop.length > 0 && (
+                <>
+                  <h4 className="report-preview-h3-sub">
+                    <span className="marker">②</span>
+                    自有文章被引用 TOP{citationTop.length}
+                  </h4>
+                  <table className="report-preview-table report-preview-table-42-2">
+                    <thead>
+                      <tr>
+                        <th className="center" style={{ width: 40 }}>
+                          #
+                        </th>
+                        <th>文章标题</th>
+                        <th className="center" style={{ width: 90 }}>
+                          被引次
+                        </th>
+                        <th style={{ width: 240 }}>引用AI</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {citationTop.map((row, idx) => (
+                        <tr key={`${row.title}-${idx}`}>
+                          <td className="center">{idx + 1}</td>
+                          <td>{row.title || "—"}</td>
+                          <td className="center">{row.count}</td>
+                          <td>
+                            {row.models
+                              .map((m) => platformLabelForCodeLocal(m))
+                              .join("、")}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </>
+          )}
+        </>
       )}
     </section>
   );
+}
+
+/** 复用 wizardConfig 同款 platform → 显示名映射,避免重复维护 */
+function platformLabelForCodeLocal(code: string): string {
+  return WIZARD_MODELS.find((m) => m.value === code)?.name ?? code;
 }
 
 export function SectionFiveWeeklyChanges({

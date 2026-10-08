@@ -1,17 +1,15 @@
 /**
  * 「自有文章引用分析」—— 独立一级页面(顶层菜单项),表格视图。
  *
- * 7 列:文章(标题 + URL) / 发布日期 / 是否被引用 / 引用次数 / 引用模型 /
- * 最近引用 / 引用提醒(switch)。顶部面板头有「导入 URL 列表」按钮。
+ * 7 列:文章(标题 + URL) / 发布日期 / 分发渠道 / 引用次数 / 引用模型 /
+ * 最近引用 / 操作(修改、删除)。顶部面板头有「导入 URL 列表」按钮。
  *
  * 参照 docs/风球GEO监控平台UI/index.html:1293-1326 + js/app.js:3026-3055
- * (renderOwnArticles 函数)。「引用提醒」只存 boolean,不做实际通知,
- * 匹配 index.html 文案「已开启引用提醒(页面内通知)」。
+ * (renderOwnArticles 函数)。
  *
  * 数据真源:
  * - 用户声明的自有 URL:`geo_own_articles` 表
- * - 实际被引用情况:join `geo_subtasks.citation_list_json`(平台异构:
- *   yuanbao 返回 dict,deepseek/doubao/kimi/qianwen/wenxinyiyan 返回字符串),
+ * - 实际被引用情况:join `geo_subtasks.reference_list_json`(全信源池口径),
  *   URL 经 normalize(小写 scheme+host + 去尾斜杠)后精确匹配
  *
  * 筛选逻辑跟 SourcePreferencesTab 同款:`effectiveModels` 在工具栏全选时
@@ -19,19 +17,24 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Empty, Skeleton, Switch, Table, Tag, Tooltip, message } from "antd";
+import { Button, Empty, Modal, Skeleton, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { CloudUploadOutlined } from "@ant-design/icons";
 import {
+  CloudUploadOutlined,
+  DeleteOutlined,
+  EditOutlined,
+} from "@ant-design/icons";
+import {
+  deleteOwnArticle,
   getOwnArticles,
   getProject,
-  toggleOwnArticleRemind,
   type OwnArticleOut,
   type ProjectPlatform,
 } from "../../../api/projects";
 import { platformColor, platformLabel, rowKeyOfPlatform } from "../platforms";
 import { useToolbarFilter } from "../../../components/ToolbarFilterContext";
 import OwnArticlesImportModal from "../../../components/OwnArticlesImportModal";
+import OwnArticleEditModal from "../../../components/OwnArticleEditModal";
 
 interface Props {
   projectId: number;
@@ -111,20 +114,43 @@ export default function SelfArticles({ projectId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, toolbar.version, effectiveModels, dateKey, promptsKey]);
 
-  const handleToggleRemind = (record: OwnArticleOut) => {
-    const nextRemind = !record.remind;
-    // 乐观更新:立即翻转本地 boolean,不弹 toast、不重算引用次数/模型
-    setItems((prev) =>
-      prev.map((it) => (it.id === record.id ? { ...it, remind: nextRemind } : it)),
-    );
-    // 后台 fire-and-forget 持久化;失败回滚到原值,仅 console 告警
-    toggleOwnArticleRemind(projectId, record.id).catch((err: Error) => {
-      console.warn("toggle own-article remind failed", err);
-      setItems((prev) =>
-        prev.map((it) => (it.id === record.id ? { ...it, remind: record.remind } : it)),
-      );
-    });
+  const [editing, setEditing] = useState<OwnArticleOut | null>(null);
+
+  const handleEdit = (record: OwnArticleOut) => {
+    setEditing(record);
   };
+
+  const handleDelete = useCallback(
+    (record: OwnArticleOut) => {
+      const label = record.title || record.url;
+      Modal.confirm({
+        title: "确认删除",
+        content: `删除「${label}」?这不影响历史 citation 数据,只是不再纳入「自有文章引用分析」统计。`,
+        okText: "删除",
+        okType: "danger",
+        cancelText: "取消",
+        onOk: async () => {
+          try {
+            await deleteOwnArticle(projectId, record.id);
+            message.success("已删除");
+            reload();
+          } catch (err) {
+            const e = err as {
+              response?: { data?: { detail?: unknown } };
+              message?: string;
+            };
+            message.error(
+              (typeof e?.response?.data?.detail === "string" &&
+                e.response.data.detail) ||
+                e?.message ||
+                "删除失败",
+            );
+          }
+        },
+      });
+    },
+    [projectId, reload],
+  );
 
   const columns = useMemo<ColumnsType<OwnArticleOut>>(
     () => [
@@ -173,17 +199,11 @@ export default function SelfArticles({ projectId }: Props) {
         render: (d: string | null) => d ?? <span style={{ color: "var(--text-tertiary)" }}>—</span>,
       },
       {
-        title: "是否被引用",
-        dataIndex: "cited",
-        width: 110,
-        render: (cited: boolean) =>
-          cited ? (
-            <Tag color="green" style={{ margin: 0 }}>
-              已引用
-            </Tag>
-          ) : (
-            <Tag style={{ margin: 0 }}>未引用</Tag>
-          ),
+        title: "分发渠道",
+        dataIndex: "channel",
+        width: 120,
+        render: (c: string) =>
+          c ? c : <span style={{ color: "var(--text-tertiary)" }}>—</span>,
       },
       {
         title: "引用次数",
@@ -219,24 +239,35 @@ export default function SelfArticles({ projectId }: Props) {
           ),
       },
       {
-        title: "引用提醒",
-        dataIndex: "remind",
-        width: 110,
-        render: (remind: boolean, r) => (
-          <Tooltip title={remind ? "已开启页面内通知" : "未提醒"}>
-            <Switch
-              checked={remind}
-              onChange={() => handleToggleRemind(r)}
-              checkedChildren="提醒中"
-              unCheckedChildren="未提醒"
-            />
-          </Tooltip>
+        title: "操作",
+        key: "actions",
+        width: 130,
+        render: (_: unknown, r) => (
+          <Space size={4}>
+            <Button
+              type="link"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => handleEdit(r)}
+            >
+              修改
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => handleDelete(r)}
+            >
+              删除
+            </Button>
+          </Space>
         ),
       },
     ],
-    // handleToggleRemind 不依赖任何会变的 state,稳定即可
+    // handleDelete 依赖 reload,放进 deps 让 columns 跟着重算。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [handleDelete],
   );
 
   if (loading && items.length === 0) {
@@ -296,6 +327,14 @@ export default function SelfArticles({ projectId }: Props) {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         onImported={reload}
+      />
+
+      <OwnArticleEditModal
+        projectId={projectId}
+        article={editing}
+        open={editing !== null}
+        onClose={() => setEditing(null)}
+        onSaved={reload}
       />
 
       <style>{`

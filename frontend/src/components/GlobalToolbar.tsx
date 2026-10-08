@@ -5,6 +5,7 @@ import {
   Button,
   Checkbox,
   Dropdown,
+  Popover,
   Tooltip,
   message,
 } from "antd";
@@ -19,6 +20,7 @@ import {
   MessageOutlined,
   MobileOutlined,
   QuestionCircleOutlined,
+  ReloadOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { DatePicker } from "antd";
@@ -58,11 +60,16 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
   const projectId = params.id ? Number(params.id) : null;
   const toolbar = useToolbarFilter();
 
-  // 日期下拉 —— 预设(7/15/30/60)直接生效,自定义通过 RangePicker 选完后
-  // 自动 apply。disabledDate 限制:不超过 30 天,不超今天。
-  const [datePreset, setDatePreset] = useState<"7" | "15" | "30" | "60" | "custom">("15");
-  // 自定义草稿 —— RangePicker 的当前值。仅在 datePreset === "custom" 时使用。
-  const [customRange, setCustomRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
+  // 日期下拉 —— 预设(7/15/30/60)直接生效,自定义通过两个独立 DatePicker
+  // 选完(先 start 后 end)后 apply。disabledDate 限制:不超过 30 天,不超今天。
+  // 这个初始值必须与 ToolbarFilterContext 里 selectedDateRange 的种子值
+  // 一致,否则首屏「显示的时间范围」与「下游实际取数的范围」会对不上。
+  // 默认「近 7 天」,与工具栏右侧「重置筛选」按钮的目标态一致。
+  const [datePreset, setDatePreset] = useState<"7" | "15" | "30" | "60" | "custom">("7");
+  // 自定义草稿 —— 两个独立 DatePicker 的当前值。仅在 datePreset === "custom" 时使用。
+  // 完整选完后(两项都填)立即 apply。
+  const [customStart, setCustomStart] = useState<dayjs.Dayjs | null>(null);
+  const [customEnd, setCustomEnd] = useState<dayjs.Dayjs | null>(null);
   const [dateMenuOpen, setDateMenuOpen] = useState(false);
   const [modes, setModes] = useState<{ fast: boolean; think: boolean }>({
     fast: true,
@@ -473,58 +480,134 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
 
   const applyDatePreset = (preset: "7" | "15" | "30" | "60") => {
     setDatePreset(preset);
-    setCustomRange(null);
+    setCustomStart(null);
+    setCustomEnd(null);
     toolbar.apply({
       selectedDateRange: { days: Number(preset) } satisfies ToolbarDateRange,
     });
     setDateMenuOpen(false);
   };
 
-  const dateItems: MenuProps["items"] = [
-    { key: "7", label: "近 7 天", onClick: () => applyDatePreset("7") },
-    { key: "15", label: "近 15 天", onClick: () => applyDatePreset("15") },
-    { key: "30", label: "近 30 天", onClick: () => applyDatePreset("30") },
-    { key: "60", label: "近 2 个月", onClick: () => applyDatePreset("60") },
-    { type: "divider" },
-    {
-      key: "custom",
-      label: (
-        <div onClick={(e) => e.stopPropagation()}>
-          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
-            自定义(不超过 1 个月)
-          </div>
-          <DatePicker.RangePicker
+  // 「重置筛选」按钮 —— 把工具栏左半边所有筛选收回到默认态:
+  //   日期:近 7 天  (datePreset 初值 / ToolbarFilterContext 种子值)
+  //   模型:全选当前项目配的所有档位  (后端 null = 不筛,跟首次加载同口径)
+  //   问题:全选当前项目配的所有 prompt
+  //   模式 / 终端:全亮  (默认 fast+think / pc+mobile)
+  // 与首次加载 getProject().then 里的初始化行为保持一致。
+  const resetAllFilters = () => {
+    // 日期
+    setDatePreset("7");
+    setCustomStart(null);
+    setCustomEnd(null);
+    // 模型
+    const allRowKeys = projectModelRows.map(rowKeyOf);
+    setAppliedModels(new Set(allRowKeys));
+    setStagedModels(new Set(allRowKeys));
+    // 模式 / 终端 —— 顶部按钮的视觉态与 appliedModels 是 AND 推算
+    // (applyModels 里的 newModes / newDevices 逻辑);直接置全亮
+    // 比「等 setAppliedModels 后期待 React 再次渲染反推」更明确,
+    // 避免极端情况下(同步 setState 序列里读 modes)读到旧值。
+    setModes({ fast: true, think: true });
+    setDevices({ pc: true, mobile: true });
+    // 问题
+    const allPromptIds = projectPrompts.map((p) => p.id);
+    setAppliedPrompts(new Set(allPromptIds));
+    setStagedPrompts(new Set(allPromptIds));
+    setExpandedCategories(new Set());
+    // 写回 context:全选走 null 路径,与 applyModels / 首次加载的
+    // "不筛 = 全部"语义一致。
+    toolbar.apply({
+      selectedDateRange: { days: 7 } satisfies ToolbarDateRange,
+      selectedModels: null,
+      selectedPromptIds: null,
+    });
+    message.success("已重置筛选为默认");
+  };
+
+  const datePresets: Array<{ value: "7" | "15" | "30" | "60"; label: string }> = [
+    { value: "7", label: "近 7 天" },
+    { value: "15", label: "近 15 天" },
+    { value: "30", label: "近 30 天" },
+    { value: "60", label: "近 2 个月" },
+  ];
+
+  // 自定义范围:start 选完后才能选 end,end 选完立即 apply(start, end)。
+  const applyCustomRange = (s: dayjs.Dayjs, e: dayjs.Dayjs) => {
+    setDatePreset("custom");
+    toolbar.apply({
+      selectedDateRange: {
+        start: s.format("YYYY-MM-DD"),
+        end: e.format("YYYY-MM-DD"),
+      } satisfies ToolbarDateRange,
+    });
+    setDateMenuOpen(false);
+  };
+  const onStartChange = (d: dayjs.Dayjs | null) => {
+    setCustomStart(d);
+    // 选了新 start 之后清掉旧 end,防止跨度超限
+    if (d) setCustomEnd(null);
+  };
+  const onEndChange = (d: dayjs.Dayjs | null) => {
+    if (!d) {
+      setCustomEnd(null);
+      return;
+    }
+    setCustomEnd(d);
+    if (customStart) applyCustomRange(customStart, d);
+  };
+
+  const dateContent = (
+    <div className="gt-date-menu" onClick={(e) => e.stopPropagation()}>
+      <div className="gt-date-presets">
+        {datePresets.map((p) => (
+          <button
+            key={p.value}
+            type="button"
+            className={`gt-date-preset ${datePreset === p.value ? "active" : ""}`}
+            onClick={() => {
+              applyDatePreset(p.value);
+              setDateMenuOpen(false);
+            }}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+      <div className="gt-date-custom">
+        <label>自定义范围</label>
+        <div className="gt-date-inputs">
+          <DatePicker
             size="small"
-            value={customRange}
+            value={customStart}
+            placeholder="开始日期"
             allowClear={false}
-            // disabledDate: 跨度超过 30 天或晚于今天时置灰。
             disabledDate={(cur) => {
               if (!cur) return false;
               if (cur > dayjs().endOf("day")) return true;
-              const anchor = customRange?.[0] ?? customRange?.[1] ?? null;
-              if (anchor && Math.abs(cur.diff(anchor, "day")) >= 30) return true;
+              if (customEnd && Math.abs(cur.diff(customEnd, "day")) >= 30) return true;
               return false;
             }}
-            onChange={(v) => {
-              if (!v || !v[0] || !v[1]) {
-                setCustomRange(v as [dayjs.Dayjs, dayjs.Dayjs] | null);
-                return;
-              }
-              setCustomRange([v[0], v[1]]);
-              setDatePreset("custom");
-              toolbar.apply({
-                selectedDateRange: {
-                  start: v[0].format("YYYY-MM-DD"),
-                  end: v[1].format("YYYY-MM-DD"),
-                } satisfies ToolbarDateRange,
-              });
-              setDateMenuOpen(false);
+            onChange={onStartChange}
+          />
+          <span>—</span>
+          <DatePicker
+            size="small"
+            value={customEnd}
+            placeholder="结束日期"
+            allowClear={false}
+            disabled={!customStart}
+            disabledDate={(cur) => {
+              if (!cur) return false;
+              if (cur > dayjs().endOf("day")) return true;
+              if (customStart && Math.abs(cur.diff(customStart, "day")) >= 30) return true;
+              return false;
             }}
+            onChange={onEndChange}
           />
         </div>
-      ),
-    },
-  ];
+      </div>
+    </div>
+  );
 
   // 问题下拉 —— 与模型同款多选 + 应用语义。prompt 文本超过 50 字省略,
   // tooltip 给出全文,避免下拉宽度被长问题撑爆。
@@ -803,29 +886,33 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
           </Button>
         </Dropdown>
 
-        <Dropdown
-          menu={{ items: dateItems }}
+        <Popover
+          content={dateContent}
           open={dateMenuOpen}
-          onOpenChange={(next, info) => {
-            // 「自定义」项内的 RangePicker 点击会冒泡 source:'menu',
-            // 关闭下拉会让日历选不完。屏蔽 source:'menu',预设项点击已
-            // 在 onClick 内主动 setDateMenuOpen(false) 关闭。
-            if (!next && info?.source === "menu") return;
-            setDateMenuOpen(next);
-          }}
-          trigger={["click"]}
+          onOpenChange={(next) => setDateMenuOpen(next)}
+          trigger="click"
           placement="bottomLeft"
-          overlayClassName="gt-date-dropdown"
+          overlayClassName="gt-date-popover"
         >
           <Button className="gt-btn" icon={<CalendarOutlined />}>
             <span className="gt-btn-label">日期</span>
             <span className="gt-btn-value">
-              {datePreset === "custom" && customRange
-                ? `${customRange[0].format("MM-DD")} ~ ${customRange[1].format("MM-DD")}`
+              {datePreset === "custom" && customStart && customEnd
+                ? `${customStart.format("MM-DD")} ~ ${customEnd.format("MM-DD")}`
                 : `近 ${datePreset} 天`}
             </span>
           </Button>
-        </Dropdown>
+        </Popover>
+
+        <Tooltip title="重置筛选:日期 → 近 7 天,模型 / 问题全选,模式 / 终端全亮">
+          <Button
+            className="gt-btn"
+            icon={<ReloadOutlined />}
+            onClick={resetAllFilters}
+          >
+            <span className="gt-btn-label">重置筛选</span>
+          </Button>
+        </Tooltip>
 
         <div className="gt-seg">
           <span className="gt-seg-label">模式</span>

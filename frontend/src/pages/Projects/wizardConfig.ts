@@ -43,8 +43,13 @@ export interface WizardModelOption {
   value: string;
   /** 前端展示的中文名(沿用截图里的写法,不一定与 API 的 modelName 一致)。 */
   name: string;
-  /** 模型卡片上的圆点色 + 图表配色,与原型 (--model-1..7) 对齐。 */
+  /** 模型卡片上的圆点色 + 图表配色,与原型 (--model-1..7) 对齐。
+   *  v3.7(2026-10-05)同步 docs/风球GEO监控平台UI-261005/overview.md 的降饱和 7+1 色板,
+   *  元宝 #c9803a vs 蚂蚁阿福 #8c3a2c ΔE 从 16.2 提到 35。 */
   color: string;
+  /** 12px 文字变体(深一档色相),用于柱状图数值标签等小字场景:
+   *  降饱和后 graphic 色做 12px 文字对比度 < 4.5,这里给同色相压暗版。 */
+  inkColor: string;
   /** 是否存在对应的移动端 modelCode;用于监控配置里阻止无移动版的模型被勾上「移动端」,
    * 否则审批后会写出 platform=kimi + DeliveryMode.MOBILE 这种下游找不到映射的组合。 */
   hasMobile: boolean;
@@ -55,15 +60,16 @@ export interface WizardModelOption {
 }
 
 export const WIZARD_MODELS: WizardModelOption[] = [
-  { value: "doubao", name: "豆包", color: "#1a55e8", hasMobile: true, mobileCode: "doubao_mobile" },
-  { value: "yuanbao", name: "元宝", color: "#ff6b1a", hasMobile: true, mobileCode: "yuanbao_mobile" },
-  { value: "qianwen", name: "千问", color: "#00a870", hasMobile: true, mobileCode: "qianwen_mobile" },
-  { value: "kimi", name: "Kimi", color: "#722ed1", hasMobile: false, mobileCode: null },
-  { value: "deepseek", name: "DeepSeek", color: "#13c2c2", hasMobile: true, mobileCode: "deepseek_mobile" },
-  { value: "baiduai", name: "文心", color: "#eb2f96", hasMobile: true, mobileCode: "baidu_mobile" },
-  { value: "antafu", name: "蚂蚁阿福", color: "#ed7b2f", hasMobile: false, mobileCode: null },
+  { value: "doubao", name: "豆包", color: "#3f6bc4", inkColor: "#456ebf", hasMobile: true, mobileCode: "doubao_mobile" },
+  { value: "yuanbao", name: "元宝", color: "#c9803a", inkColor: "#a46932", hasMobile: true, mobileCode: "yuanbao_mobile" },
+  { value: "qianwen", name: "千问", color: "#3d9070", inkColor: "#3c8066", hasMobile: true, mobileCode: "qianwen_mobile" },
+  { value: "kimi", name: "Kimi", color: "#8250bd", inkColor: "#8456b8", hasMobile: false, mobileCode: null },
+  { value: "deepseek", name: "DeepSeek", color: "#2b8b9b", inkColor: "#2b7e8c", hasMobile: true, mobileCode: "deepseek_mobile" },
+  { value: "baiduai", name: "文心", color: "#b4487e", inkColor: "#ae4c7d", hasMobile: true, mobileCode: "baidu_mobile" },
+  { value: "antafu", name: "蚂蚁阿福", color: "#8c3a2c", inkColor: "#883d30", hasMobile: false, mobileCode: null },
   // 2026-09-11 远端 GET /api/business/system/models 新增 chatgpt;无 mobile 版。
-  { value: "chatgpt", name: "ChatGPT", color: "#10a37f", hasMobile: false, mobileCode: null },
+  // 8 色扩到包含 chatgpt,色相 H180 与 DeepSeek H189 拉开 9°,graphic 同降饱和口径 S44%。
+  { value: "chatgpt", name: "ChatGPT", color: "#4a8e84", inkColor: "#467a72", hasMobile: false, mobileCode: null },
 ];
 
 // =====================================================================

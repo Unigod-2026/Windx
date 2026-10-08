@@ -9,10 +9,10 @@ import CompetitorAnalysisTab from "./CompetitorAnalysisTab";
 import CitationAnalysisTab from "./CitationAnalysisTab";
 import AnswerTab from "./AnswerTab";
 import ReportTab from "./ReportTab";
-import PlaceholderTab from "./PlaceholderTab";
 import SelfArticles from "./sourcePreferences/SelfArticles";
 import SourcePreferencesTab from "./SourcePreferencesTab";
 import EditProjectTab from "./EditProjectTab";
+import SettingsPane from "./settings/SettingsPane";
 
 const VALID_TABS = [
   "overview",
@@ -124,12 +124,7 @@ export default function ProjectDetail() {
       case "edit":
         return <EditProjectTab projectId={projectId} />;
       case "settings":
-        return (
-          <PlaceholderTab
-            title="项目设置"
-            hint="账号、通知偏好、数据导出等基础设置"
-          />
-        );
+        return <SettingsPane />;
     }
   })();
 

@@ -16,8 +16,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Button, Empty, Skeleton, message } from "antd";
-import { DownOutlined, UpOutlined } from "@ant-design/icons";
+import { Empty, Skeleton, message } from "antd";
 import * as echarts from "echarts";
 import EChart from "../../../components/EChart";
 import {
@@ -29,9 +28,8 @@ import {
   type SourceStableItem,
   type SourceSuggestion,
   type SourceTrendDay,
-  type SourceTrendPlatform,
 } from "../../../api/projects";
-import { platformLabel, rowKeyOfPlatform } from "../platforms";
+import { platformLabel, platformColor as platformChartColor, rowKeyOfPlatform } from "../platforms";
 import { useToolbarFilter } from "../../../components/ToolbarFilterContext";
 
 interface Props {
@@ -197,7 +195,7 @@ export default function AllSources({ projectId }: Props) {
             </div>
           </div>
           <div className="panel-body">
-            <TrendByPlatform trendByPlatform={out.trend_by_platform} />
+            <TrendByPlatform trend={out.trend} start={out.start} end={out.end} />
           </div>
         </div>
 
@@ -242,7 +240,10 @@ export default function AllSources({ projectId }: Props) {
         }
         .sp-kpi-card-label { font-size: 12px; color: var(--text-tertiary); }
         .sp-kpi-card-value { font-size: 22px; font-weight: 600; color: var(--text-primary); margin-top: 6px; }
-        .sp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        /* minmax(0, 1fr) 而不是 1fr 1fr:默认 minmax(auto, 1fr) 会让某个
+           panel 里的不可压缩内容(长 stable-title / chart graphic 等)撑爆 column,
+           把另一列挤成只有 1 字宽度。强制 0 起点后两侧严格等宽。 */
+        .sp-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
         .sp-chart { width: 100%; height: 280px; display: block; }
         .panel {
           background: #fff;
@@ -279,14 +280,65 @@ function KpiCard({ label, value }: { label: string; value: string }) {
 function TypePie({ typeCounts }: { typeCounts: SourcePreferenceOut["type_counts"] }) {
   const option = useMemo<echarts.EChartsOption | null>(() => {
     if (typeCounts.length === 0) return null;
+    const total = typeCounts.reduce((s, x) => s + x.count, 0);
     return {
-      tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
-      legend: { orient: "horizontal", bottom: 0, textStyle: { fontSize: 11 } },
+      tooltip: {
+        trigger: "item",
+        formatter: (p) => {
+          const one = Array.isArray(p) ? p[0] : p;
+          const value = Number(one.value ?? 0);
+          const pct = Number(one.percent ?? 0);
+          return `${one.name}<br/>${value.toLocaleString()} 条 · ${pct.toFixed(1)}%`;
+        },
+      },
+      // 中心标题块:echarts 5 的 graphic 在 series 之下渲染,与 donut 中心对齐。
+      graphic: [
+        {
+          type: "text",
+          left: "center",
+          top: "42%",
+          style: {
+            text: "总引用",
+            fontSize: 12,
+            fill: "#8c8c8c",
+            fontFamily: "inherit",
+          },
+        },
+        {
+          type: "text",
+          left: "center",
+          top: "50%",
+          style: {
+            text: total.toLocaleString(),
+            fontSize: 22,
+            fontWeight: 700,
+            fill: "#181818",
+            fontFamily: "inherit",
+          },
+        },
+      ],
+      // 外侧标签 + 引导线:对齐 docs/风球GEO监控平台UI-261005/ js/charts.js donutChart;
+      // 占比 ≥ 4% 的扇区才显示(与 doc 阈值一致),避免 8 个分类挤成乱麻。
+      // 单行格式「分类 百分比」(例 「官方网站 11.1%」),不再带 \n 与绝对数值。
       series: [{
         type: "pie",
-        radius: ["45%", "70%"],
+        radius: ["52%", "72%"],
+        center: ["50%", "50%"],
         avoidLabelOverlap: true,
-        label: { show: false },
+        minShowLabelAngle: 4,
+        label: {
+          show: true,
+          position: "outside",
+          formatter: (p) => {
+            const one = Array.isArray(p) ? p[0] : p;
+            const pct = ((one.percent as number) ?? 0).toFixed(1);
+            return `${one.name} ${pct}%`;
+          },
+          fontSize: 11,
+          color: "#39424f",
+        },
+        labelLine: { show: true, length: 8, length2: 8 },
+        itemStyle: { borderColor: "#fff", borderWidth: 2 },
         data: typeCounts.map((s) => ({
           name: s.type,
           value: s.count,
@@ -363,59 +415,82 @@ function ByModelGrid({ byModel }: { byModel: SourceByModelTop[] }) {
         .sp-model-card {
           border: 1px solid var(--border-light, #f0f0f0);
           border-radius: 8px;
-          padding: 12px 14px;
+          padding: 16px;
           background: var(--bg-page, #fafafa);
+          transition: box-shadow 0.2s;
         }
+        .sp-model-card:hover { box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04); }
         .sp-model-card-head {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          margin-bottom: 10px;
+          margin-bottom: 12px;
         }
         .sp-model-card-title {
-          font-size: 13px;
-          font-weight: 600;
-          color: var(--text-primary);
-        }
-        .sp-model-card-meta {
-          font-size: 11px;
-          color: var(--text-tertiary);
-        }
-        .sp-model-source-row {
           display: flex;
           align-items: center;
-          justify-content: space-between;
-          padding: 6px 0;
-          font-size: 12px;
-          border-bottom: 1px dashed var(--border-light, #f0f0f0);
+          gap: 8px;
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--text-primary);
         }
-        .sp-model-source-row:last-child { border-bottom: 0; }
-        .sp-model-source-link {
+        .sp-model-card-dot {
+          width: 10px;
+          height: 10px;
+          border-radius: 999px;
+          flex-shrink: 0;
+        }
+        .sp-model-card-meta {
+          font-size: 12px;
+          color: var(--text-tertiary);
+        }
+        .sp-model-source-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .sp-model-source-item {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          font-size: 12px;
+        }
+        .sp-model-source-name {
           color: var(--text-primary, #1f1f1f);
+          font-weight: 500;
           flex: 1;
-          margin-right: 8px;
+          min-width: 0;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
-        .sp-model-source-rank {
-          width: 18px;
-          height: 18px;
-          border-radius: 999px;
-          background: var(--brand-blue, #1a55e8);
-          color: #fff;
+        .sp-model-source-count {
+          color: var(--text-tertiary);
+          background: #fff;
+          padding: 2px 8px;
+          border-radius: 9px;
           font-size: 11px;
-          font-weight: 600;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          margin-right: 8px;
+          font-weight: 500;
           flex-shrink: 0;
         }
-        .sp-model-source-count {
-          font-weight: 600;
-          color: var(--text-primary);
-          flex-shrink: 0;
+        .sp-source-expand-btn {
+          display: block;
+          width: 100%;
+          text-align: center;
+          margin-top: 8px;
+          padding: 6px;
+          font-size: 12px;
+          color: var(--brand-blue, #1a55e8);
+          background: transparent;
+          border: 1px dashed var(--border-light, #e8e9ec);
+          border-radius: 6px;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .sp-source-expand-btn:hover {
+          background: rgba(26, 85, 232, 0.04);
+          border-color: var(--brand-blue, #1a55e8);
         }
         .sp-model-card-empty {
           font-size: 12px;
@@ -436,43 +511,49 @@ function ModelCard({ model }: { model: SourceByModelTop }) {
   const canExpand = model.items.length > 3;
   // platform 是 compound key(如 qianwen__web__fast),用 dropdown 的展示函数转中文名。
   const displayName = platformLabel(model.platform);
+  // 头部圆点色:取该 platform 在 WIZARD_MODELS / PLATFORM_CATALOG 中的色,
+  // 与 OverviewTab 的 trend / ranking 系列色对齐。
+  const dotColor = platformChartColor(model.platform);
 
   return (
     <div className="sp-model-card">
       <div className="sp-model-card-head">
-        <div className="sp-model-card-title">{displayName}</div>
+        <div className="sp-model-card-title">
+          <span
+            className="sp-model-card-dot"
+            style={{ background: dotColor }}
+          />
+          {displayName}
+        </div>
         <div className="sp-model-card-meta">
-          {isEmpty ? "无数据" : `TOP ${model.items.length} 媒体`}
+          {isEmpty ? "无数据" : `${model.items.length} 个信源`}
         </div>
       </div>
       {isEmpty ? (
         <div className="sp-model-card-empty">该模型窗口内暂无引用数据</div>
       ) : (
         <>
-          <div>
-            {visible.map((it, i) => (
-              <div className="sp-model-source-row" key={it.sample_url}>
-                <span className="sp-model-source-rank">{i + 1}</span>
+          <div className="sp-model-source-list">
+            {visible.map((it) => (
+              <div className="sp-model-source-item" key={it.sample_url}>
                 <span
-                  className="sp-model-source-link"
+                  className="sp-model-source-name"
                   title={it.sample_title || it.media_name}
                 >
                   {it.media_name}
                 </span>
-                <span className="sp-model-source-count">{it.count}</span>
+                <span className="sp-model-source-count">{it.count} 次</span>
               </div>
             ))}
           </div>
           {canExpand && (
-            <Button
-              type="link"
-              size="small"
-              icon={expanded ? <UpOutlined /> : <DownOutlined />}
+            <button
+              type="button"
+              className="sp-source-expand-btn"
               onClick={() => setExpanded((v) => !v)}
-              style={{ padding: "4px 0", marginTop: 4 }}
             >
-              {expanded ? "收起" : `展开 TOP 10`}
-            </Button>
+              {expanded ? "收起 ↑" : "展开查看 TOP 10 ↓"}
+            </button>
           )}
         </>
       )}
@@ -481,42 +562,59 @@ function ModelCard({ model }: { model: SourceByModelTop }) {
 }
 
 /* ------------------------------------------------------------------
- * 趋势:模型从顶部工具栏选择,这里直接把 toolbar 已筛选的 trend_by_platform
- * 合并成一条新增 / 流失折线 —— 不再画 panel 内自己的模型下拉框,
- * 跟头部筛选保持单一口径。
+ * 信源变化趋势 —— 直接消费后端 ``out.trend``(全局 daily new_urls / lost_urls)。
+ * 历史曾用 ``out.trend_by_platform`` 聚合,但 per-platform 维度在数据稀疏时
+ * (project 52 等窗口内未跨日的 case)聚合后为空、趋势图空白;
+ * 后端 ``compute_source_preferences`` 已经返回 ``trend`` 全局字段,
+ * 与 toolbar 已筛选口径一致,直接拿来用即可。
  * ------------------------------------------------------------------ */
 
-function TrendByPlatform({ trendByPlatform }: { trendByPlatform: SourceTrendPlatform[] }) {
+function TrendByPlatform({
+  trend,
+  start,
+  end,
+}: {
+  trend: SourceTrendDay[];
+  start: string;
+  end: string;
+}) {
   const option = useMemo<echarts.EChartsOption | null>(() => {
-    if (trendByPlatform.length === 0) return null;
-    // 合并所有模型(头部已选)的 daily new_urls / lost_urls 作为整体趋势
-    // 的近似 —— 真实精确值需要按 (url, model) 维度算,这里做工程近似:
-    // "全部模型" = 各模型累加,跟 toolbar 应用前后口径一致。
-    const allDates = new Set<string>();
-    for (const p of trendByPlatform) {
-      for (const d of p.days) allDates.add(d.date);
-    }
-    const sorted = Array.from(allDates).sort();
-    const dateToAgg = new Map<string, { new: number; lost: number }>();
-    for (const p of trendByPlatform) {
-      for (const d of p.days) {
-        const cur = dateToAgg.get(d.date) ?? { new: 0, lost: 0 };
-        cur.new += d.new_urls;
-        cur.lost += d.lost_urls;
-        dateToAgg.set(d.date, cur);
-      }
-    }
-    const series: SourceTrendDay[] = sorted.map((date) => {
-      const v = dateToAgg.get(date) ?? { new: 0, lost: 0 };
-      return { date, new_urls: v.new, lost_urls: v.lost };
-    });
-    if (series.length === 0) return null;
+    // 后端 ``compute_source_preferences`` 只在「当天有数据」的日子才 append,
+    // 见 backend/app/services/source_preferences.py:369 ``days_sorted = sorted(daily_urls.keys())``;
+    // 这样 15 天窗口内只有 N 天有数据 → trend 只有 N 行 → chart 只画 N 个点。
+    // 这里把 trend 展开成完整 ``[start, end]`` 日期范围,缺失日补 ``new=0, lost=0``,
+    // 保证 xAxis 每天都有 tick,「新增 / 流失」线铺满整个窗口。
+    const filled = fillTrendRange(trend, start, end);
+    if (filled.length === 0) return null;
     return {
       tooltip: { trigger: "axis" },
       legend: { data: ["新增", "流失"], top: 0, textStyle: { fontSize: 11 } },
-      grid: { left: 50, right: 24, top: 36, bottom: 40 },
-      xAxis: { type: "category", data: series.map((d) => d.date) },
-      yAxis: { type: "value", minInterval: 1, axisLabel: { fontSize: 11 } },
+      grid: { left: 44, right: 20, top: 36, bottom: 32 },
+      xAxis: {
+        type: "category",
+        data: filled.map((d) => d.date),
+        axisLine: { lineStyle: { color: "#f0f0f0" } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: "#8c8c8c",
+          fontSize: 11,
+          // 15+ 天的窗口不每 tick 都显示日期,避免挤成乱麻;短窗口(< 10 天)全显示。
+          interval: filled.length > 10 ? "auto" : 0,
+          formatter: (val: string) => {
+            // 「YYYY-MM-DD」取 MM-DD;首尾两个 tick 强制显示,中间按 axisLabel interval 决定。
+            return val.slice(5);
+          },
+        },
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        axisLabel: { fontSize: 11, color: "#8c8c8c" },
+        splitLine: { lineStyle: { color: "#f0f0f0" } },
+      },
+      // 颜色对齐 docs/风球GEO监控平台UI-261005/ v3.7 降饱和:
+      // 新增用模型色板里的降饱和绿 #3d9070(通义千问),流失用降饱和玫红 #b4487e(文心),
+      // 替代原饱和 #52c41a / #f5222d,在深色背景或大面积并排时不再刺眼。
       series: [
         {
           name: "新增",
@@ -524,10 +622,10 @@ function TrendByPlatform({ trendByPlatform }: { trendByPlatform: SourceTrendPlat
           smooth: true,
           symbol: "circle",
           symbolSize: 6,
-          data: series.map((d) => d.new_urls),
-          itemStyle: { color: "#52c41a" },
-          lineStyle: { color: "#52c41a", width: 2 },
-          areaStyle: { color: "#52c41a", opacity: 0.08 },
+          data: filled.map((d) => d.new_urls),
+          itemStyle: { color: "#3d9070", borderColor: "#fff", borderWidth: 1.5 },
+          lineStyle: { color: "#3d9070", width: 1.75 },
+          areaStyle: { color: "#3d9070", opacity: 0.1 },
         },
         {
           name: "流失",
@@ -535,17 +633,41 @@ function TrendByPlatform({ trendByPlatform }: { trendByPlatform: SourceTrendPlat
           smooth: true,
           symbol: "circle",
           symbolSize: 6,
-          data: series.map((d) => d.lost_urls),
-          itemStyle: { color: "#f5222d" },
-          lineStyle: { color: "#f5222d", width: 2 },
-          areaStyle: { color: "#f5222d", opacity: 0.08 },
+          data: filled.map((d) => d.lost_urls),
+          itemStyle: { color: "#b4487e", borderColor: "#fff", borderWidth: 1.5 },
+          lineStyle: { color: "#b4487e", width: 1.75 },
+          areaStyle: { color: "#b4487e", opacity: 0.1 },
         },
       ],
     };
-  }, [trendByPlatform]);
+  }, [trend, start, end]);
 
   if (!option) return <Empty description="窗口内尚无趋势数据" />;
   return <EChart option={option} className="sp-chart" height={280} />;
+}
+
+/** 把 ``trend`` 按 ``[start, end]`` 窗口补全成每日一行,缺失日 ``new_urls=0, lost_urls=0``。
+ *  backend 只在当天有数据才写 trend 行,这样窗口内稀疏的天数不会被画出来 —— 前端补全。 */
+function fillTrendRange(
+  trend: SourceTrendDay[],
+  start: string,
+  end: string,
+): SourceTrendDay[] {
+  const byDate = new Map(trend.map((d) => [d.date, d]));
+  const days: SourceTrendDay[] = [];
+  const s = new Date(`${start}T00:00:00Z`);
+  const e = new Date(`${end}T00:00:00Z`);
+  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime()) || s > e) return trend;
+  const cursor = new Date(s);
+  while (cursor <= e) {
+    const iso = cursor.toISOString().slice(0, 10);
+    const existing = byDate.get(iso);
+    days.push(
+      existing ?? { date: iso, new_urls: 0, lost_urls: 0 },
+    );
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
 }
 
 /* ------------------------------------------------------------------

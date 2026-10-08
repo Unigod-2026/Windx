@@ -1,52 +1,27 @@
-"""Render a report snapshot dict into a self-contained HTML document.
+"""Render a report into a self-contained HTML document.
 
-⚠️  功能已取消(2026-09-28,产品决策):HTML 下载 / 静态 HTML 文件不在产品
-   范围内。本文件保留代码是为了不破坏仍在引用 ``render_html`` 的导入路径;
-   后期不再迭代 / 不再修复 bug。如果 ``report_render`` 的所有调用方都撤了,
-   可以整体删除本文件 + `backend/app/api/reports.py:766` `get_report_html`
-   路由 + `POST /api/reports` 里写文件的逻辑。
+Two entry points, in order of preference:
 
-The renderer is **template-agnostic** — it consumes the snapshot dict
-shaped by :mod:`app.services.report_templates` and produces a single
-HTML string ready to write to disk.  All CSS is inlined into a
-``<style>`` block so the file renders identically in any browser and
-prints to PDF without external dependencies.
+1. :func:`_render_admin_html_via_browser` — **the source of truth**.
+   用 headless Chromium 打开 admin 路由 ``/reports/:id``,等 React 渲染完成,
+   把所有 stylesheet 内联成 ``<style>`` 块后取 outerHTML。
+   跟运营在 admin 里看到的一字不差,React 改了什么公网就看到什么,不再
+   drift。public URL 直接 serve 这份 HTML 文件即可。
 
-Snapshot shape (consumed by :func:`render_html`):
+2. :func:`render_html` — **legacy**,纯 Python 模板,已严重过时。
+   保留仅为了不让 imports 断;新的 publish / generate 路径都走 helper 1。
 
-    {
-      "project": {"id": int, "name": str, "brand": str | None},
-      "period": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
-      "baseline": {"date": "YYYY-MM-DD" | None, "rate": float | None},
-      "title": str,
-      "generated_by": str,
-      "generated_at": str,
-      "daily_mention_rate": [{"date", "total", "mentioned", "rate"}],
-      "platform_breakdown": [{platform_code, current_rate, ...}],
-      "platform_summary": [{platform_code, note}],
-      "prompt_platform_matrix": [{prompt_id, prompt_text, per_platform: {}}],
-      "weekly_changes": {new_mentions, increased, decreased, lost_mentions},
-      "zero_mention_prompts": [{prompt_id, prompt_text}],
-      "weekly_summary": {            # 四块均可为 None（运营手填）
-          "core_finding": str | None,
-          "platform_dynamic": str | None,
-          "content_result": str | None,
-          "scene_coverage": str | None,
-      },
-      "content_ops": unknown | None,
-      "attribution": str | None,
-    }
-
-Each chapter is its own ``<section>``. Missing fields render a
-placeholder block — chapter headings are preserved so future data
-ingestion requires zero template work.
+两个函数都返回 ``<html>...</html>`` 完整文档,可以直接写盘 + 公网 serve。
 """
 
 from __future__ import annotations
 
 import html
+import os
 from datetime import date
 from typing import Any
+
+from app.deps import create_access_token
 
 # --------------------------------------------------------------------- #
 # Style
@@ -586,3 +561,142 @@ def _render_section_attribution(snapshot: dict) -> str:
   <h2>5.3 核心归因</h2>
   <p style="white-space: pre-wrap;">{_esc(text)}</p>
 </section>"""
+
+
+# --------------------------------------------------------------------- #
+# Headless browser rendering — single source of truth for public HTML
+# --------------------------------------------------------------------- #
+
+
+def _system_admin_jwt() -> str:
+    """找一个 super_admin 账号签发一个长过期 JWT,供 headless browser 用。
+
+    publish 在 backend 进程里跑,没有「用户登录」环节;headless browser
+    拿这个 token 注入 localStorage,绕过 admin 路由的 RequireAuth。
+
+    优先选 super_admin(customer_admin 跨过项目 tenant 校验);如果没有
+    super_admin 就回落到第一个 active admin(任意账号都能访问任意项目)。
+    """
+    from app.db import SessionLocal
+    from app.models.customer import AdminUser, AdminRole, AdminStatus
+    with SessionLocal() as db:
+        admin = (
+            db.query(AdminUser)
+            .filter(
+                AdminUser.role == AdminRole.SUPER_ADMIN.value,
+                AdminUser.status == AdminStatus.ACTIVE.value,
+            )
+            .first()
+        )
+        if admin is None:
+            admin = (
+                db.query(AdminUser)
+                .filter(AdminUser.status == AdminStatus.ACTIVE.value)
+                .first()
+            )
+        if admin is None:
+            raise RuntimeError("no active admin user — cannot render report")
+    return create_access_token(admin.id)
+
+
+def _render_admin_html_via_browser(
+    report_id: int,
+    *,
+    base_url: str | None = None,
+) -> str:
+    """用 headless Chromium 打开 admin 路由 ``/reports/:id``,等 React 渲染
+    完成后取整页 outerHTML,把 stylesheet 内联成 ``<style>`` 块,返回可独立
+    serve 的完整 HTML 文档。
+
+    这是 publish / generate 路径的**唯一渲染源**。它跟 admin 编辑视图
+    一字不差(因为就是同一个 React 组件树渲染出来的),React 改了什么公网
+    就看到什么 —— 解决 Python 渲染层跟 React drift 的根本问题。
+
+    性能:headless Chromium 启动 + 渲染大约 3-5s。publish 接受这个延迟。
+
+    Args:
+        report_id: ``geo_reports.id``。
+        base_url: 前端 SPA 默认 / 部署 URL。开发默认 ``http://localhost:5173``,
+            生产从环境变量 ``PUBLIC_FRONTEND_URL`` 取。
+
+    Returns:
+        ``<!doctype html>...</html>`` 完整字符串,含内联 CSS,
+        写到 ``backend/data/reports/{project_id}/{report_id}.html`` 后
+        任何环境(本地 / 静态托管)都能直接 serve。
+    """
+    from playwright.sync_api import sync_playwright
+
+    base_url = (
+        base_url
+        or os.environ.get("PUBLIC_FRONTEND_URL")
+        or "http://localhost:5173"
+    )
+    jwt = _system_admin_jwt()
+    # ``mode=public`` 让 React 树以只读 + 无工具栏形态渲染。少了它,渲染发生在
+    # ``is_published`` 提交之前,组件会认为这是草稿(canEdit=True),把「发布」
+    # 按钮和一堆点了没反应的「编辑」链接一起烤进公网 HTML。
+    target = f"{base_url.rstrip('/')}/reports/{report_id}?mode=public"
+
+    # Chrome 可执行路径优先级:
+    #   1. REPORT_RENDER_CHROME 环境变量(生产部署显式指定)
+    #   2. /usr/bin/google-chrome 存在就用它(本机 Ubuntu 装了 system chrome)
+    #   3. 都没有 → 交给 playwright 找它自带的 chromium
+    # 部署时至少要满足 2 或 3 之一,否则 publish 会抛「Executable doesn't exist」。
+    chrome_path = os.environ.get("REPORT_RENDER_CHROME") or None
+    if chrome_path is None and os.path.exists("/usr/bin/google-chrome"):
+        chrome_path = "/usr/bin/google-chrome"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            executable_path=chrome_path,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            ctx = browser.new_context(
+                viewport={"width": 1280, "height": 1800}
+            )
+            ctx.add_init_script(
+                f"window.localStorage.setItem('token', '{jwt}');"
+            )
+            page = ctx.new_page()
+            page.goto(target, wait_until="networkidle", timeout=60000)
+
+            # 等 React 真的把章节渲染出来 —— 「报告周期」元信息行是
+            # AdminReportPreview 第一个稳定渲染的标志,等它出现即可。
+            page.wait_for_selector(".report-preview-meta", timeout=30000)
+            # 给 echarts sparkline 多一点时间完成 draw
+            page.wait_for_timeout(800)
+
+            html = page.evaluate(
+                """() => {
+                    let cssText = '';
+                    for (const sheet of document.styleSheets) {
+                        try {
+                            for (const rule of sheet.cssRules || []) {
+                                cssText += rule.cssText + '\\n';
+                            }
+                        } catch (e) { /* cross-origin sheet, skip */ }
+                    }
+                    document.querySelectorAll('link[rel="stylesheet"]').forEach(
+                        (l) => l.remove()
+                    );
+                    const inline = document.createElement('style');
+                    inline.setAttribute('data-ssr-injected', 'true');
+                    inline.textContent = cssText;
+                    document.head.appendChild(inline);
+                    // 去掉 React 在 dev 模式注入的 hot-reload 脚本 + Vite client,
+                    // 它们在静态 serve 时会 404 / 报错。
+                    document.querySelectorAll('script[type="module"]').forEach((s) => {
+                        const src = s.getAttribute('src') || '';
+                        if (src.includes('/@vite') || src.includes('/@react-refresh')
+                            || src.includes('/src/main.tsx')) {
+                            s.remove();
+                        }
+                    });
+                    return '<!doctype html>\\n' + document.documentElement.outerHTML;
+                }"""
+            )
+            return html
+        finally:
+            browser.close()

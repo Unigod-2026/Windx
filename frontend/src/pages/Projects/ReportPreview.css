@@ -44,7 +44,7 @@
 
 .report-preview-bar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   max-width: 760px;
   margin: 0 auto;
@@ -220,11 +220,11 @@
 }
 
 .report-preview-kpi-unit {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 400;
   margin-left: 2px;
   color: inherit;
-  opacity: 0.9;
+  opacity: 0.85;
 }
 
 .report-preview-kpi-value.up   { color: var(--rp-up, #CF1322); }
@@ -290,10 +290,15 @@
   background: #FAFAFA;
   color: #374151;
   font-weight: 500;
+  font-size: 10px;
 }
 
 .report-preview-table td.num {
   text-align: right;
+}
+
+.report-preview-table td.center {
+  text-align: center;
 }
 
 .report-preview-table td.mark-yes {
@@ -336,6 +341,7 @@
 /* 3.2 问题×平台 矩阵 — 深蓝表头白字 + # 列 + 隔行底色 + ✓ 绿 / — 橙 */
 .report-preview-matrix {
   table-layout: fixed;
+  width: 100%; /* 锁父容器宽度,16 平台列不能把表撑得比同章节其他表宽 */
 }
 
 .report-preview-matrix thead th {
@@ -352,7 +358,7 @@
 
 .report-preview-matrix th.matrix-num,
 .report-preview-matrix td.matrix-num {
-  width: 12px;
+  width: 8px; /* # 列最小宽度,1 位数字 + 上下 padding 4px 就够 */
   text-align: center;
   color: var(--rp-ink-soft);
   font-variant-numeric: tabular-nums;
@@ -369,26 +375,26 @@
 
 .report-preview-matrix th.matrix-num {
   color: #FFFFFF; /* # 列头用白字 */
-  font-size: 10px;
 }
 
 .report-preview-matrix th.matrix-question-head {
   text-align: left;
-  font-size: 10px;
+  width: auto; /* 吃满剩余空间 — 8 列时问题列约 460px,16 列时约 200px,差异由平台列固定宽决定 */
+  min-width: 100px; /* 兜底,最窄不低于 100 */
 }
 
 .report-preview-matrix th.matrix-col-head {
-  font-size: 10px;
   font-weight: 600;
   line-height: 1.2;
   padding: 6px 2px;
   vertical-align: top;
-  white-space: nowrap;
-  width: 48px; /* 模型列 48px */
+  white-space: normal; /* inline style 设的 width 内允许换行 — "DeepSeek" 48px 时一字一行 */
+  word-break: break-all;
+  /* 宽度由 ReportSections.tsx 里的 splitKey 按 label 长度设:>4 字 → 48px,否则 → 32px */
 }
 
 .report-preview-matrix th.matrix-col-head div {
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .report-preview-matrix .matrix-question {
@@ -398,6 +404,7 @@
   text-overflow: ellipsis;
   font-size: 12px;
   border-right: 1px solid #D9DCE0;
+  min-width: 100px; /* 问题列最小宽度 — 16 平台列把问题挤到看不见 */
 }
 
 .report-preview-matrix tbody tr.matrix-row-alt {
@@ -423,7 +430,6 @@
   font-weight: 600;
   text-align: center;
   border-right: 1px solid #D9DCE0;
-  font-size: 10px;
   padding: 6px 8px;
 }
 
@@ -435,7 +441,6 @@
   width: 32px;
   padding: 4px 2px !important;
   line-height: 1.15;
-  font-size: 10px;
 }
 
 .report-preview-table-33 th.stable-rank-head div {
@@ -502,7 +507,6 @@
   font-weight: 600;
   text-align: center;
   border-right: 1px solid #D9DCE0;
-  font-size: 10px;
   padding: 6px 8px;
 }
 
@@ -518,7 +522,6 @@
   width: 32px;
   padding: 4px 2px !important;
   line-height: 1.15;
-  font-size: 10px;
 }
 
 .report-preview-table-51 tbody td {
@@ -574,7 +577,6 @@
   font-weight: 600;
   text-align: center;
   border-right: 1px solid #D9DCE0;
-  font-size: 10px;
   padding: 6px 8px;
 }
 
@@ -703,7 +705,143 @@
 @media print {
   .report-preview-bar { display: none; }
   .report-preview { padding: 0; background: #FFFFFF; }
+
+  /* <thead> 跨页时也要在下一页重复出现 —— 默认在某些浏览器下不可靠 */
+  .report-preview-table thead { display: table-header-group; }
+  /* 防止单个 <tr> 被切两半 */
+  .report-preview-table tr { break-inside: avoid; }
+  /* 章节标题后紧跟表格 / 列表,不另起一页 */
+  .report-preview-h3 { break-after: avoid; }
+
+  /* 矩阵表(19 题 × 6 平台)高度可能压过 A4 的可用高度;``avoid-page`` 比
+     ``avoid`` 更严格,Chromium 实在塞不下时才会换页 —— 避免 thead / tbody
+     错位到不同页。同时把 ``break-before: page`` 留给 ``.report-preview-h3--matrix``
+     这种已经确定要独占一页的章节。 */
+  .report-preview-matrix {
+    break-inside: avoid-page;
+  }
+
   .report-preview-kpi,
   .report-preview-table { break-inside: avoid; }
   .report-preview-h2 { break-after: avoid; }
+}
+
+/* ===== Section 四: KPI 卡片 + 橙色箭头 + 4.1 / 4.2 子章节 ===== */
+
+/* 卡片之间的箭头 —— 4 张卡片之间塞 3 个箭头(对齐 PDF 视觉) */
+.report-preview-kpis--flow {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.report-preview-kpis--flow .report-preview-kpi,
+.report-preview-kpis--flow .report-preview-kpi-arrow {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.report-preview-kpi-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--rp-card);
+  border: 1px solid var(--rp-rule);
+  border-radius: 4px;
+  box-shadow: var(--rp-shadow);
+  color: #F59D0A;
+  font-size: 22px;
+  font-weight: 600;
+  user-select: none;
+}
+/* 卡片 2 子标签双行布局 —— 「20次分发」+「多渠道覆盖」 */
+.report-preview-kpi-sub {
+  font-size: 11px;
+  color: var(--rp-ink-soft);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* 4.x 子标题 —— 对齐 Section 三的 .report-preview-h3(12px / 600) */
+.report-preview-h3-sub {
+  color: var(--rp-ink);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 18px 0 10px 0;
+}
+.report-preview-h3-sub .marker {
+  font-weight: 700;
+  margin-right: 6px;
+}
+.report-preview-h3-sub .tail {
+  font-weight: 700;
+  margin-left: 8px;
+}
+
+/* 4.1 / 4.2 ② 表 —— 对齐 Section 三 .report-preview-table-31:
+   深藏青 header / 居中 / 隔行 #F5F6F8 / 单元格竖线 */
+.report-preview-table-41 thead th,
+.report-preview-table-42-2 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-bottom-color: var(--rp-navy);
+}
+.report-preview-table-41 tbody tr:nth-child(even),
+.report-preview-table-42-2 tbody tr:nth-child(even) {
+  background: #F5F6F8;
+}
+.report-preview-table-41 th,
+.report-preview-table-41 td,
+.report-preview-table-42-2 th,
+.report-preview-table-42-2 td {
+  border-right: 1px solid #D9DCE0;
+}
+.report-preview-table-41 th:last-child,
+.report-preview-table-41 td:last-child,
+.report-preview-table-42-2 th:last-child,
+.report-preview-table-42-2 td:last-child {
+  border-right: none;
+}
+
+/* 4.2 ① 表 —— 同款 */
+.report-preview-table-42-1 thead th {
+  background: var(--rp-navy);
+  color: #FFFFFF;
+  font-weight: 600;
+  text-align: center;
+  border-bottom-color: var(--rp-navy);
+}
+.report-preview-table-42-1 tbody tr:nth-child(even) {
+  background: #F5F6F8;
+}
+.report-preview-table-42-1 th,
+.report-preview-table-42-1 td {
+  border-right: 1px solid #D9DCE0;
+}
+.report-preview-table-42-1 th:last-child,
+.report-preview-table-42-1 td:last-child {
+  border-right: none;
+}
+/* 可视化条本身 —— percentage 控制宽度,color 由 inline style 给 */
+.report-preview-bar-track {
+  display: inline-block;
+  width: 220px;
+  height: 22px;
+  background: #EEF2F8;
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.report-preview-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 600;
+  box-sizing: border-box;
 }

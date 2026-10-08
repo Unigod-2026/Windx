@@ -73,6 +73,13 @@ class AdminUser(Base):
     username: Mapped[str] = mapped_column(String(64), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 账号「个人中心」三件套:邮箱 + 手机 + 通知偏好。
+    # email / phone 由账号本人 PATCH,super_admin 强制 readonly(详见 /api/auth PATCH /me)。
+    # notification_prefs 存 JSON 字符串(避免 MySQL 5.7 没原生 JSON 类型时的兼容性
+    # 麻烦),由 SettingsPane 同步 localStorage 缓存,后端是 source of truth。
+    email: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    notification_prefs: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     role: Mapped[AdminRole] = mapped_column(
         Enum(
             AdminRole,

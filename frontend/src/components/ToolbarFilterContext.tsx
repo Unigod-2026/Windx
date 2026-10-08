@@ -42,7 +42,9 @@ export interface ToolbarFilterState {
   selectedModels: string[] | null;
   /** 问题筛选 —— 空集合 / null 表示「全部」。 */
   selectedPromptIds: number[] | null;
-  /** 日期区间 —— null 表示「未选」(由 Tab 自己用本地默认值)。 */
+  /** 日期区间 —— Provider 首屏就填入工具栏显示的那个默认区间
+   *  (``{ days: 7 }``,对应「近 7 天」)。``null`` 仅出现在没有 Provider
+   *  的占位实现里。 */
   selectedDateRange: ToolbarDateRange | null;
   /** 「应用」按钮触发 +1;Tab 把这个加进 useEffect 依赖即可强制刷新。 */
   version: number;
@@ -69,8 +71,11 @@ export function ToolbarFilterProvider({
   const [selectedPromptIds, setSelectedPromptIds] = useState<number[] | null>(
     null,
   );
+  // 首屏默认值必须等于 GlobalToolbar 显示的那个预设(``datePreset`` 初始
+  // "7")。两者一旦分叉,就会出现「头部写着近 7 天、下游按别的窗口取数」
+  // —— ReportTab 曾因此把周报周期算成近 7 天。
   const [selectedDateRange, setSelectedDateRange] =
-    useState<ToolbarDateRange | null>(null);
+    useState<ToolbarDateRange | null>({ days: 7 });
   const [version, setVersion] = useState(1);
 
   const apply = useCallback(

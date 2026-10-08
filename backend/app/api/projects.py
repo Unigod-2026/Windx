@@ -137,6 +137,7 @@ from app.schemas.project import (
     OwnArticleImportResult,
     OwnArticleListOut,
     OwnArticleOut,
+    OwnArticleUpdate,
     WizardModelConfig,
     WizardPayload,
     WizardSemantic,
@@ -245,6 +246,38 @@ def compound_key(
     return f"{platform_code}__{delivery_mode}__{thinking}"
 
 
+def _compound_base_key(
+    platform_code: str,
+    delivery_mode: str,
+    thinking_mode: bool | None,
+) -> str:
+    """``compound_key`` 的「剥后缀 base」变种,只用于响应字段赋值。
+
+    前端 ``rowKeyOfPlatform``(platforms.ts)把 ``platform_code='doubao_mobile'``
+    剥成 base ``'doubao'`` 再跟 ``delivery_mode='mobile'`` 拼,产出
+    ``'doubao__mobile__fast'``。后端 ``selectedModels`` 透传这个集合
+    给下游,模型对比 / 摘录 / 竞品矩阵里 ``m.platform`` / ``model_ranks``
+    key 必须跟这个口径一致,前端 ``selectedModels.includes(m.platform)``
+    才能命中 —— 否则「勾了 8 档 mobile」跟「后端响应里 8 个
+    ``doubao_mobile__mobile__fast``」对不上,模型对比表全过滤掉、
+    显示「该问题暂未被任何模型提及 / 0 个档位」。
+
+    BrandMention 抽取侧按 ``ProjectPlatform.platform_code`` 原值写库
+    (mobile 行 ``BrandMention.platform`` = ``'doubao_mobile'``),
+    ``compound_key(plat, delivery, thinking)`` 直接拼出原始
+    platform_code 形式;这里剥后缀后再拼,跟前端 ``rowKeyOfPlatform``
+    对齐。Subtask 路径走 ``source_preferences._compound_platform`` 已
+    统一是剥后缀 base 形式,不受影响。
+    """
+    base = (
+        platform_code[: -len("_mobile")]
+        if platform_code.endswith("_mobile")
+        else platform_code
+    )
+    thinking = "think" if thinking_mode else "fast"
+    return f"{base}__{delivery_mode}__{thinking}"
+
+
 def parse_compound_key(
     raw: str,
 ) -> tuple[str, str, bool] | None:
@@ -265,6 +298,24 @@ def parse_platforms_param(
     - 缺省 / 空字符串 → ``None``,调用方走「全选」分支;
     - 任一 token 非法 → 静默忽略(与 Overview 一致);全部非法 → ``set()``
       由调用方按「0 行」处理。
+
+    兼容两种 compound key 形式:
+    - 原始 ``platform_code``:``doubao_mobile__mobile__fast``(mobile 行
+      ``platform_code`` 原值已带 ``_mobile`` 后缀)。
+    - 前端 ``rowKeyOfPlatform`` 形式:``doubao__mobile__fast``(把
+      ``platform_code='doubao_mobile'`` 剥成 base ``doubao`` 后再跟
+      ``delivery='mobile'`` 拼),这是 Subtask 路径的
+      ``source_preferences._compound_platform`` 对齐形式。
+
+    两种形式都接受的原因:BrandMention 抽取侧按 ``ProjectPlatform.platform_code``
+    原值写库 —— mobile 行的 ``BrandMention.platform`` 列存的是
+    ``'doubao_mobile'``(我 2026-10-08 验证:web 行 ``'doubao'`` / mobile
+    行 ``'doubao_mobile'``),跟 Subtask 表用 web code 写库的语义不同。
+    这里按 delivery 把 base 拼回 ``'<base>_mobile'`` 才是 BrandMention
+    实际存的值,否则 ``(platform='doubao', delivery='mobile', ...)`` 在
+    SQL 三元组 ``IN`` 匹配里 0 命中,「取消 PC / 取消 mobile」等所有切档
+    场景都拿到空数据(首屏概览 / 问题提及 / 竞品分析 等所有走这条
+    helper 的端点都受影响)。
     """
     if raw is None:
         return None
@@ -278,7 +329,10 @@ def parse_platforms_param(
         parsed = parse_compound_key(tok)
         if parsed is None:
             continue
-        triples.add(parsed)
+        platform_code, delivery, is_thinking = parsed
+        if delivery == "mobile" and not platform_code.endswith("_mobile"):
+            platform_code = f"{platform_code}_mobile"
+        triples.add((platform_code, delivery, is_thinking))
     return triples
 
 
@@ -2583,7 +2637,7 @@ def _compute_question_product_analytics(
         # recommend_yes=False,前端会显示「—」与「未推荐」占位。
         platforms_out.append(
             QuestionPlatformStat(
-                platform=compound_key(plat, delivery, is_thinking),
+                platform=_compound_base_key(plat, delivery, is_thinking),
                 delivery_mode=delivery,
                 thinking_mode=is_thinking,
                 matched=cur_agg["matched"],
@@ -2651,14 +2705,27 @@ def _compute_question_product_analytics(
     for r in excerpt_rows:
         delivery = r.delivery_mode or "web"
         thinking = bool(r.thinking_mode)
-        triple_key = compound_key(r.platform, delivery, thinking)
         # 若 toolbar 切档过滤,只保留被选中的档位摘录(保持分子 / 分母
         # 口径一致:工具栏勾了哪几条,右卡片就显示哪几条 excerpt)。
-        if (
-            selected_triples is not None
-            and (r.platform, delivery, thinking) not in selected_triples
-        ):
-            continue
+        # ``r.platform`` 是 Subtask.platform(按 web code 存,例
+        # ``'doubao'``),``selected_triples`` 修后是 ``('doubao_mobile',
+        # 'mobile', ...)`` 形式,直接比永远不命中。这里按 delivery 把
+        # web code 拼回 ``'<base>_mobile'`` 才是 selected_triples 实际
+        # 里的值(与 parse_platforms_param 的回拼口径一致)。
+        if selected_triples is not None:
+            plat_code = r.platform
+            if delivery == "mobile" and not plat_code.endswith("_mobile"):
+                plat_code = f"{plat_code}_mobile"
+            if (plat_code, delivery, thinking) not in selected_triples:
+                continue
+        # ``r.platform`` 是 Subtask.platform(存的是原始 ``platform_code``,
+        # mobile 行 = ``'doubao_mobile'``),``compound_key`` 直接拼会产出
+        # ``'doubao_mobile__mobile__fast'``(原始 platform_code 形式),跟
+        # 前端 ``selectedModels``(剥后缀 base 形式
+        # ``'doubao__mobile__fast'``)对不上,前端 ``excerpts[plat]`` 永远
+        # 查不到。改用 ``_compound_base_key`` 跟 ``m.platform`` /
+        # ``model_ranks`` key 口径统一。
+        triple_key = _compound_base_key(r.platform, delivery, thinking)
         if triple_key in latest_by_triple:
             continue
         text = r.answer_content or ""
@@ -2798,7 +2865,7 @@ def _compute_question_competitor_analytics(
     ] = defaultdict(dict)
     for (is_self, brand, plat, delivery, is_thinking), ranks in grouped.items():
         by_brand[(is_self, brand)][
-            compound_key(plat, delivery, is_thinking)
+            _compound_base_key(plat, delivery, is_thinking)
         ] = ranks
 
     # Fixed palette for the competitor panel — same slot cycle as the
@@ -2882,12 +2949,25 @@ def _compute_question_competitor_analytics(
     for r in excerpt_rows:
         delivery = r.delivery_mode or "web"
         thinking = bool(r.thinking_mode)
-        if (
-            selected_triples is not None
-            and (r.platform, delivery, thinking) not in selected_triples
-        ):
-            continue
-        triple_key = compound_key(r.platform, delivery, thinking)
+        # ``r.platform`` 是 Subtask.platform(按 web code 存,例
+        # ``'doubao'``),``selected_triples`` 修后是 ``('doubao_mobile',
+        # 'mobile', ...)`` 形式,直接比永远不命中。按 delivery 把 web
+        # code 拼回 ``'<base>_mobile'`` 才是 selected_triples 实际里的
+        # 值(与 parse_platforms_param 的回拼口径一致)。
+        if selected_triples is not None:
+            plat_code = r.platform
+            if delivery == "mobile" and not plat_code.endswith("_mobile"):
+                plat_code = f"{plat_code}_mobile"
+            if (plat_code, delivery, thinking) not in selected_triples:
+                continue
+        # ``r.platform`` 是 Subtask.platform(存的是原始 ``platform_code``,
+        # mobile 行 = ``'doubao_mobile'``),``compound_key`` 直接拼会产出
+        # ``'doubao_mobile__mobile__fast'``(原始 platform_code 形式),跟
+        # 前端 ``selectedModels``(剥后缀 base 形式
+        # ``'doubao__mobile__fast'``)对不上,前端 ``excerpts[plat]`` 永远
+        # 查不到。改用 ``_compound_base_key`` 跟 ``m.platform`` /
+        # ``model_ranks`` key 口径统一。
+        triple_key = _compound_base_key(r.platform, delivery, thinking)
         if triple_key in latest_by_triple:
             continue
         excerpt = (r.answer_content or "")[:200]
@@ -4148,7 +4228,25 @@ def project_overview(
                 continue
             if thinking not in ("fast", "think"):
                 continue
-            triples.add((platform_str, delivery, thinking == "think"))
+            # 前端 ``rowKeyOfPlatform``(platforms.ts)把
+            # ``platform_code='doubao_mobile'`` 剥成 ``base='doubao'``,然后
+            # 用 ``delivery`` 单独携带 mobile 维度,所以 entry 里的
+            # ``platform_str`` 是剥后缀的 base。但 ``BrandMention`` 抽取侧
+            # 按 ``ProjectPlatform.platform_code`` 原值写库 —— mobile 行的
+            # ``BrandMention.platform`` 列存的是 ``'doubao_mobile'``(我
+            # 2026-10-08 验证过:web 行 ``'doubao'`` / mobile 行
+            # ``'doubao_mobile'``),跟 Subtask 表用 web code 写库的语义
+            # 不同。这里把 base 按 delivery 拼回 ``'<base>_mobile'`` 才是
+            # ``BrandMention.platform`` 实际存的值,否则
+            # ``(platform='doubao', delivery='mobile', ...)`` 在 SQL 三元组
+            # ``IN`` 匹配里 0 命中,首屏概览「取消 PC」后所有数据变 0。
+            # Subtask 那边走 ``_compound_platform`` / ``_expand_platform_keys``
+            # 已经处理过这套语义,这里只补 BrandMention 这一侧。
+            if delivery == "mobile" and not platform_str.endswith("_mobile"):
+                platform_code = f"{platform_str}_mobile"
+            else:
+                platform_code = platform_str
+            triples.add((platform_code, delivery, thinking == "think"))
         selected_triples = triples
 
     # 解码 prompt_ids:根据项目把 id 解析成对应 prompt 文本(BrandMention
@@ -4459,6 +4557,7 @@ def list_own_articles(
             title=a.title,
             publish_date=a.publish_date,
             remind=a.remind,
+            channel=a.channel,
             created_at=a.created_at,
             cited=bool(s),
             cite_count=s.get("count", 0),
@@ -4480,12 +4579,17 @@ async def preview_own_articles_import(
 ):
     """xlsx 预览 —— 解析 + 校验 + 与 DB diff,不入库。
 
-    xlsx 列固定 3 列:URL / 标题 / 发布日期(首行为表头)。
+    xlsx 列固定 4 列:URL / 标题 / 发布日期 / 分发渠道(首行为表头)。
+    列数 < 4 → 400 「文件格式不正确」;任一行四列缺一 → 400 行级报错
+    (见 :func:`own_articles.preview_import`)。
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
     content = await _read_xlsx(file)
-    return own_articles.preview_import(db, project_id, content)
+    try:
+        return own_articles.preview_import(db, project_id, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post(
@@ -4498,35 +4602,51 @@ async def import_own_articles(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """xlsx 应用 —— 单事务 upsert。"""
+    """xlsx 应用 —— 单事务 upsert。同 preview 一样吃四列必填与文件格式校验。"""
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
     content = await _read_xlsx(file)
-    return own_articles.apply_import(db, project_id, content)
+    try:
+        return own_articles.apply_import(db, project_id, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post(
-    "/projects/{project_id}/own-articles/{article_id}/remind",
+@router.patch(
+    "/projects/{project_id}/own-articles/{article_id}",
     response_model=OwnArticleOut,
 )
-def toggle_own_article_remind(
+def patch_own_article(
     project_id: int,
     article_id: int,
+    patch: OwnArticleUpdate,
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """切换单条自有文章的「引用提醒」boolean。
+    """局部更新自有文章的「可编辑」字段。
 
-    - 命中:翻转 ``remind``,返回最新 Out(不附 cite 统计 —— toggle 走
-      局部刷新,前端拿到 id 后再走 list 接口取最新 stats)。
-    - 找不到对应项目下的文章 → 404。
+    - 只允许改 ``publish_date`` 与 ``channel``(见 :class:`OwnArticleUpdate`)。
+      URL / 标题是声明项,错了应该删了重新声明,不允许在编辑里篡改。
+    - ``channel`` 非空(沿用导入口径)—— 空串 / 全空白 → 400。
+    - ``publish_date`` 允许 ``null``(清空日期),其他字段传 ``null`` 按「不改」处理。
+    - 找不到或不属于该项目 → 404。
+    - 返回更新后的完整 ``OwnArticleOut``(含 cite 统计 —— PATCH 后若引用数变了,
+      客户端拿到响应后跟 list 接口对齐)。
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
     a = db.get(OwnArticle, article_id)
     if a is None or a.project_id != project_id:
         raise HTTPException(404, "article not found")
-    a.remind = not a.remind
+
+    body = patch.model_dump(exclude_unset=True)
+    if "channel" in body:
+        channel = (body["channel"] or "").strip()
+        if not channel:
+            raise HTTPException(status_code=400, detail="分发渠道不能为空")
+        a.channel = channel
+    if "publish_date" in body:
+        a.publish_date = body["publish_date"]
     db.commit()
     return OwnArticleOut.model_validate(a)
 

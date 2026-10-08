@@ -9,9 +9,9 @@
  *
  * 操作:
  *   - 生成周报 → GenerateReportModal(模板 + 基线两个必填)
- *   - 打开全屏 → 公开 URL(/public/reports/{share_token}),新标签页
- *   - 复制链接 → 同一 URL 写入剪贴板
- *   - 取消发布 → 仅已发布报告可见(对应 admin 操作的归属,公开页不放)
+ *   - 打开 → admin 编辑视图(/reports/{id}),新标签页,需登录
+ *   - 公网预览 / 复制链接 / 取消发布 → 仅已发布报告可见
+ *     (草稿没有可对外分享的 token URL,不展示引用它的入口)
  */
 
 import { useEffect, useState } from "react";
@@ -47,21 +47,17 @@ interface Props {
   projectId: number;
 }
 
-/** Format a 0..1 rate as a percent with 2 decimal places: 0.0083 → "0.83%". */
-function pct(rate: number | null | undefined): string {
-  if (rate === null || rate === undefined) return "未配置";
-  return `${(rate * 100).toFixed(2)}%`;
-}
-
 /** Resolve the report window from the toolbar's current date range.
- *  Defaults to "last 7 days" when no range is selected (matches the
- *  example weekly report in the spec doc). */
+ *  No range ⇒ "last 15 days", matching the preset the toolbar shows on
+ *  first paint (and every other tab's fallback). The old 7-day fallback
+ *  silently disagreed with the toolbar: the header read "近 15 天" while
+ *  the report window was 7 days. */
 function windowFromToolbar(
   range: ReturnType<typeof useToolbarFilter>["selectedDateRange"],
 ): { start: string; end: string } {
   const end = dayjs();
   if (!range) {
-    return { start: end.subtract(6, "day").format("YYYY-MM-DD"), end: end.format("YYYY-MM-DD") };
+    return { start: end.subtract(14, "day").format("YYYY-MM-DD"), end: end.format("YYYY-MM-DD") };
   }
   if ("days" in range && typeof range.days === "number") {
     return {
@@ -113,7 +109,18 @@ export default function ReportTab({ projectId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const openFullscreen = (shareToken: string) => {
+  /** 在 admin 内打开周报 —— 新标签页走 ``/reports/:id``,不是 token 公网链接。
+   *  新窗口确保查 / 编辑不会丢失列表页上下文(关闭预览后回到列表继续操作)。
+   *  URL 故意不带 /admin/ 前缀:React Router v6 默认按 path-prefix 嵌套,
+   *  `/admin/reports/:id` 会被识别为 /admin 的子路径并被 AppLayout 包住;
+   *  /reports/:id 顶层路径独立匹配,无侧边栏。 */
+  const openInAdmin = (id: number) => {
+    window.open(`/reports/${id}`, "_blank", "noopener,noreferrer");
+  };
+
+  /** 已发布报告「公网预览」—— 用 token URL 在新标签页打开(无登录,纯 HTML)。
+   *  与 ``openInAdmin`` 分开:运营要的是「外部看到的样子」才用这个。 */
+  const openPublicPreview = (shareToken: string) => {
     window.open(publicReportUrl(shareToken), "_blank", "noopener,noreferrer");
   };
 
@@ -189,10 +196,6 @@ export default function ReportTab({ projectId }: Props) {
                 <div className="report-row-meta">
                   周期 {r.period_start} ~ {r.period_end}
                   <span className="report-row-meta-sep">·</span>
-                  {r.scope_text || "范围未指定"}
-                  <span className="report-row-meta-sep">·</span>
-                  {r.generated_by_name}
-                  <span className="report-row-meta-sep">·</span>
                   {r.is_published ? (
                     <Tag color="green">已发布</Tag>
                   ) : (
@@ -200,25 +203,24 @@ export default function ReportTab({ projectId }: Props) {
                   )}
                 </div>
                 <div className="report-row-time">
-                  {r.baseline_date ? (
-                    <>
-                      基线 {r.baseline_date} · {pct(r.baseline_rate)}
-                      <span className="report-row-meta-sep">·</span>
-                    </>
-                  ) : null}
                   生成于 {dayjs(r.generated_at).format("YYYY-MM-DD HH:mm:ss")}
                 </div>
               </div>
               <div className="report-row-actions">
-                <Button onClick={() => openFullscreen(r.share_token)}>
-                  打开
-                </Button>
-                <Button
-                  icon={<CopyOutlined />}
-                  onClick={() => copyShareLink(r.share_token)}
-                >
-                  复制链接
-                </Button>
+                <Button onClick={() => openInAdmin(r.id)}>打开</Button>
+                {r.is_published && (
+                  <Button onClick={() => openPublicPreview(r.share_token)}>
+                    公网预览
+                  </Button>
+                )}
+                {r.is_published && (
+                  <Button
+                    icon={<CopyOutlined />}
+                    onClick={() => copyShareLink(r.share_token)}
+                  >
+                    复制链接
+                  </Button>
+                )}
                 {r.is_published && (
                   <Button onClick={() => unpublish(r.id)}>取消发布</Button>
                 )}

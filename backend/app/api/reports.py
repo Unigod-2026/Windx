@@ -49,9 +49,9 @@ from app.schemas.report import (
     ReportTemplateOut,
     UpdateReportIn,
 )
-from app.services import report_settings, report_templates
+from app.services import report_render, report_settings, report_templates
 from app.services.report_overrides import merge_overrides
-from app.services.report_render import render_html
+from app.services.report_render import _render_admin_html_via_browser, render_html
 from app.services.report_templates import TEMPLATE_FIELDS
 from app.services.scope_text import compose_scope_text
 
@@ -64,11 +64,34 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------- #
 
 # backend/app/api/reports.py → backend/data/reports/...
-_REPORTS_ROOT = Path(__file__).resolve().parents[2] / "data" / "reports"
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_REPORTS_ROOT = _BACKEND_ROOT / "data" / "reports"
 
 
 def _project_dir(project_id: int) -> Path:
     return _REPORTS_ROOT / str(project_id)
+
+
+def _regenerate_report_html(db: Session, row: ReportRow) -> None:
+    """用 headless 浏览器渲染 admin 视图,把 HTML 覆写到磁盘。
+
+    渲染源是 admin 路由 ``/reports/:id`` —— 也就是运营在浏览器里看到的
+    那份 React 组件树。这样「公网 token URL 看到的」与「admin 编辑视图
+    看到的」永远一致,不会有第二套 Python 模板跟 React drift 的问题。
+
+    前置条件:``manual_overrides`` 必须已经 **commit**(浏览器通过独立
+    请求读 DB);因此 publish 路径里 operator 的编辑都是先 PATCH 落库再
+    publish,天然满足。本函数在 ``is_published`` 置 True **之前**调用,
+    但渲染走的是 ``?mode=public`` 只读模式,与 DB 里的发布状态无关 ——
+    草稿态也不会把「发布」按钮 / 「编辑」链接烤进公网 HTML。
+    """
+    html_str = _render_admin_html_via_browser(row.id)
+
+    project_dir = _project_dir(row.project_id)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    abs_path = project_dir / f"{row.id}.html"
+    abs_path.write_text(html_str, encoding="utf-8")
+    row.file_path = str(abs_path.relative_to(Path(__file__).resolve().parents[2]))
 
 
 def _generate_unique_share_token(db: Session, *, attempts: int = 5) -> str:
@@ -278,7 +301,7 @@ def generate_report(
             detail=f"window cannot exceed {_MAX_WINDOW_DAYS} days",
         )
     try:
-        template_fn = report_templates.get(payload.template_id)
+        report_templates.get(payload.template_id)  # 仅校验模板存在
     except KeyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -320,13 +343,6 @@ def generate_report(
                 ),
             )
 
-    # Resolve prompts (if any) to prompt strings the metrics layer
-    # understands. None / empty list → no filter, mirrors the
-    # GlobalToolbar's null-means-all convention.
-    prompt_filter = report_templates.resolve_prompts(
-        db, project_id=payload.project_id, prompt_ids=payload.prompts
-    )
-
     # Compose the human-readable scope string now (spec §2.5) so the
     # row carries it from the first write — historical reports stay
     # stable even when toolbar options are later renamed.
@@ -343,6 +359,14 @@ def generate_report(
     # PRNG would otherwise turn into a 500.
     share_token = _generate_unique_share_token(db)
 
+    # toolbar 选的 prompt 是 ID,指标函数要的是文本。提前解析,直接存
+    # 解析后的文本到行里 —— GET snapshot 时不必再查 geo_project_prompts,
+    # 且历史报告不受 prompt 改名/删除影响(参见迁移 20260928_0003)。
+    filter_prompts = report_templates.resolve_prompts(
+        db, project.id, payload.prompts
+    )
+    filter_platform_codes = payload.platform_codes
+
     # Write the metadata row first so we can derive file_path from the
     # autoincrement id (avoids a "filename guess + rename" race).
     row = ReportRow(
@@ -353,46 +377,26 @@ def generate_report(
         period_end=payload.period_end,
         baseline_date=baseline_date,
         baseline_rate=baseline_rate,
-        title="",  # filled in after build
-        file_path="",
+        # 标题跟 template 的 default_title 同源,避免为了拿标题跑一遍全量
+        # snapshot(那会重算所有指标 SQL)。
+        title=report_render.default_title(
+            project.name, payload.period_start, payload.period_end
+        ),
+        # 草稿**不生成** HTML —— 未发布的报告需要登录才能看,公网 token
+        # URL 直接 404;publish 时才用 headless 浏览器渲染落盘。这样新建
+        # 周报的响应时间不再包含 3-5s 的浏览器渲染。
+        # 必须是 None 而不是 "" —— file_path 有 UNIQUE 约束,空串只能存
+        # 一行,第二份草稿会撞 ``Duplicate entry ''``(见迁移 20260928_0002)。
+        file_path=None,
         scope_text=scope_text,
         share_token=share_token,
+        filter_prompts=filter_prompts,
+        filter_platform_codes=filter_platform_codes,
         generated_by_id=user.id,
         generated_by_name=user.display_name,
         created_at=now_local(),
     )
     db.add(row)
-    db.flush()  # assigns row.id without committing
-
-    ctx = report_templates.BuildContext(
-        db=db,
-        project=project,
-        period_start=payload.period_start,
-        period_end_exclusive=payload.period_end + timedelta(days=1),
-        previous_start=payload.period_start - timedelta(days=days),
-        previous_end_exclusive=payload.period_start,
-        baseline_date=baseline_date,
-        baseline_rate=baseline_rate,
-        generated_by=user,
-        generated_at=row.created_at,
-        prompts=prompt_filter,
-        platform_codes=payload.platform_codes,
-    )
-    snapshot = template_fn(ctx)
-    html_str = render_html(snapshot=snapshot, template_id=payload.template_id)
-
-    # Persist file. We deliberately commit BEFORE writing the file so a
-    # failed disk write leaves a row with no file (visible as broken in
-    # the UI) rather than a missing row for a file that exists.
-    project_dir = _project_dir(project.id)
-    project_dir.mkdir(parents=True, exist_ok=True)
-    file_name = f"{row.id}.html"
-    abs_path = project_dir / file_name
-    abs_path.write_text(html_str, encoding="utf-8")
-    rel_path = abs_path.relative_to(Path(__file__).resolve().parents[2])
-
-    row.title = snapshot["title"]
-    row.file_path = str(rel_path)
     db.commit()
     db.refresh(row)
 
@@ -485,6 +489,10 @@ def get_report_snapshot(
     # Historical reports don't store raw prompt ids (spec §2.5), so
     # we re-run with no prompt filter — matches what the file on disk
     # represents. platform_codes also default to None.
+    # 2026-09-28 修复:之前的实现「永远传 None」让生成时的 toolbar 筛选
+    # 选择落空;现在从行里读生成时解析并保存的文本/平台原样传给
+    # BuildContext。两列允许 NULL,所以历史报告(没有的列)退回到无筛选,
+    # 行为与改动前一致。
     ctx = report_templates.BuildContext(
         db=db,
         project=project,
@@ -496,8 +504,8 @@ def get_report_snapshot(
         baseline_rate=row.baseline_rate,
         generated_by=user,
         generated_at=row.created_at,
-        prompts=None,
-        platform_codes=None,
+        prompts=row.filter_prompts,
+        platform_codes=row.filter_platform_codes,
     )
     snapshot = template_fn(ctx)
     # Patch generated_by / generated_at so the preview shows the
@@ -625,6 +633,13 @@ def publish_report(
     unfilled sections render as "暂无数数据" on the public page.
     Operator workflow: publish early, fill later (also via
     ``unpublish`` → edit → ``publish``).
+
+    Side effects:
+      - 若之前 ``is_published=False``,本次轮换 ``share_token`` —— 旧的公开
+        URL 立即失效,避免被缓存 / 截屏引用了「草稿 ID」后还能看。
+      - 用当前 ``manual_overrides`` 重新渲染 HTML 写盘,public URL 看到的
+        是这次 publish 的快照;后续编辑不会自动反映到 public 页面,
+        必须重新 publish。
     """
     row = db.get(ReportRow, report_id)
     if row is None:
@@ -635,6 +650,11 @@ def publish_report(
     ):
         raise HTTPException(status_code=403, detail="forbidden")
 
+    # 每次 publish 都轮换 token —— 不论首次发布还是「重新发布」,
+    # 运营点这个按钮的语义就是「重新暴露一份对外链接」,旧 URL 应立即
+    # 失效,防止被截屏 / 群发后还能看到上一版内容。
+    row.share_token = _generate_unique_share_token(db)
+    _regenerate_report_html(db, row)
     row.is_published = True
     db.commit()
     db.refresh(row)
@@ -671,6 +691,11 @@ def unpublish_report(
     """Take the report back to draft state. The public URL becomes
     invisible again. ``manual_overrides`` content is preserved —
     re-publishing restores the same edited text.
+
+    Side effects:
+      - 删除磁盘上的 HTML 文件 —— 已发布的报告内容不应在文件系统
+        残留可被任何能读 backend/data/ 的人访问到。重新 publish 会重新写。
+      - ``share_token`` 保留(但不公开了);重新 publish 时会轮换。
     """
     row = db.get(ReportRow, report_id)
     if row is None:
@@ -681,6 +706,15 @@ def unpublish_report(
     ):
         raise HTTPException(status_code=403, detail="forbidden")
 
+    if row.file_path:
+        try:
+            html_path = Path(__file__).resolve().parents[2] / row.file_path
+            if html_path.exists():
+                html_path.unlink()
+        except OSError as exc:
+            # 文件已被人手动删 / 文件夹被改名 —— 不阻断 unpublish
+            # 主流程,只在 log 里记一笔供查
+            logger.warning("failed to unlink %s: %s", html_path, exc)
     row.is_published = False
     db.commit()
     db.refresh(row)
@@ -717,18 +751,14 @@ def get_report_html(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """Download the report as a self-contained HTML document.
+    """下载报告 HTML —— serve 磁盘上 publish 时渲染的同一份文件。
 
-    ⚠️  功能已取消:此端点不再用于产品流程,保留仅为兜底。后期可整体删除
-        (路由 + frontend fetchReportHtml + report_render.render_html)。
+    与 ``GET /api/public/reports/{token}`` 同源:都是 publish 时用 headless
+    浏览器渲染 admin 视图落盘的 ``data/reports/{project_id}/{id}.html``。
+    这样下载 / 公网 / admin 三个入口看到的永远是同一份内容。
 
-    Re-renders the template and merges ``manual_overrides`` rather than
-    serving the file written at generate time — the on-disk file has no
-    operator narrative content, so a download would silently drop every
-    block the operator wrote. Same merge path as
-    ``get_report_snapshot``. The generate-time file is still written
-    (it remains the historical record) but is no longer the download
-    source.
+    草稿(file_path 为空)会返回 404 —— 未发布的报告没有渲染产物,请先
+    在 admin 视图里点「发布」。
     """
     row = db.get(ReportRow, report_id)
     if row is None:
@@ -740,33 +770,16 @@ def get_report_html(
         ) is None:
             raise HTTPException(status_code=403, detail="forbidden")
 
-    project = db.get(Project, row.project_id)
-    if project is None:
-        raise HTTPException(status_code=410, detail="project deleted")
+    if not row.file_path:
+        raise HTTPException(
+            status_code=404,
+            detail="report not published yet — publish it to generate HTML",
+        )
+    html_path = _BACKEND_ROOT / row.file_path
+    if not html_path.exists():
+        raise HTTPException(status_code=503, detail="html file missing")
 
-    days = (row.period_end - row.period_start).days + 1
-    try:
-        template_fn = report_templates.get(row.template_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=410, detail=str(exc)) from exc
-
-    ctx = report_templates.BuildContext(
-        db=db,
-        project=project,
-        period_start=row.period_start,
-        period_end_exclusive=row.period_end + timedelta(days=1),
-        previous_start=row.period_start - timedelta(days=days),
-        previous_end_exclusive=row.period_start,
-        baseline_date=row.baseline_date,
-        baseline_rate=row.baseline_rate,
-        generated_by=user,
-        generated_at=row.created_at,
-        prompts=None,
-        platform_codes=None,
+    return HTMLResponse(
+        content=html_path.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store"},
     )
-    snapshot = template_fn(ctx)
-    # Historical record, not "now" — see ``get_report_snapshot``.
-    snapshot["generated_by"] = row.generated_by_name
-    snapshot["generated_at"] = row.created_at.strftime("%Y-%m-%d %H:%M:%S")
-    merge_overrides(snapshot, row.manual_overrides or {})
-    return HTMLResponse(render_html(snapshot=snapshot, template_id=row.template_id))

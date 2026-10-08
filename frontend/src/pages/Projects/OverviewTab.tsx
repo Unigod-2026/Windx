@@ -9,7 +9,7 @@ import {
   type OverviewModelDimension,
   type ProjectOverview,
 } from "../../api/projects";
-import { platformColor, platformLabel } from "./platforms";
+import { platformColor, platformInkColor, platformLabel } from "./platforms";
 
 interface Props {
   projectId: number;
@@ -29,6 +29,82 @@ function fmtInt(v: number): string {
 
 function fmtRate(v: number): string {
   return (v * 100).toFixed(1);
+}
+
+// 把 hex 色和灰色(#a0a0a0)按 ``mix`` 比例混合,用来给 KPI 卡和条形图
+// 降饱和度。``mix`` 越大越灰,默认 0.3 = "调低一点"。
+function softenColor(hex: string, mix = 0.3): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const num = parseInt(m[1], 16);
+  const r = (num >> 16) & 0xff;
+  const g = (num >> 8) & 0xff;
+  const b = num & 0xff;
+  const blend = (c: number) => Math.round(c * (1 - mix) + 160 * mix);
+  return (
+    "#" +
+    [blend(r), blend(g), blend(b)]
+      .map((c) => c.toString(16).padStart(2, "0"))
+      .join("")
+  );
+}
+
+// 末端标签防重叠 —— v3.7(2026-10-05)docs/风球GEO监控平台UI-261005/overview.md §顺带修掉:
+// 7+ 个模型末点挤在右侧 4 处重叠,最小间距 6.3px(12px 文字需 ≥14px)。
+// 算法:取每条 series 最后一个非空点 → 按 y 升序 → 强制最小间距 14px → 超出 chart
+// 下边界则整体上移 → 被挤开的点用 markLine 引回真实末点。
+// 输出一份与 ``data.trend`` 等长的布局信息,喂给每条 series 的 markPoint.coord[1]
+// (让标签画在避让后的 y 上)与可选 markLine(被挤开者补引导线)。
+// 注意:doc 用的是手画 SVG(lineChart 返回 SVG string),我们这里走 echarts,
+//  echarts 5 line 系列没有原生 endLabelData,所以用 markPoint.symbol='none' +
+// label-only + coord 定位等价实现。
+type EndLabelLayout = {
+  /** 避让后的 y 轴值(标签落点)。 */
+  displayY: number;
+  /** 该 series 真实末点的 y 轴值(用于引导线起点)。 */
+  realY: number;
+  /** true = 真实末点与标签落点差距 ≥ MIN_GAP - 0.5,需要补 markLine 引导线。 */
+  needsGuide: boolean;
+};
+const END_LABEL_MIN_GAP = 14; // 12px 文字 + 2px 缓冲
+function computeEndLabelLayouts(
+  series: { platform: string; data: number[] }[],
+): EndLabelLayout[] {
+  if (series.length === 0) return [];
+  // 取每条线最后一个非空点(按 data 索引最大且非 null/undefined)。
+  const lastReal = (arr: number[]) => {
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const v = arr[i];
+      if (v !== null && v !== undefined && Number.isFinite(v)) return v;
+    }
+    return 0;
+  };
+  const real = series.map((s) => lastReal(s.data));
+  // 按真实 y 升序下推(echarts y 轴向上,y 越小越靠下)。
+  const sorted = real
+    .map((y, i) => ({ i, y }))
+    .sort((a, b) => a.y - b.y);
+  const display = new Array<number>(real.length);
+  let cursor = -Infinity;
+  sorted.forEach((p) => {
+    const v = Math.max(p.y, cursor + END_LABEL_MIN_GAP);
+    display[p.i] = v;
+    cursor = v;
+  });
+  // 溢出下边界(< 0)整体上移,锚点是最低点不动。
+  const minDisplay = Math.min(...display);
+  if (minDisplay < 0) {
+    const shift = -minDisplay;
+    for (let k = 0; k < display.length; k++) display[k] += shift;
+  }
+  // 溢出上边界也保护一下(数值过大时不让标签飞出 chart 顶部)。
+  // 这里不强求严格不溢出 —— echarts y 轴通常会自动按数据缩放,标签相对值
+  // 偏移在视觉上仍可读。
+  return real.map((ry, i) => ({
+    displayY: display[i],
+    realY: ry,
+    needsGuide: Math.abs(display[i] - ry) >= END_LABEL_MIN_GAP - 0.5,
+  }));
 }
 
 /**
@@ -283,33 +359,77 @@ function TrendPane({ data }: { data: ProjectOverview }) {
 
   // echarts 用 selectedMap 控制每条线的可见性;未选中的线以灰色绘制,
   // 让"被过滤掉"和"被保留"的视觉对比明显。
+  // v3.7:面积填充关闭(避免 7+ 层 6% 透明叠加的灰紫雾)、线宽 1.75、描点 5。
+  // 末端标签按"所有线"的真实末点整体算布局(用户切 chip 选中不会跳),
+  // 已关闭的 chip 标签也保留但染灰,用户取消勾选后还能在右侧看到位置提示。
+  const endLayouts = computeEndLabelLayouts(data.trend);
   const series: echarts.EChartsOption["series"] = data.trend.map((s, i) => {
     const color = platformColor(s.platform, i);
+    const ink = platformInkColor(s.platform, i);
     const isOn = selected.has(s.platform);
+    const layout = endLayouts[i];
+    const lastIdx = s.data.length - 1;
     return {
       name: platformLabel(s.platform),
       type: "line" as const,
       smooth: true,
       symbol: "circle",
-      symbolSize: 6,
+      symbolSize: 5,
       data: s.data,
       itemStyle: isOn
-        ? { color, borderColor: "#fff", borderWidth: 2 }
-        : { color: "#cfd4dc", borderColor: "#fff", borderWidth: 2 },
+        ? { color, borderColor: "#fff", borderWidth: 1.5 }
+        : { color: "#cfd4dc", borderColor: "#fff", borderWidth: 1.5 },
       lineStyle: {
         color: isOn ? color : "#cfd4dc",
-        width: 2,
+        width: 1.75,
         type: isOn ? "solid" : "dashed",
       },
-      areaStyle: isOn
-        ? { color, opacity: 0.08 }
-        : { color: "transparent" },
+      areaStyle: { color: "transparent" },
+      showSymbol: false,
+      // 末端标签:markPoint.symbol='none' + label-only(echarts 没有原生 line.endLabelData)。
+      markPoint: {
+        symbol: "none",
+        animation: false,
+        silent: true,
+        label: {
+          show: true,
+          position: "right",
+          distance: 6,
+          color: isOn ? ink : "#c8ccd4",
+          fontSize: 11,
+          fontWeight: 500,
+          formatter: () => platformLabel(s.platform),
+        },
+        data: [{ name: s.platform, coord: [lastIdx, layout.displayY] }],
+      },
+      // 被避让算法挤开者补细引导线。
+      // echarts markLine 类型不收 {coord:[x,y]},改用 xAxis + yAxis 显式指定。
+      ...(layout.needsGuide
+        ? {
+            markLine: {
+              symbol: "none",
+              silent: true,
+              animation: false,
+              lineStyle: {
+                color: isOn ? color : "#cfd4dc",
+                type: "dashed",
+                width: 1,
+                opacity: 0.55,
+              },
+              label: { show: false },
+              data: [
+                { xAxis: lastIdx, yAxis: layout.realY },
+                { xAxis: lastIdx, yAxis: layout.displayY },
+              ],
+            },
+          }
+        : {}),
     };
   });
 
   const option = useMemo<echarts.EChartsOption>(
     () => ({
-      grid: { left: 50, right: 28, top: 24, bottom: 36 },
+      grid: { left: 50, right: 96, top: 24, bottom: 36 },
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "line", lineStyle: { color: "#d9d9d9" } },
@@ -425,7 +545,7 @@ function ModelPane({ data }: { data: ProjectOverview }) {
         data: reversed.map((i, idx) => ({
           value: Number(((i[key] as number) * 100).toFixed(1)),
           itemStyle: {
-            color: platformColor(i.platform, data.model_dimensions.length - 1 - idx),
+            color: softenColor(platformColor(i.platform, data.model_dimensions.length - 1 - idx)),
             borderRadius: 4,
           },
         })),
@@ -435,11 +555,18 @@ function ModelPane({ data }: { data: ProjectOverview }) {
           formatter: `{c}${suffix}`,
           fontSize: 12,
           fontWeight: 600,
-          color: "#4f4f4f",
+          // v3.7:多色 graphic 背景下用单色深中性灰 #39424f,与 RankingChart 同款,
+          // 避免 12px 文字落在 7+ 色 graphic 上对比度参差(<4.5)。
+          color: "#39424f",
         },
       },
     ],
   });
+
+  // 高度自适应:每行 22px(bar 14 + 间距 8)+ padding 32;最小 170 兜底。
+  // project 52 全量 16 行 → 16*22 + 32 = 384px,避免 13+ 行时被裁。
+  // 2x2 grid 每行 2 个 panel,clamp 上限到 420 避免单格过高挤另一行。
+  const dimHeight = Math.min(420, Math.max(170, data.model_dimensions.length * 22 + 32));
 
   return (
     <div className="model-dim-grid">
@@ -451,7 +578,7 @@ function ModelPane({ data }: { data: ProjectOverview }) {
           </div>
         </div>
         <div className="panel-body">
-          <EChart option={makeOption("mention_rate", "%")} className="chart-dim" />
+          <EChart option={makeOption("mention_rate", "%")} className="chart-dim" height={dimHeight} />
         </div>
       </div>
       <div className="panel">
@@ -462,7 +589,7 @@ function ModelPane({ data }: { data: ProjectOverview }) {
           </div>
         </div>
         <div className="panel-body">
-          <EChart option={makeOption("top1_rate", "%")} className="chart-dim" />
+          <EChart option={makeOption("top1_rate", "%")} className="chart-dim" height={dimHeight} />
         </div>
       </div>
       <div className="panel">
@@ -473,7 +600,7 @@ function ModelPane({ data }: { data: ProjectOverview }) {
           </div>
         </div>
         <div className="panel-body">
-          <EChart option={makeOption("top2_rate", "%")} className="chart-dim" />
+          <EChart option={makeOption("top2_rate", "%")} className="chart-dim" height={dimHeight} />
         </div>
       </div>
       <div className="panel">
@@ -484,7 +611,7 @@ function ModelPane({ data }: { data: ProjectOverview }) {
           </div>
         </div>
         <div className="panel-body">
-          <EChart option={makeOption("top3_rate", "%")} className="chart-dim" />
+          <EChart option={makeOption("top3_rate", "%")} className="chart-dim" height={dimHeight} />
         </div>
       </div>
     </div>
@@ -575,9 +702,12 @@ function Sparkline({ data }: { data: number[] }) {
  * ---------------------------------------------------------------------- */
 
 function TrendChart({ data }: { data: ProjectOverview }) {
+  // v3.7:末端标签防重叠 —— 16 条线全选时,真实末点会挤成一团,这里
+  // 给每条线算一个「避让后的 y」用于 markPoint 定位,被挤开者补 markLine 引导线。
+  const endLayouts = computeEndLabelLayouts(data.trend);
   const option = useMemo<echarts.EChartsOption>(
     () => ({
-      grid: { left: 44, right: 20, top: 16, bottom: 30 },
+      grid: { left: 44, right: 92, top: 16, bottom: 30 },
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "line", lineStyle: { color: "#d9d9d9" } },
@@ -597,20 +727,60 @@ function TrendChart({ data }: { data: ProjectOverview }) {
       },
       series: data.trend.map((s, i) => {
         const color = platformColor(s.platform, i);
+        const ink = platformInkColor(s.platform, i);
+        const layout = endLayouts[i];
+        const lastIdx = s.data.length - 1;
         return {
           name: platformLabel(s.platform),
           type: "line" as const,
           smooth: true,
           symbol: "circle",
-          symbolSize: 6,
+          symbolSize: 5,
           data: s.data,
-          itemStyle: { color, borderColor: "#fff", borderWidth: 2 },
-          lineStyle: { color, width: 2 },
-          areaStyle: { color, opacity: 0.06 },
+          itemStyle: { color, borderColor: "#fff", borderWidth: 1.5 },
+          lineStyle: { color, width: 1.75 },
+          // v3.7:关闭面积填充(7+ 层 6% 透明叠加产生灰紫雾);
+          // 描点隐藏(全量 16 条时 r=5 圆点会盖住线);hover 时 echarts 自动恢复。
+          areaStyle: { color: "transparent" },
+          showSymbol: false,
+          // 末端标签(模型名):用 markPoint.symbol='none' + label-only 替代
+          //  echarts 不存在的 line.endLabelData,coord[1] 取「避让后的 y」做防重叠。
+          markPoint: {
+            symbol: "none",
+            animation: false,
+            silent: true,
+            label: {
+              show: true,
+              position: "right",
+              distance: 6,
+              color: ink,
+              fontSize: 11,
+              fontWeight: 500,
+              formatter: () => platformLabel(s.platform),
+            },
+            data: [{ name: s.platform, coord: [lastIdx, layout.displayY] }],
+          },
+          // 被避让算法挤开者补细引导线(真实末点 → 标签落点)。
+          // echarts markLine 类型不收 {coord:[x,y]},改用 xAxis + yAxis 显式指定。
+          ...(layout.needsGuide
+            ? {
+                markLine: {
+                  symbol: "none",
+                  silent: true,
+                  animation: false,
+                  lineStyle: { color, type: "dashed", width: 1, opacity: 0.55 },
+                  label: { show: false },
+                  data: [
+                    { xAxis: lastIdx, yAxis: layout.realY },
+                    { xAxis: lastIdx, yAxis: layout.displayY },
+                  ],
+                },
+              }
+            : {}),
         };
       }),
     }),
-    [data],
+    [data, endLayouts],
   );
   if (data.trend.length === 0) {
     return (
@@ -658,17 +828,25 @@ function RankingChart({ data }: { data: ProjectOverview }) {
           data: items.map((i, idx) => ({
             value: Number((i.top1_rate * 100).toFixed(1)),
             itemStyle: {
-              color: platformColor(i.platform, data.ranking.length - 1 - idx),
+              color: softenColor(platformColor(i.platform, data.ranking.length - 1 - idx)),
               borderRadius: 4,
             },
           })),
+          // v3.7:数值标签颜色 — 多色 graphic 背景下,用单色深中性灰 #39424f
+          // (与 doc chart-top1-ranking 同款)更稳,任意色相对比度均 ≥4.5。
+          // 若用 ink 色,得给每行挂 rich text,且 echarts rich.color 不接受 callback,
+          // 故统一 #39424f,与 ModelPane 柱状图保持一致。
           label: {
             show: true,
             position: "right",
-            formatter: "{c}%",
+            formatter: (p) => {
+              const one = Array.isArray(p) ? p[0] : p;
+              const i = items[one.dataIndex as number];
+              return `${(i.top1_rate * 100).toFixed(1)}%`;
+            },
             fontSize: 12,
             fontWeight: 600,
-            color: "#4f4f4f",
+            color: "#39424f",
           },
         },
       ],
@@ -683,7 +861,10 @@ function RankingChart({ data }: { data: ProjectOverview }) {
       />
     );
   }
-  return <EChart option={option} height={280} />;
+  // 高度自适应:每行 22px(bar 14 + 间距 8)+ padding 32;最小 280 兜底。
+  // project 52 全量 16 行 → 16*22 + 32 = 384px,避免 13+ 行时被裁。
+  const height = Math.max(280, data.ranking.length * 22 + 32);
+  return <EChart option={option} height={height} />;
 }
 
 /* -------------------------------------------------------------------------
@@ -782,20 +963,20 @@ const OVERVIEW_CSS = `
   color: #fff;
 }
 .overview-tab .kpi-card.kpi-primary {
-  background: linear-gradient(135deg, var(--brand-blue), var(--brand-blue-light));
+  background: linear-gradient(135deg, #324e86, #3f63ab);
 }
 .overview-tab .kpi-card.kpi-green {
-  background: linear-gradient(135deg, #52c41a, #73d13d);
+  background: linear-gradient(135deg, #2b6951, #358265);
 }
 .overview-tab .kpi-card.kpi-cyan {
-  background: linear-gradient(135deg, #13c2c2, #36cfc9);
+  background: linear-gradient(135deg, #2e6776, #387e8f);
 }
 .overview-tab .kpi-card.kpi-purple {
-  background: linear-gradient(135deg, #722ed1, #9254de);
+  background: linear-gradient(135deg, #5c3984, #7749ab);
 }
 .overview-tab .kpi-card .kpi-label {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.95);
   margin-bottom: 6px;
   position: relative;
   z-index: 1;
@@ -816,7 +997,7 @@ const OVERVIEW_CSS = `
 }
 .overview-tab .kpi-card .kpi-trend {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.95);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -831,7 +1012,7 @@ const OVERVIEW_CSS = `
 /* KPI-meta 双行(总提问 + 分子/分母);更新版UI 里 .kpi-meta 位于趋势行下方 */
 .overview-tab .kpi-meta {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.78);
+  color: rgba(255, 255, 255, 0.88);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -849,7 +1030,7 @@ const OVERVIEW_CSS = `
   right: 0;
   width: 140px;
   height: 50px;
-  opacity: 0.45;
+  opacity: 0.4;
   pointer-events: none;
 }
 
@@ -944,9 +1125,9 @@ const OVERVIEW_CSS = `
   .overview-tab .model-dim-grid { grid-template-columns: 1fr; }
 }
 .overview-tab .chart-dim {
-  /* 模型维度是 2×2 网格:每行高 = (可用 - 16 gap) / 2
-     目标: 视口 900 → 220,视口 768 → 170(给底部留 60+px 缓冲,避免贴底出现滚动条)
-     公式: clamp(170, 50vh - 230, 220) */
-  height: clamp(170px, calc(50vh - 230px), 220px);
+  /* 模型维度 2×2 子图高度由 JS 计算(max(170, N*22+32),上限 420),
+     inline style 会覆盖此 CSS。仅作为 fallback。
+     目标:project 52 全量 16 行(16*22+32=384)不被裁。 */
+  min-height: 170px;
 }
 `;

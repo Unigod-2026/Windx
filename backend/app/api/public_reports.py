@@ -9,12 +9,12 @@ creation (see ``_generate_unique_share_token``).
 Authentication-free by design:
 - The /api/public/* path prefix is **not** behind ``get_current_user``;
   no JWT required.
-- The endpoint will not leak any metadata beyond what the public
-  preview needs (title, scope, generated_by, generated_at, snapshot).
-  Tenant scope clauses and report list are NOT exposed here.
-- The companion ``/api/reports/{id}/html`` download path stays
-  behind auth — downloading the file is not the same as previewing
-  the report, and download-tracking is out of scope for MVP.
+- 只在 ``is_published=True`` 时返回内容:未发布的周报需要登录后通过
+  auth-gated 路径(/api/reports/{id}) 查看 / 编辑。
+- 服务预渲染的静态 HTML —— public 端不做 snapshot 重算,避免每次访问
+  都重跑全套 mention / 引用聚合(几秒级开销)。
+  HTML 在 ``POST /api/reports/{id}/publish`` 时由后端
+  ``render_html`` + 写盘生成;取消发布会删除磁盘文件。
 
 Why a separate router (not a path on the existing ``reports`` router):
 the existing router uses ``Depends(get_current_user)`` per-endpoint;
@@ -27,113 +27,56 @@ under ``/api/reports/*`` require auth.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.project import Project
 from app.models.report import Report as ReportRow
-from app.schemas.report import ReportSnapshotOut
-from app.services import report_templates
-from app.services.report_overrides import merge_overrides
 
 router = APIRouter(tags=["public-reports"])
 
 
-@router.get("/api/public/reports/{share_token}", response_model=ReportSnapshotOut)
-def get_public_report_snapshot(
+# backend/app/api/public_reports.py → backend/...
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+@router.get(
+    "/api/public/reports/{share_token}",
+    response_class=HTMLResponse,
+    responses={404: {"description": "token unknown or report unpublished"}},
+)
+def get_public_report_html(
     share_token: str,
     db: Session = Depends(get_db),
-):
-    """Public preview endpoint — anyone with the token can read.
+) -> HTMLResponse:
+    """Public preview endpoint — anyone with the token can read。
 
-    Behavior:
-    - Token lookup is exact-match against ``geo_reports.share_token``,
-      which has a UNIQUE constraint (B+tree lookup is O(log n)).
-    - Returns the same ``ReportSnapshotOut`` shape as the auth-gated
-      ``GET /api/reports/{report_id}`` so the frontend can render both
-      paths from the same component.
-    - Does **not** create any session / cookie. Pure read.
-    - Returns 404 (not 403) on missing token — leaking "token
-      exists or not" via 403 would weaken the URL-only access model
-      and isn't useful to the legitimate user anyway.
-
-    The token lookup is by primary key-equivalent index, not a
-    sequential scan, so this endpoint's cost is constant in the
-    number of reports.
+    行为契约:
+      - token 找不到或 ``is_published=False`` → 404(两个统一 404,避免泄漏
+        「token 存在但未发布」的中间态)。
+      - token 命中 + 已发布 → 返回预渲染的 HTML 文本(``text/html``)。
+      - HTML 文件缺失(发布失败 / 文件被人删)→ 503,提示重新发布。
+        这两类都不应出现在 happy path —— publish 路径会保证文件就位。
     """
     row = db.query(ReportRow).filter(ReportRow.share_token == share_token).first()
-    if row is None:
+    if row is None or not row.is_published:
         raise HTTPException(status_code=404, detail="report not found")
 
-    project = db.get(Project, row.project_id)
-    if project is None:
-        # Project was deleted but the report row remains (CLAUDE.md
-        # "外键约定" — no cascade). Surfacing a 410 lets the public
-        # page show "this report's project is gone" rather than
-        # returning 500 from a null Project.
-        raise HTTPException(status_code=410, detail="project deleted")
+    if not row.file_path:
+        # 边缘情况:row 创建过 + 走过 publish 路径但 file_path 为空
+        # ——publish 路径应该已经写盘了,这里兜底 503 而不是给个空页面
+        raise HTTPException(status_code=503, detail="html not generated")
+    html_path = _BACKEND_ROOT / row.file_path
+    if not html_path.exists():
+        raise HTTPException(status_code=503, detail="html file missing")
 
-    days = (row.period_end - row.period_start).days + 1
-    try:
-        template_fn = report_templates.get(row.template_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=410, detail=str(exc)) from exc
-
-    # Same re-run-with-no-filter logic as the auth-gated snapshot
-    # endpoint — historical reports don't store raw filter values.
-    # We fabricate a stand-in ``AdminUser`` since the template body
-    # only uses ``generated_by`` for a string display; we patch it
-    # below with the row's actual generator name so the public page
-    # never sees a fake user.
-    class _StubUser:
-        display_name = ""
-
-    ctx = report_templates.BuildContext(
-        db=db,
-        project=project,
-        period_start=row.period_start,
-        period_end_exclusive=row.period_end + timedelta(days=1),
-        previous_start=row.period_start - timedelta(days=days),
-        previous_end_exclusive=row.period_start,
-        baseline_date=row.baseline_date,
-        baseline_rate=row.baseline_rate,
-        generated_by=_StubUser(),
-        generated_at=row.created_at,
-        prompts=None,
-        platform_codes=None,
-    )
-    snapshot = template_fn(ctx)
-    snapshot["generated_by"] = row.generated_by_name
-    snapshot["generated_at"] = row.created_at.strftime("%Y-%m-%d %H:%M:%S")
-    merge_overrides(snapshot, row.manual_overrides or {})
-
-    # Build a minimal ReportMeta inline so we don't depend on
-    # get_current_user for the user field. (We need user_id to be a
-    # string here for type-compat, but ReportMeta expects int — we
-    # pass the actual row values.)
-    from app.schemas.report import ReportMeta
-
-    return ReportSnapshotOut(
-        meta=ReportMeta(
-            id=row.id,
-            project_id=row.project_id,
-            template_id=row.template_id,
-            title=row.title,
-            manual_overrides=row.manual_overrides or {},
-            is_published=row.is_published,
-            scope_text=row.scope_text,
-            share_token=row.share_token,
-            period_start=row.period_start,
-            period_end=row.period_end,
-            baseline_date=row.baseline_date,
-            baseline_rate=row.baseline_rate,
-            generated_by_id=row.generated_by_id,
-            generated_by_name=row.generated_by_name,
-            generated_at=row.created_at,
-        ),
-        template_id=row.template_id,
-        snapshot=snapshot,
+    # ``no-store`` 强制浏览器每次重新拉,不让任何中间层(浏览器 disk
+    # cache / CDN / 代理)缓存住上一版的周报 HTML —— publish 会覆盖
+    # 同一文件路径,运营期望「点完发布,链接打开就是新版」。
+    return HTMLResponse(
+        content=html_path.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store"},
     )

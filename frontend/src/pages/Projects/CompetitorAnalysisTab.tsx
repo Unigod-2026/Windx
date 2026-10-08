@@ -100,13 +100,6 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
           gap: 16px;
           padding: 12px 0;
         }
-        .diff-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 16px;
-          padding: 12px 0;
-        }
-        .diff-grid > .panel-wide { grid-column: span 2; }
         .panel {
           background: #fff;
           border: 1px solid var(--border-light, #f0f0f0);
@@ -137,15 +130,6 @@ export default function CompetitorAnalysisTab({ projectId }: Props) {
           color: var(--text-tertiary);
         }
         .panel-body { padding: 16px 18px; }
-        .diff-legend-hint {
-          margin-left: 8px;
-          padding: 2px 8px;
-          font-size: 11px;
-          color: var(--text-tertiary);
-          background: var(--bg-page, #fafafa);
-          border-radius: 999px;
-          border: 1px solid var(--border-light, #f0f0f0);
-        }
         .data-table {
           width: 100%;
           border-collapse: collapse;
