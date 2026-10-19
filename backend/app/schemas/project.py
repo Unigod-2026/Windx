@@ -1563,6 +1563,60 @@ class OwnArticleListOut(BaseModel):
     total: int
 
 
+class PromptMentionPlatformCell(BaseModel):
+    """per-prompt × per-platform 的本期 own-article 命中状态 cell。
+
+    - ``cited`` 本期段内,该项目至少一条自有文章被该模型在响应中引用过。
+    - ``trend_up`` / ``trend_down`` 较基期(period_c)的 gain/loss 标记,
+      两个同时为 False 表示基期与本期一致(无变化),不展示箭头。
+    """
+
+    cited: bool
+    trend_up: bool = False
+    trend_down: bool = False
+
+
+class PromptMentionRowOut(BaseModel):
+    """per-prompt 一行矩阵数据。
+
+    - ``prompt_id`` / ``prompt`` / ``category`` 直接来自 ``geo_project_prompts``。
+    - ``platform_cells`` 键为 platform_code,顺序与 :data:`ProjectPlatform.row_key` 一致。
+    - ``cur_count`` 等三个 ``*_count`` 是「当前项目配置的 6 个模型中,
+      own-article 命中的平台数」 —— 与前端展示「N/6」对齐。
+    - ``delta_prev_pct`` / ``delta_base_pct`` 是本期提及率 - 对照期提及率,
+      以百分比形式(2 位小数)返回,正数 = 增加。
+    """
+
+    prompt_id: int
+    prompt: str
+    category: str | None = None
+    platform_cells: dict[str, PromptMentionPlatformCell] = {}
+    cur_count: int = 0
+    prev_count: int = 0
+    base_count: int = 0
+    cur_oa_subtask_count: int = 0
+    cur_oa_models_involved: list[str] = []
+    delta_prev_pct: float = 0.0
+    delta_base_pct: float = 0.0
+
+
+class PromptMentionStatsOut(BaseModel):
+    """GET /projects/{id}/own-articles/by-prompt 响应。
+
+    - ``platform_columns`` 是 column 渲染顺序,键为 platform_code,值为
+      (label, color) —— 前端按这个顺序铺列,跟 image1 的 「文心 / DS /
+      豆包 / Kimi / 千问 / 元宝」视觉对应。
+    - ``rows`` 一个 prompt 一项,按 ``category`` (大词 / 中间决策词 / 小词)
+      排序后按 ``prompt_id`` 升序。
+    """
+
+    platform_columns: list[str]
+    rows: list[PromptMentionRowOut]
+    period_a: dict  # {start, end}
+    period_b: dict
+    period_c: dict
+
+
 class OwnArticleInvalidRow(BaseModel):
     """xlsx 解析失败的行 —— preview 阶段展示,实际不入库。"""
     row: int
@@ -1597,3 +1651,59 @@ class OwnArticleImportResult(BaseModel):
     updated: int
     skipped: int
     total_in_project: int
+
+
+# ----------------------------------------------------------------------
+# 信源偏好媒体(独立 sub-tab:跨期变化 + 稳定性)
+# ----------------------------------------------------------------------
+
+
+class SourceMediaItem(BaseModel):
+    """按 ``geo_media_dictionary.media_name`` 聚合的单条信源偏好媒体。
+
+    同一媒体名下,不同 URL 的引用次数合并;「期」以
+    :class:`ScheduleRun` 一次执行为 1 期 —— 不按 ISO 周切,与项目实际
+    监控节奏(每天 / 每 5 天 / 手动触发的频次)一致。
+
+    字段语义:
+    - ``media_name``:从 ``geo_media_dictionary`` 查到的标准化媒体名;若
+      URL host 未命中字典,回退到 ``reference_list_json.site``(再回退
+      到 url host),保持显示稳定。
+    - ``category``:字典里的分类(如「官方网站 / 自媒体」);未命中字典
+      时为 ``None``,前端展示灰态「未收录」。
+    - ``host``:字典里该 media_name 的代表 host(取字典里第一条 hit 的
+      host;同一 media_name 可能挂在多 host,但字典里一个 host 一行,
+      所以反查时是确定的);用于前端点击跳转 sample_url。
+    - ``model_counts``:per-compound-key(``qianwen__web__fast`` 这种)的
+      引用次数,给表头那 6 个 per-model 列直接渲染。
+    - ``platforms``:覆盖的 compound key 列表(去重,排序)。
+    - ``period_count`` / ``period_total``:出现期数 / 总期数。「期」口径
+      见 :func:`compute_source_media`。
+    - ``period_coverage``:覆盖率 = period_count / period_total,百分比。
+    - ``max_consecutive_periods``:最长连续期数(连续多次监控都被引用
+      的最大长度)。
+    """
+    media_name: str
+    host: str | None
+    category: str | None
+    sample_url: str
+    sample_title: str | None
+    count: int
+    platforms: list[str]
+    model_counts: dict[str, int]
+    first_seen: datetime
+    last_seen: datetime
+    period_count: int
+    period_total: int
+    period_coverage: float
+    max_consecutive_periods: int
+
+
+class SourceMediaOut(BaseModel):
+    """信源偏好媒体 sub-tab 响应 —— 与 ``SourcePreferenceOut`` 同一窗口
+    口径,数据按 media_name 聚合 + 周期统计。"""
+    project_id: int
+    start: date
+    end: date
+    days: int
+    items: list[SourceMediaItem]

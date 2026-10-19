@@ -1247,6 +1247,46 @@ export interface SourceSelfOut {
   suggestions: SourceSuggestion[];
 }
 
+/** 信源偏好媒体 sub-tab —— 按 ``geo_media_dictionary.media_name`` 聚合,
+ *  跨期变化 + 稳定性 + per-model counts。「期」按后端 schedule run 算
+ *  (一次 run = 1 期,success 状态才计入)。 */
+export interface SourceMediaItem {
+  /** 从 ``geo_media_dictionary`` 查到的标准化媒体名;字典未命中时回退
+   *  到 ``reference_list_json.site`` 或 url host。 */
+  media_name: string;
+  /** 字典命中时的代表 host(字典表 host UNIQUE,反查确定);
+   *  字典未命中时为 None,展示时降级到 sample_url。 */
+  host: string | null;
+  /** 字典里的分类(如「官方网站 / 自媒体」);未命中字典时为 None。 */
+  category: string | null;
+  sample_url: string;
+  sample_title: string | null;
+  /** 窗口内该 media_name 的总引用次数(跨平台合并)。 */
+  count: number;
+  /** 覆盖的 compound key 列表(去重排序,例如 ``["doubao__web__fast", "kimi__web__fast"]``)。 */
+  platforms: string[];
+  /** 每个 compound key 的引用次数,给表格右侧 per-model counts 列直接渲染。 */
+  model_counts: Record<string, number>;
+  first_seen: string;
+  last_seen: string;
+  /** 该 media_name 在窗口内被引用过的 SUCCESS run 次数。 */
+  period_count: number;
+  /** 窗口内的 SUCCESS run 总数(分母)。 */
+  period_total: number;
+  /** = period_count / period_total,后端四舍五入到 4 位小数。 */
+  period_coverage: number;
+  /** 最长连续期数(连续多次监控都被引用的最大长度)。 */
+  max_consecutive_periods: number;
+}
+
+export interface SourceMediaOut {
+  project_id: number;
+  start: string;
+  end: string;
+  days: number;
+  items: SourceMediaItem[];
+}
+
 /** 跟 :func:`getQuestionSummary` 同款日期范围参数对象 —— ``days`` 是默认预设;
  *  ``start``/``end``(inclusive YYYY-MM-DD)优先,对应 toolbar 「自定义」窗口。
  *  ``models``(逗号分隔的 compound key 列表)跟 GlobalToolbar dropdown 选中态
@@ -1265,6 +1305,36 @@ export function getSourcePreferences(
   return client
     .get<SourcePreferenceOut>(
       `/projects/${projectId}/source-preferences`,
+      {
+        params: {
+          days,
+          start,
+          end,
+          ...(models && models.length ? { models: models.join(",") } : {}),
+          ...(prompts && prompts.length ? { prompts: prompts.join(",") } : {}),
+        },
+      },
+    )
+    .then((r) => r.data);
+}
+
+/** 信源偏好媒体 sub-tab —— 按 ``geo_media_dictionary.media_name`` 聚合,
+ *  跨期变化 + 稳定性 + per-model counts。参数口径与 ``getSourcePreferences``
+ *  完全一致(toolbar 共用,筛选语义一致)。 */
+export function getSourceMedia(
+  projectId: number,
+  params: {
+    days?: number;
+    start?: string;
+    end?: string;
+    models?: string[] | null;
+    prompts?: number[] | null;
+  } = {},
+): Promise<SourceMediaOut> {
+  const { days, start, end, models, prompts } = params;
+  return client
+    .get<SourceMediaOut>(
+      `/projects/${projectId}/source-media`,
       {
         params: {
           days,
@@ -1497,6 +1567,59 @@ export function deleteOwnArticle(
   articleId: number,
 ): Promise<void> {
   return client.delete<void>(`/projects/${projectId}/own-articles/${articleId}`).then(() => undefined);
+}
+
+// ------------------------------------------------------------------
+// 「自由文章提及状况」子 tab —— per-prompt × per-period 矩阵
+// ------------------------------------------------------------------
+
+export interface PromptMentionPlatformCell {
+  cited: boolean;
+  trend_up: boolean;
+  trend_down: boolean;
+}
+
+export interface PromptMentionRow {
+  prompt_id: number;
+  prompt: string;
+  category: string | null;
+  platform_cells: Record<string, PromptMentionPlatformCell>;
+  cur_count: number;
+  prev_count: number;
+  base_count: number;
+  cur_oa_subtask_count: number;
+  cur_oa_models_involved: string[];
+  delta_prev_pct: number;
+  delta_base_pct: number;
+}
+
+export interface PromptMentionPeriodMeta {
+  start: string;  // YYYY-MM-DD
+  end: string;
+}
+
+export interface PromptMentionStatsOut {
+  platform_columns: string[];
+  rows: PromptMentionRow[];
+  period_a: PromptMentionPeriodMeta;
+  period_b: PromptMentionPeriodMeta;
+  period_c: PromptMentionPeriodMeta;
+}
+
+export function getOwnArticlesByPrompt(
+  projectId: number,
+  params: {
+    start_a: string; end_a: string;
+    start_b: string; end_b: string;
+    start_c: string; end_c: string;
+  },
+): Promise<PromptMentionStatsOut> {
+  return client
+    .get<PromptMentionStatsOut>(
+      `/projects/${projectId}/own-articles/by-prompt`,
+      { params },
+    )
+    .then((r) => r.data);
 }
 
 // ------------------------------------------------------------------

@@ -13,13 +13,19 @@ import re
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.models.common import now_local
+from app.models.media_dictionary import MediaDictionary
+from app.models.enums import RunStatus
+from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.schemas.project import (
     SourceByModelTop,
     SourceDetailItem,
     SourceDetailOut,
+    SourceMediaItem,
+    SourceMediaOut,
     SourceMediaTop,
     SourcePreferenceItem,
     SourcePreferenceKpi,
@@ -1247,3 +1253,274 @@ def _classify_host(host: str) -> str:
             if n in h:
                 return type_name
     return "其他"
+
+
+# ----------------------------------------------------------------------
+# 信源偏好媒体 sub-tab:按 media_name 聚合 + 周期统计
+# ----------------------------------------------------------------------
+
+# 与 ``_fetch_source_rows`` 同口径(同 toolbar 筛选、同窗口解析),但额外
+# 取 ``Task.schedule_run_id`` —— 「期」按 ScheduleRun 算,每条 Subtask 必须
+# 能反查到所属 run 才能计入 period_count。
+def _fetch_subtask_rows_with_run(
+    *, db,
+    win_start_dt: datetime,
+    win_end_dt: datetime,
+    project_id: int,
+    selected_platforms: list[str] | None,
+    selected_prompt_texts: list[str] | None,
+) -> list:
+    """返回 (subtask_id, platform, mode, refs, prompt, created_at, schedule_run_id) 元组列表。
+    schedule_run_id 可能为 None(manual ad-hoc Task 没有对应 run)—— 不计入 period。"""
+    stmt = (
+        select(
+            Subtask.subtask_id,
+            Subtask.platform,
+            Subtask.mode,
+            Subtask.reference_list_json,
+            Subtask.prompt,
+            Task.created_local_at,
+            Task.schedule_run_id,
+        )
+        .join(Task, Task.task_id == Subtask.task_id)
+        .where(
+            Task.project_id == project_id,
+            Task.created_local_at >= win_start_dt,
+            Task.created_local_at <= win_end_dt,
+        )
+    )
+    if selected_prompt_texts is not None:
+        stmt = stmt.where(Subtask.prompt.in_(selected_prompt_texts))
+    if selected_platforms is not None:
+        platform_codes = _expand_platform_keys(selected_platforms)
+        if platform_codes:
+            stmt = stmt.where(Subtask.platform.in_(platform_codes))
+    rows = db.execute(stmt).all()
+    if selected_platforms is not None:
+        selected_compound_keys = set(selected_platforms)
+        rows = [
+            r for r in rows
+            if _compound_platform(r[1], r[2]) in selected_compound_keys
+        ]
+    return rows
+
+
+def compute_source_media(
+    *, db, project_id: int,
+    days: int = 15,
+    start: date | None = None,
+    end: date | None = None,
+    selected_platforms: list[str] | None = None,
+    selected_prompt_texts: list[str] | None = None,
+) -> "SourceMediaOut":
+    """信源偏好媒体 sub-tab —— 按 ``geo_media_dictionary.media_name`` 聚合,
+    跨期变化 + 稳定性分析。
+
+    「期」口径:**一次 schedule run = 1 期**。同项目同窗口下,取 ``status=SUCCESS``
+    的 ``ScheduleRun`` 集合作为 ``period_total``。失败 / QUEUED / RUNNING
+    的 run 不计入 —— 它们没有完整 reference_list_json,统计没有意义。
+
+    ``period_count`` / ``max_consecutive_periods`` 同样基于 SUCCESS run 集合。
+    某条 Subtask 若 ``Task.schedule_run_id`` 为 None(手工 ad-hoc 创建),
+    它的引用不计入任何 run 的 period,但仍计入 ``count`` / ``platforms`` /
+    ``first_seen`` / ``last_seen`` 这些「窗口内事实」字段 —— 否则「总引用
+    次数」会和 toolbar 的引用数据不一致。
+
+    媒体名解析优先级:
+      1. ``geo_media_dictionary`` 匹配(URL host → 字典 hit)→ 用 ``media_name``
+      2. 回退 ``reference_list_json.site``(中文显示名)
+      3. 再回退 URL host
+      4. 最后兜底 URL 原文(避免空 key)
+    """
+    win_start, win_end = _resolve_window(days, start, end)
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+
+    # 1. SUCCESS run 集合(按 triggered_at asc,「最长连续」统计依赖排序)
+    runs = db.execute(
+        select(ScheduleRun)
+        .where(
+            ScheduleRun.project_id == project_id,
+            ScheduleRun.triggered_at >= win_start_dt,
+            ScheduleRun.triggered_at <= win_end_dt,
+            ScheduleRun.status == RunStatus.SUCCESS,
+        )
+        .order_by(ScheduleRun.triggered_at.asc())
+    ).scalars().all()
+    period_total = len(runs)
+
+    # 2. 拉 subtask 行(含 schedule_run_id)
+    rows = _fetch_subtask_rows_with_run(
+        db=db,
+        win_start_dt=win_start_dt,
+        win_end_dt=win_end_dt,
+        project_id=project_id,
+        selected_platforms=selected_platforms,
+        selected_prompt_texts=selected_prompt_texts,
+    )
+
+    # 3. 收集窗口内所有 host → 反查字典
+    hosts: set[str] = set()
+    for _subtask_id, _platform, _mode, refs, _prompt, _created_at, _run_id in rows:
+        if not isinstance(refs, list) or not refs:
+            continue
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or item.get("link") or ""
+            if not isinstance(url, str):
+                continue
+            url = url.strip()
+            if not url:
+                continue
+            h = _host_for("", url)
+            if h:
+                hosts.add(h)
+
+    dict_map: dict[str, tuple[str, str | None]] = {}
+    if hosts:
+        dict_rows = db.execute(
+            select(
+                MediaDictionary.host,
+                MediaDictionary.media_name,
+                MediaDictionary.category,
+            ).where(MediaDictionary.host.in_(hosts))
+        ).all()
+        for h, mn, cat in dict_rows:
+            dict_map[h] = (mn, cat)
+
+    # 4. 按 media_name 聚合
+    agg: dict[str, dict] = {}
+
+    for _subtask_id, platform, mode, refs, _prompt, created_at, _run_id in rows:
+        if not isinstance(refs, list) or not refs:
+            continue
+        plat_key = _compound_platform(platform, mode)
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or item.get("link") or ""
+            if not isinstance(url, str):
+                continue
+            url = url.strip()
+            if not url:
+                continue
+            site = item.get("site") or ""
+            if not isinstance(site, str):
+                site = ""
+            title = item.get("title") or ""
+            if not isinstance(title, str):
+                title = ""
+
+            host = _host_for("", url)
+            dict_hit = dict_map.get(host)
+            if dict_hit:
+                media_name, category = dict_hit
+            else:
+                media_name = site or host or url
+                category = None
+            if not media_name:
+                continue
+
+            slot = agg.get(media_name)
+            if slot is None:
+                slot = {
+                    "count": 0,
+                    "platforms": set(),
+                    "model_counts": {},
+                    "first_seen": created_at,
+                    "last_seen": created_at,
+                    "sample_url": url,
+                    "sample_title": title or None,
+                    "category": category,
+                    "host": host or None,
+                }
+                agg[media_name] = slot
+            slot["count"] += 1
+            slot["platforms"].add(plat_key)
+            slot["model_counts"][plat_key] = slot["model_counts"].get(plat_key, 0) + 1
+            if created_at is not None:
+                if created_at < slot["first_seen"]:
+                    slot["first_seen"] = created_at
+                    # sample 跟首次出现同步 —— 早期 sample 更有信息量
+                    slot["sample_url"] = url
+                    slot["sample_title"] = title or None
+                if created_at > slot["last_seen"]:
+                    slot["last_seen"] = created_at
+
+    # 5. 周期统计:遍历 SUCCESS run,统计每个 run 引用了哪些 media_name
+    run_media_sets: dict[int, set[str]] = {r.id: set() for r in runs}
+    for _subtask_id, _platform, _mode, refs, _prompt, _created_at, run_id in rows:
+        if run_id is None or run_id not in run_media_sets:
+            continue
+        if not isinstance(refs, list) or not refs:
+            continue
+        media_in_run = run_media_sets[run_id]
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or item.get("link") or ""
+            if not isinstance(url, str):
+                continue
+            url = url.strip()
+            if not url:
+                continue
+            site = item.get("site") or ""
+            if not isinstance(site, str):
+                site = ""
+            host = _host_for("", url)
+            dict_hit = dict_map.get(host)
+            if dict_hit:
+                mn = dict_hit[0]
+            else:
+                mn = site or host or url
+            if mn:
+                media_in_run.add(mn)
+
+    # 6. 拼装 items
+    items: list[SourceMediaItem] = []
+    for media_name, slot in agg.items():
+        # 出现期数:该 media_name 在多少个 SUCCESS run 中至少被引用过 1 次
+        period_count = sum(
+            1 for media_set in run_media_sets.values() if media_name in media_set
+        )
+        # 最长连续期数:按 triggered_at 排序,扫一遍取最长 1 串
+        max_streak = 0
+        if period_total > 0:
+            current = 0
+            for run in runs:
+                if media_name in run_media_sets.get(run.id, set()):
+                    current += 1
+                    if current > max_streak:
+                        max_streak = current
+                else:
+                    current = 0
+        coverage = (period_count / period_total) if period_total > 0 else 0.0
+
+        items.append(SourceMediaItem(
+            media_name=media_name,
+            host=slot["host"],
+            category=slot["category"],
+            sample_url=slot["sample_url"],
+            sample_title=slot["sample_title"],
+            count=slot["count"],
+            platforms=sorted(slot["platforms"]),
+            model_counts=slot["model_counts"],
+            first_seen=slot["first_seen"],
+            last_seen=slot["last_seen"],
+            period_count=period_count,
+            period_total=period_total,
+            period_coverage=round(coverage, 4),
+            max_consecutive_periods=max_streak,
+        ))
+
+    # 按 count desc + last_seen desc 排序(与 source_preferences.top_sources 一致)
+    items.sort(key=lambda x: (-x.count, -int(x.last_seen.timestamp())))
+
+    return SourceMediaOut(
+        project_id=project_id,
+        start=win_start,
+        end=win_end,
+        days=(win_end - win_start).days + 1 if (start or end) else days,
+        items=items,
+    )

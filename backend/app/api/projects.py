@@ -65,12 +65,23 @@ from app.services.source_preferences import (
     _compound_platform,
     _expand_platform_keys,
     compute_source_detail,
+    compute_source_media,
     compute_source_preferences,
     compute_source_self,
     compute_source_video,
 )
 from app.services import own_articles
 from app.schemas.project import (
+    OwnArticleListOut,
+    OwnArticleImportPreview,
+    OwnArticleImportResult,
+    OwnArticleIn,
+    OwnArticleInvalidRow,
+    OwnArticleOut,
+    OwnArticleUpdate,
+    PromptMentionPlatformCell,
+    PromptMentionRowOut,
+    PromptMentionStatsOut,
     BrandMentionListOut,
     BrandMentionOut,
     BrandMentionSummary,
@@ -128,6 +139,8 @@ from app.schemas.project import (
     SourcePreferenceOut,
     SourceDetailItem,
     SourceDetailOut,
+    SourceMediaItem,
+    SourceMediaOut,
     SourceSelfItem,
     SourceSelfOut,
     SourceTrendDay,
@@ -3719,6 +3732,77 @@ def source_preferences(
 
 
 @router.get(
+    "/projects/{project_id}/source-media",
+    response_model=SourceMediaOut,
+)
+def source_media(
+    project_id: int,
+    days: int = 15,
+    start: date | None = Query(
+        None,
+        description=(
+            "自定义窗口起点(YYYY-MM-DD),与 ``end`` 同进同出,优先于 ``days``。"
+            "toolbar 「自定义」范围时使用。"
+        ),
+    ),
+    end: date | None = Query(
+        None,
+        description="自定义窗口终点(YYYY-MM-DD),与 ``start`` 同进同出。",
+    ),
+    models: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 compound platform 列表(如 qianwen__web__fast,baiduai__web__fast)。"
+            "省略时不做平台后过滤。"
+        ),
+    ),
+    prompts: str | None = Query(
+        None,
+        description=(
+            "逗号分隔的 ``ProjectPrompt.id`` 列表(全局工具栏 → 问题 筛选)。"
+            "空 / 缺省 = 不筛;空集合(全部 id 解析不到)显式返回 0 行。"
+        ),
+    ),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """信源偏好媒体 sub-tab —— 按 ``geo_media_dictionary.media_name`` 聚合,
+    跨期(每次 schedule run = 1 期)变化 + 稳定性 + per-model counts。
+
+    跟 :func:`source_preferences` 共用 toolbar 参数口径(days / start / end /
+    models / prompts),但聚合维度不同:
+      - source_preferences:按 unique URL 聚合
+      - source_media       :按 media_name 聚合(同字典名 / 同 site 多 URL 合并)
+
+    返回字段详见 :class:`SourceMediaItem`。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    selected = [m.strip() for m in (models or "").split(",") if m.strip()] or None
+
+    selected_prompt_texts: list[str] | None = None
+    pid_list = parse_prompt_ids_param(prompts)
+    if pid_list is not None:
+        text_rows = db.execute(
+            select(ProjectPrompt.prompt).where(
+                ProjectPrompt.project_id == project_id,
+                ProjectPrompt.id.in_(pid_list),
+            )
+        ).all()
+        selected_prompt_texts = [t for (t,) in text_rows]
+
+    try:
+        return compute_source_media(
+            db=db, project_id=project_id, days=days, start=start, end=end,
+            selected_platforms=selected,
+            selected_prompt_texts=selected_prompt_texts,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get(
     "/projects/{project_id}/source-detail",
     response_model=SourceDetailOut,
 )
@@ -4670,6 +4754,101 @@ def delete_own_article(
     db.delete(a)
     db.commit()
     return None
+
+
+@router.get(
+    "/projects/{project_id}/own-articles/by-prompt",
+    response_model=PromptMentionStatsOut,
+)
+def get_own_articles_by_prompt(
+    project_id: int,
+    start_a: date = Query(..., description="本期(默认本周一→今日)起始"),
+    end_a: date = Query(..., description="本期结束"),
+    start_b: date = Query(..., description="上期(默认上周一→上周日)起始"),
+    end_b: date = Query(..., description="上期结束"),
+    start_c: date = Query(..., description="基期(默认上上周一→上上周日)起始"),
+    end_c: date = Query(..., description="基期结束"),
+    db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
+):
+    """per-prompt × per-period own-article 命中矩阵。
+
+    与 ``list_own_articles`` 共享「project 自有文章 URL 归一化 ↔
+    subtasks.reference_list_json」的 join 口径,只是把视角从 article 翻成
+    prompt + period:每个 prompt 一行,展示「本期/上期/基期 该 prompt 命
+    中 own-article 的平台数」及 per-platform 的本期命中状态。
+
+    三个 period 完全独立(由前端选定的 [start, end] 直接传入),不做自动
+    推导。三个 period 可重叠或断层(例如手动调成跨月对比);后端只校验
+    同 period 内 start ≤ end,不校验 period 间顺序。
+    """
+    project = _get_project(db, project_id)
+    _assert_customer_access(user, project)
+
+    if end_a < start_a or end_b < start_b or end_c < start_c:
+        raise HTTPException(400, "period end must not be earlier than start")
+
+    # 平台列 = 项目配置的 platform —— 顺序按 sort 排,跟 ProjectOut.platforms 一致。
+    # 若项目没有配过 platforms,空集合会让后续整张矩阵为空,这里前端会看到 NoData。
+    platform_codes: list[str] = [pp.platform_code for pp in project.platforms]
+    if not platform_codes:
+        return PromptMentionStatsOut(
+            platform_columns=[],
+            rows=[],
+            period_a={"start": start_a.isoformat(), "end": end_a.isoformat()},
+            period_b={"start": start_b.isoformat(), "end": end_b.isoformat()},
+            period_c={"start": start_c.isoformat(), "end": end_c.isoformat()},
+        )
+
+    rows_internal = own_articles.compute_prompt_mention_stats(
+        db=db, project_id=project_id,
+        period_a=(start_a, end_a),
+        period_b=(start_b, end_b),
+        period_c=(start_c, end_c),
+        platform_codes=set(platform_codes),
+    )
+
+    period_total = max(len(platform_codes), 1)  # 防 0 除
+
+    rows: list[PromptMentionRowOut] = []
+    for st in rows_internal:
+        cells: dict[str, PromptMentionPlatformCell] = {}
+        for code in platform_codes:
+            cur_v = st.cur_cited.get(code, False)
+            base_v = st.base_cited.get(code, False)
+            # 较基期:
+            #   gain  = 本期 True,基期 False → trend_up
+            #   loss  = 本期 False,基期 True → trend_down
+            #   双向同状态 → 两个都 False
+            cells[code] = PromptMentionPlatformCell(
+                cited=cur_v,
+                trend_up=(cur_v and not base_v),
+                trend_down=(not cur_v and base_v),
+            )
+        rows.append(PromptMentionRowOut(
+            prompt_id=st.prompt_id,
+            prompt=st.prompt,
+            category=st.category,
+            platform_cells=cells,
+            cur_count=st.cur_count,
+            prev_count=st.prev_count,
+            base_count=st.base_count,
+            cur_oa_subtask_count=st.cur_oa_subtask_count,
+            cur_oa_models_involved=st.cur_oa_models_involved,
+            delta_prev_pct=round(
+                (st.cur_count - st.prev_count) / period_total * 100, 2
+            ),
+            delta_base_pct=round(
+                (st.cur_count - st.base_count) / period_total * 100, 2
+            ),
+        ))
+    return PromptMentionStatsOut(
+        platform_columns=platform_codes,
+        rows=rows,
+        period_a={"start": start_a.isoformat(), "end": end_a.isoformat()},
+        period_b={"start": start_b.isoformat(), "end": end_b.isoformat()},
+        period_c={"start": start_c.isoformat(), "end": end_c.isoformat()},
+    )
 
 
 async def _read_xlsx(file: UploadFile) -> bytes:

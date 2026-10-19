@@ -2,8 +2,8 @@
  * 「信源偏好」tab —— 4 sub-tab 容器:
  *   - 全部信源      → AllSources(原视图)
  *   - 信源明细      → SourceDetail(30/70 分屏:左侧列表 + 右侧 iframe)
+ *   - 信源偏好媒体  → SourceMedia(覆盖模型 / 稳定性 / 近期趋势)
  *   - 视频类信源    → VideoSources(平台卡片网格 + 按模型 ranking)
- *   - 网站分类      → Placeholder(敬请期待)
  *
  * 注:「自有文章引用分析」已拆为顶层菜单项(数据洞察组,与「信源偏好」平级),
  * 不再放在本 tab 内。
@@ -23,8 +23,8 @@ import { listMediaDictionary, type MediaDictionaryImportResult } from "../../api
 import { useAuth } from "../../auth/AuthProvider";
 import MediaDictionaryImportModal from "../../components/MediaDictionaryImportModal";
 import AllSources from "./sourcePreferences/AllSources";
-import Placeholder from "./sourcePreferences/Placeholder";
 import SourceDetail from "./sourcePreferences/SourceDetail";
+import SourceMedia from "./sourcePreferences/SourceMedia";
 import VideoSources from "./sourcePreferences/VideoSources";
 
 interface Props {
@@ -36,7 +36,7 @@ type SubTab = "all" | "detail" | "category" | "video";
 const SUB_TABS: { key: SubTab; label: string }[] = [
   { key: "all", label: "全部信源" },
   { key: "detail", label: "信源明细" },
-  { key: "category", label: "网站分类" },
+  { key: "category", label: "信源偏好媒体" },
   { key: "video", label: "视频类信源" },
 ];
 
@@ -96,7 +96,7 @@ export default function SourcePreferencesTab({ projectId }: Props) {
       <div className="sp-content">
         {sub === "all" && <AllSources projectId={projectId} />}
         {sub === "detail" && <SourceDetail projectId={projectId} />}
-        {sub === "category" && <Placeholder label="网站分类" />}
+        {sub === "category" && <SourceMedia projectId={projectId} />}
         {sub === "video" && <VideoSources projectId={projectId} />}
       </div>
 

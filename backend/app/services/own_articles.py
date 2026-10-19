@@ -31,17 +31,19 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 from datetime import date, datetime, time, timedelta
 from typing import NamedTuple
 
 import openpyxl
+from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse
 
 from app.models.common import now_local
-from app.models.project import OwnArticle
+from app.models.project import OwnArticle, ProjectPrompt
 from app.models.task import Subtask, Task
 from app.schemas.project import (
     OwnArticleImportPreview,
@@ -401,6 +403,268 @@ def compute_cite_stats(
         if created_at and (bucket["last_cited"] is None or created_at > bucket["last_cited"]):
             bucket["last_cited"] = created_at
     return stats
+
+
+# --------------------------------------------------------------------------
+# 「自由文章提及状况」tab —— per-prompt × per-period 矩阵
+# --------------------------------------------------------------------------
+
+
+class PromptMentionStats(BaseModel):
+    """``compute_prompt_mention_stats`` 返回的内部结构 —— 直接喂给
+    :func:`build_prompt_mention_out` 拼 :class:`PromptMentionStatsOut`。
+    """
+
+    prompt_id: int
+    prompt: str
+    category: str | None
+    # per-platform 本期 own-article 是否被命中过(bool)
+    cur_cited: dict[str, bool]
+    # per-platform 基期 own-article 是否被命中过 —— 提供 trend 锚点
+    base_cited: dict[str, bool]
+    # 本期命中 subtask 总数(去重按 subtask 算,跨平台累加)
+    cur_oa_subtask_count: int = 0
+    # 本期命中涉及的模型集合(去重)
+    cur_oa_models_involved: list[str] = []
+    # 三个期段「自身项目配置的 6 模型中,own-article 命中的平台数」
+    cur_count: int = 0
+    prev_count: int = 0
+    base_count: int = 0
+
+
+def compute_prompt_mention_stats(
+    db: Session, project_id: int, *,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    period_c: tuple[date, date],
+    platform_codes: set[str],
+) -> list[PromptMentionStats]:
+    """读取项目自有文章 + 三个期段内的 subtasks,产出 per-prompt 矩阵数据。
+
+    口径(image1):
+    - ``period_a = (start_a, end_a)`` 本期(默认本周),``period_b`` 上期(上周),
+      ``period_c`` 基期(上上周)。
+    - per (prompt, platform, period):「该项目自有文章是否在该期段被该模型
+      引用过」—— 只要存在至少一条引用了 normalize 后的 project own-article
+      URL 的 subtask,该 cell 即为 cited=True。
+    - 三个期段完全独立(可能重叠或断层,前端算好传入)。
+    - 顺序:cited/subtask 用 refs 一遍过算好,不再二次扫描。
+    """
+    if period_a[0] > period_a[1] or period_b[0] > period_b[1] or period_c[0] > period_c[1]:
+        raise ValueError("period start must not be after end")
+
+    win_start = min(period_a[0], period_b[0], period_c[0])
+    win_end = max(period_a[1], period_b[1], period_c[1])
+    win_start_dt = datetime.combine(win_start, time.min)
+    win_end_dt = datetime.combine(win_end, time.max)
+
+    own_norms: set[str] = {
+        normalize_url(a.url)
+        for a in db.execute(select(OwnArticle).where(OwnArticle.project_id == project_id)).scalars()
+    }
+    own_norms.discard("")  # 过滤坏 URL
+
+    prompt_rows = db.execute(
+        select(ProjectPrompt).where(
+            ProjectPrompt.project_id == project_id,
+            ProjectPrompt.status == "monitoring",
+        ).order_by(ProjectPrompt.category, ProjectPrompt.id)
+    ).scalars().all()
+    prompt_texts = {p.prompt for p in prompt_rows}
+
+    if not prompt_texts:
+        return []
+
+    if db.bind is not None and db.bind.dialect.name == "mysql":
+        refs = _prompt_mention_refs_mysql(
+            db,
+            project_id=project_id,
+            win_start_dt=win_start_dt,
+            win_end_dt=win_end_dt,
+            platform_codes=platform_codes or None,
+        )
+    else:
+        refs = _prompt_mention_refs_python(
+            db,
+            project_id=project_id,
+            win_start_dt=win_start_dt,
+            win_end_dt=win_end_dt,
+            platform_codes=platform_codes or None,
+        )
+
+    # 初始化 stats_by_prompt,默认 cur_cited/base_cited 全 False
+    stats_by_prompt: dict[str, PromptMentionStats] = {}
+    for p in prompt_rows:
+        stats_by_prompt[p.prompt] = PromptMentionStats(
+            prompt_id=p.id,
+            prompt=p.prompt,
+            category=p.category,
+            cur_cited={code: False for code in platform_codes},
+            base_cited={code: False for code in platform_codes},
+        )
+
+    if not own_norms:
+        # 没有自有文章,所有 cell 都是 False,但 stats_by_prompt 已经按 prompt
+        # 初始化完整 —— 每个 prompt 都返回,只是 count 全 0。
+        return list(stats_by_prompt.values())
+
+    # 一次遍历 refs 完成:cur_cited / base_cited bool + prev_count / cur_oa_subtask
+    cur_subtasks: set[tuple[str, str]] = set()  # (prompt, subtask_id) for cur period
+    prev_platforms_per_prompt: dict[str, set[str]] = {}
+    for prompt, platform, subtask_id, created_at, norms in refs:
+        if prompt not in prompt_texts:
+            continue
+        if not norms & own_norms:
+            continue
+        period_idx = _period_of(created_at.date(), period_a, period_b, period_c)
+        if period_idx is None:
+            continue
+        st = stats_by_prompt[prompt]
+        if period_idx == 0:
+            st.cur_cited[platform] = True
+            cur_subtasks.add((prompt, subtask_id))
+        elif period_idx == 2:
+            st.base_cited[platform] = True
+        elif period_idx == 1:
+            prev_platforms_per_prompt.setdefault(prompt, set()).add(platform)
+
+    for prompt, st in stats_by_prompt.items():
+        st.cur_oa_models_involved = sorted(pl for pl, v in st.cur_cited.items() if v)
+        st.cur_oa_subtask_count = sum(
+            1 for (p, _sid) in cur_subtasks if p == prompt
+        )
+        st.cur_count = sum(1 for v in st.cur_cited.values() if v)
+        st.base_count = sum(1 for v in st.base_cited.values() if v)
+        st.prev_count = len(prev_platforms_per_prompt.get(prompt, set()))
+
+    return list(stats_by_prompt.values())
+
+
+def _period_of(
+    d: date,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    period_c: tuple[date, date],
+) -> int | None:
+    """返回 d 落入的 period 索引(0=A 本期, 1=B 上期, 2=C 基期);不落返回 None。"""
+    if period_a[0] <= d <= period_a[1]:
+        return 0
+    if period_b[0] <= d <= period_b[1]:
+        return 1
+    if period_c[0] <= d <= period_c[1]:
+        return 2
+    return None
+
+
+def _prompt_mention_refs_mysql(
+    db: Session, *,
+    project_id: int,
+    win_start_dt: datetime,
+    win_end_dt: datetime,
+    platform_codes: set[str],
+) -> list[tuple[str, str, str, datetime, set[str]]]:
+    """MySQL 路径:JSON_TABLE 展平 reference_list_json 后,Python 端 normalize
+    + 与 own_articles normalize set intersect。"""
+    params: dict = {"pid": project_id, "ws": win_start_dt, "we": win_end_dt}
+    where_extra = ""
+    if platform_codes:
+        where_extra += " AND s.platform IN :plats"
+        params["plats"] = tuple(platform_codes)
+    sql = text(
+        """
+        SELECT /*+ NO_MERGE(jt) */
+          s.prompt AS prompt,
+          s.platform AS platform,
+          s.subtask_id AS subtask_id,
+          t.created_local_at AS created_at,
+          jt.value AS ref_json
+        FROM geo_subtasks s
+        JOIN geo_tasks t ON t.task_id = s.task_id
+        CROSS JOIN JSON_TABLE(
+          s.reference_list_json, '$[*]'
+          COLUMNS (value JSON PATH '$')
+        ) AS jt
+        WHERE t.project_id = :pid
+          AND t.created_local_at >= :ws
+          AND t.created_local_at <= :we
+          """ + where_extra + """
+          AND (
+            JSON_EXTRACT(jt.value, '$.url') IS NOT NULL
+            OR JSON_EXTRACT(jt.value, '$.link') IS NOT NULL
+            OR JSON_TYPE(jt.value) = 'STRING'
+          )
+        """
+    )
+    out: list[tuple[str, str, str, datetime, set[str]]] = []
+    for prompt, platform, subtask_id, created_at, ref_json in db.execute(sql, params).all():
+        # 抽 url 字符串 → normalize
+        # 注意:JSON_TABLE 在 MySQL connector 下 ``value`` 经常以 dict 或
+        # 序列化后的 JSON 字符串回返,两者都要兼容。漏了 str → dict 这一步
+        # 时,``isinstance(ref_json, dict)`` 为 False,fallthrough 后
+        # ``url = ref_json`` 把整段 dict 字符串喂给 normalize_url,
+        # 永远命中不到 own_article。
+        if isinstance(ref_json, str):
+            try:
+                ref_json = json.loads(ref_json)
+            except (ValueError, TypeError):
+                pass
+        url = None
+        if isinstance(ref_json, dict):
+            u = ref_json.get("url") or ref_json.get("link")
+            url = u if isinstance(u, str) else None
+        elif isinstance(ref_json, str):
+            url = ref_json
+        if not url:
+            continue
+        out.append((prompt, platform, subtask_id, created_at, {normalize_url(url.strip())}))
+    return out
+
+
+def _prompt_mention_refs_python(
+    db: Session, *,
+    project_id: int,
+    win_start_dt: datetime,
+    win_end_dt: datetime,
+    platform_codes: set[str],
+) -> list[tuple[str, str, str, datetime, set[str]]]:
+    """SQLite/通用路径:Python 端反序列化 reference_list_json。"""
+    stmt = (
+        select(
+            Subtask.prompt,
+            Subtask.platform,
+            Subtask.subtask_id,
+            Task.created_local_at,
+            Subtask.reference_list_json,
+        )
+        .join(Task, Task.task_id == Subtask.task_id)
+        .where(
+            Task.project_id == project_id,
+            Task.created_local_at >= win_start_dt,
+            Task.created_local_at <= win_end_dt,
+        )
+    )
+    if platform_codes:
+        stmt = stmt.where(Subtask.platform.in_(platform_codes))
+    out: list[tuple[str, str, str, datetime, set[str]]] = []
+    for prompt, platform, subtask_id, created_at, refs in db.execute(stmt).all():
+        if not isinstance(refs, list):
+            continue
+        norms: set[str] = set()
+        for item in refs:
+            if isinstance(item, dict):
+                u = item.get("url") or item.get("link")
+                if not isinstance(u, str):
+                    continue
+            elif isinstance(item, str):
+                u = item
+            else:
+                continue
+            n = normalize_url(u.strip())
+            if n:
+                norms.add(n)
+        if norms:
+            out.append((prompt, platform, subtask_id, created_at, norms))
+    return out
 
 
 def _cite_stats_rows_mysql(

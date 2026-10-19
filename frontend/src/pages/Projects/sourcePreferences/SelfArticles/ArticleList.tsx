@@ -1,11 +1,8 @@
 /**
- * 「自有文章引用分析」—— 独立一级页面(顶层菜单项),表格视图。
+ * 「自有文章引用分析」→ 文章列表子 tab(原 SelfArticles.tsx 内容)。
  *
- * 7 列:文章(标题 + URL) / 发布日期 / 分发渠道 / 引用次数 / 引用模型 /
- * 最近引用 / 操作(修改、删除)。顶部面板头有「导入 URL 列表」按钮。
- *
- * 参照 docs/风球GEO监控平台UI/index.html:1293-1326 + js/app.js:3026-3055
- * (renderOwnArticles 函数)。
+ * 7 列表格:文章 / 发布日期 / 分发渠道 / 引用次数 / 引用模型 /
+ * 最近引用 / 操作。顶部面板头有「导入 URL 列表」按钮。
  *
  * 数据真源:
  * - 用户声明的自有 URL:`geo_own_articles` 表
@@ -30,17 +27,17 @@ import {
   getProject,
   type OwnArticleOut,
   type ProjectPlatform,
-} from "../../../api/projects";
-import { platformColor, platformLabel, rowKeyOfPlatform } from "../platforms";
-import { useToolbarFilter } from "../../../components/ToolbarFilterContext";
-import OwnArticlesImportModal from "../../../components/OwnArticlesImportModal";
-import OwnArticleEditModal from "../../../components/OwnArticleEditModal";
+} from "../../../../api/projects";
+import { platformColor, platformLabel, rowKeyOfPlatform } from "../../platforms";
+import { useToolbarFilter } from "../../../../components/ToolbarFilterContext";
+import OwnArticlesImportModal from "../../../../components/OwnArticlesImportModal";
+import OwnArticleEditModal from "../../../../components/OwnArticleEditModal";
 
 interface Props {
   projectId: number;
 }
 
-export default function SelfArticles({ projectId }: Props) {
+export default function ArticleList({ projectId }: Props) {
   const [items, setItems] = useState<OwnArticleOut[]>([]);
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
