@@ -85,3 +85,7 @@ scripts/.logs/
 
 # Backend test suite
 /backend/tests/
+# log文件
+backend/backend.log
+frontend/frontend.log
+data/
