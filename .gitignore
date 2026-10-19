@@ -16,6 +16,10 @@ node_modules/
 dist/
 .vite/
 *.tsbuildinfo
+# Vite config 的 tsc 编译产物:已被本仓 tsconfig 跟踪,实际只是 vite dev
+# 时偶尔重生成的中间产物,各机 mtime 不一致会污染 PR/部署 diff。
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
 
 # Editor / OS
 .vscode/

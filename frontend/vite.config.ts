@@ -46,10 +46,13 @@ export default defineConfig({
     react(),
   ],
   server: {
+    host: "0.0.0.0",  // 让外部(SSH 之外的浏览器)能访问 dev server
     port: 5173,
     proxy: {
-      "/api": "http://localhost:18083",
-      "/static": "http://localhost:18083",
+      // 127.0.0.1 而非 localhost:某些发行版 /etc/hosts 上 localhost
+      // 解析到 ::1(IPv6 loopback),后端 uvicorn 只 bind IPv4 就拒 700
+      "/api": "http://127.0.0.1:18083",
+      "/static": "http://127.0.0.1:18083",
     },
   },
 });
