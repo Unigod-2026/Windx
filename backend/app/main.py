@@ -114,6 +114,13 @@ async def _serve_frontend(request):
         target.relative_to(_FRONTEND_DIST.resolve())
     except ValueError:
         target = _FRONTEND_INDEX
+    # / 路径优先 serve 营销落地页(vite build 时由 vite.config.ts 的
+    # closeBundle 把源文件原样拷到 dist/windx_ai_brand_monitor.html);
+    # 老 build 没带落地页就静默回落到 React SPA,不影响运行。
+    if raw_path == "":
+        landing = _FRONTEND_DIST / "windx_ai_brand_monitor.html"
+        if landing.is_file():
+            return FileResponse(str(landing))
     if target.is_file():
         return FileResponse(str(target))
     if _FRONTEND_INDEX.is_file():
