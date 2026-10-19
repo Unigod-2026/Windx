@@ -56,6 +56,10 @@ scripts/.logs/
 # Claude Code session state
 /.claude/
 
+# Playwright local artifacts (浏览器调试 / 截图残留,各机本地重生成)
+/.playwright-mcp/
+/.playwright-screenshots/
+
 # Frontend probe / verification scripts (committed or not)
 /probe.mjs
 /test_modal.mjs
