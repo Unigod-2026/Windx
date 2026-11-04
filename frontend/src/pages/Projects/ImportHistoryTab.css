@@ -1,0 +1,54 @@
+/* 导入历史页 —— 沿用 AppLayout.css 的 token。 */
+
+.imh {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 0 28px;
+}
+
+.imh-head {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0);
+}
+
+.imh-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #181818);
+}
+
+.imh-sub {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-tertiary, #8c8c8c);
+  max-width: 76ch;
+}
+
+.imh-totals {
+  padding: 10px 14px;
+  background: var(--bg-page, #f5f6f8);
+  border: 1px solid var(--border-light, #f0f0f0);
+  border-radius: 3px;
+  font-size: 13px;
+  color: var(--text-secondary, #4f4f4f);
+  font-variant-numeric: tabular-nums;
+}
+
+.imh-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #181818);
+  margin-bottom: 8px;
+}
+
+.imh-impact {
+  font-size: 13px;
+  color: var(--text-primary, #181818);
+  font-variant-numeric: tabular-nums;
+}
+
+.imh-impact-hint {
+  font-size: 12px;
+  color: var(--text-tertiary, #8c8c8c);
+}

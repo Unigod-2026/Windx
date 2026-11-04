@@ -17,6 +17,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   CloudUploadOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons";
 import { ChevronRight, Plus, User } from "lucide-react";
 import {
@@ -77,6 +78,11 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
   answer: { key: "answer", label: "答案质量分析", icon: <FileSearchOutlined /> },
   report: { key: "report", label: "周报", icon: <FileTextOutlined /> },
   import: { key: "import", label: "数据导入", icon: <CloudUploadOutlined /> },
+  "import-history": {
+    key: "import-history",
+    label: "导入历史",
+    icon: <HistoryOutlined />,
+  },
   settings: { key: "settings", label: "设置", icon: <SettingOutlined /> },
 };
 
