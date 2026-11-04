@@ -16,6 +16,7 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  CloudUploadOutlined,
 } from "@ant-design/icons";
 import { ChevronRight, Plus, User } from "lucide-react";
 import {
@@ -28,6 +29,11 @@ import {
 import { useAuth } from "../auth/AuthProvider";
 import { useCurrentProject } from "../auth/ProjectContext";
 import ProjectSwitcher from "../pages/Projects/ProjectSwitcher";
+import {
+  PROJECT_GROUP_LAYOUT,
+  groupTitleOf,
+  type ProjectTabKey,
+} from "./navLayout";
 import { listProjects, type ProjectOut } from "../api/projects";
 import GlobalToolbar from "../components/GlobalToolbar";
 import { ToolbarFilterProvider } from "../components/ToolbarFilterContext";
@@ -40,17 +46,6 @@ type AdminKey =
   | "/admin/projects"
   | "/admin/customers"
   | "/admin/pending-projects";
-
-type ProjectTabKey =
-  | "overview"
-  | "question"
-  | "competitor"
-  | "source"
-  | "self-articles"
-  | "citation"
-  | "answer"
-  | "report"
-  | "settings";
 
 interface NavLeaf {
   key: string;
@@ -81,25 +76,9 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
   citation: { key: "citation", label: "引用源分析", icon: <LinkOutlined /> },
   answer: { key: "answer", label: "答案质量分析", icon: <FileSearchOutlined /> },
   report: { key: "report", label: "周报", icon: <FileTextOutlined /> },
+  import: { key: "import", label: "数据导入", icon: <CloudUploadOutlined /> },
   settings: { key: "settings", label: "设置", icon: <SettingOutlined /> },
 };
-
-const PROJECT_GROUP_LAYOUT: { title: string; keys: ProjectTabKey[] }[] = [
-  {
-    title: "数据洞察",
-    keys: ["overview", "question", "competitor", "source", "self-articles", "citation"],
-  },
-  { title: "数据中心", keys: ["answer", "report"] },
-  { title: "系统", keys: ["settings"] },
-];
-
-const TAB_GROUP_TITLE = (() => {
-  const map = new Map<ProjectTabKey, string>();
-  for (const g of PROJECT_GROUP_LAYOUT) {
-    for (const k of g.keys) map.set(k, g.title);
-  }
-  return (k: ProjectTabKey) => map.get(k) ?? "";
-})();
 
 const ADMIN_ITEMS: Record<AdminKey, NavLeaf> = {
   "/admin": { key: "/admin", label: "工作台", icon: <DashboardOutlined /> },
@@ -280,7 +259,7 @@ export default function AppLayout() {
     if (activeProjectKey !== null) {
       return (
         <>
-          <strong>{TAB_GROUP_TITLE(activeProjectKey)}</strong>
+          <strong>{groupTitleOf(activeProjectKey)}</strong>
           <span className="sep">/</span>
           <strong>{PROJECT_TABS[activeProjectKey].label}</strong>
         </>
