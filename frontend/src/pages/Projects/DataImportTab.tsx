@@ -11,7 +11,7 @@
  * docs/superpowers/specs/2026-11-04-data-import-design.md。
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -26,7 +26,7 @@ import {
   message,
 } from "antd";
 import type { TableColumnsType, UploadProps } from "antd";
-import { CloudUploadOutlined } from "@ant-design/icons";
+import { CloudUploadOutlined, CopyOutlined } from "@ant-design/icons";
 import {
   applyImportData,
   previewImportData,
@@ -37,6 +37,7 @@ import {
   type SheetPreview,
 } from "../../api/imports";
 import {
+  apiErrorText,
   describeErrorGroup,
   describeTotals,
   sheetTone,
@@ -64,13 +65,24 @@ export default function DataImportTab({
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [selected, setSelected] = useState<ImportSheetKey[]>([]);
+  // 切换勾选后的重新预览 —— 页面上的数字必须跟真正要写入的量一致
+  const [repreviewing, setRepreviewing] = useState(false);
 
   const selectedCount = useMemo(() => {
     if (!preview) return 0;
     return preview.sheets
-      .filter((s) => selected.includes(s.key))
+      .filter((s) => s.selected)
       .reduce((n, s) => n + s.importable_rows, 0);
-  }, [preview, selected]);
+  }, [preview]);
+
+  const loadPreview = useCallback(
+    async (f: File, sheets?: ImportSheetKey[]) => {
+      const p = await previewImportData(projectId, f, sheets);
+      setPreview(p);
+      return p;
+    },
+    [projectId],
+  );
 
   const uploadProps: UploadProps = {
     accept: ".xlsx",
@@ -88,17 +100,35 @@ export default function DataImportTab({
       setPhase("previewing");
       setFile(f);
       try {
-        const p = await previewImportData(projectId, f);
-        setPreview(p);
-        setSelected(p.sheets.filter((s) => s.total_rows > 0).map((s) => s.key));
+        const p = await loadPreview(f);
+        setSelected(
+          p.sheets.filter((s) => s.total_rows > 0).map((s) => s.key),
+        );
         setPhase("previewed");
       } catch (err) {
-        message.error((err as Error).message || "解析失败");
+        message.error(apiErrorText(err, "解析失败"));
         setPhase("idle");
         setFile(null);
       }
       return false; // 阻止 antd 自动上传
     },
+  };
+
+  /** 切换勾选 —— 重新预览，让「可导入 N 行」始终等于真正会写入的量。 */
+  const handleToggle = async (key: ImportSheetKey, on: boolean) => {
+    const next = on
+      ? [...selected, key]
+      : selected.filter((k) => k !== key);
+    setSelected(next);
+    if (!file) return;
+    setRepreviewing(true);
+    try {
+      await loadPreview(file, next);
+    } catch (err) {
+      message.error(apiErrorText(err, "重新预览失败"));
+    } finally {
+      setRepreviewing(false);
+    }
   };
 
   const handleApply = async () => {
@@ -114,7 +144,7 @@ export default function DataImportTab({
       setPhase("done");
       message.success("导入完成");
     } catch (err) {
-      message.error((err as Error).message || "导入失败");
+      message.error(apiErrorText(err, "导入失败"));
       setPhase("previewed");
     }
   };
@@ -171,7 +201,7 @@ export default function DataImportTab({
         </>
       ) : (
         preview && (
-          <>
+          <Spin spinning={repreviewing} tip="重新核算中...">
             {/* ---- 对账条：外部列 → 平台内部字段 ---- */}
             <div className="dit-reconcile">
               <div className="dit-reconcile-head">字段对账</div>
@@ -233,13 +263,7 @@ export default function DataImportTab({
                 sheet={sheet}
                 errors={preview.errors.filter((g) => g.sheet === sheet.title)}
                 checked={selected.includes(sheet.key)}
-                onToggle={(on) =>
-                  setSelected((prev) =>
-                    on
-                      ? [...prev, sheet.key]
-                      : prev.filter((k) => k !== sheet.key),
-                  )
-                }
+                onToggle={(on) => handleToggle(sheet.key, on)}
               />
             ))}
 
@@ -272,7 +296,7 @@ export default function DataImportTab({
                 导入 {selectedCount} 行
               </Button>
             </div>
-          </>
+          </Spin>
         )
       )}
     </div>
@@ -303,12 +327,17 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
         <span className="dit-sheet-title">{sheet.title}</span>
         <span className="dit-sheet-count">{sheet.total_rows} 行</span>
         <span className="dit-sheet-meta">
-          可导入 {sheet.importable_rows} · 阻断 {sheet.blocked_rows} · 涉及{" "}
-          {sheet.subtasks} 个子任务
+          {sheet.selected
+            ? `可导入 ${sheet.importable_rows} · 阻断 ${sheet.blocked_rows} · 涉及 ${sheet.subtasks} 个子任务`
+            : "未选择导入"}
         </span>
-        <Tag color={tone === "error" ? "red" : tone === "warn" ? "gold" : "green"}>
-          {toneLabel(tone)}
-        </Tag>
+        {sheet.selected ? (
+          <Tag color={tone === "error" ? "red" : tone === "warn" ? "gold" : "green"}>
+            {toneLabel(tone)}
+          </Tag>
+        ) : (
+          <Tag>未选择</Tag>
+        )}
         <span className="dit-sheet-switch">
           <Switch
             checked={checked}
@@ -319,7 +348,7 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
         </span>
       </div>
 
-      {errors.length > 0 && (
+      {sheet.selected && errors.length > 0 && (
         <Collapse
           ghost
           items={[
@@ -327,41 +356,13 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
               key: "errors",
               label: (
                 <span style={{ color: "#dc2626" }}>
-                  查看 {errors.reduce((n, g) => n + g.row_count, 0)} 行被阻断的原因
+                  查看 {sheet.blocked_rows} 行被阻断的原因
                 </span>
               ),
               children: (
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   {errors.map((g) => (
-                    <div key={g.code}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>
-                        {describeErrorGroup(g)}
-                      </div>
-                      {g.distinct.length > 0 && (
-                        <div className="dit-error-values">
-                          {g.distinct.slice(0, 40).join("、")}
-                          {g.distinct.length > 40 ? ` 等 ${g.distinct.length} 个` : ""}
-                        </div>
-                      )}
-                      <Table
-                        size="small"
-                        rowKey="row"
-                        pagination={{ pageSize: 5, size: "small" }}
-                        style={{ marginTop: 8 }}
-                        dataSource={g.samples}
-                        columns={[
-                          { title: "行号", dataIndex: "row", width: 70 },
-                          {
-                            title: "内容",
-                            dataIndex: "context",
-                            render: (ctx: Record<string, string>) =>
-                              Object.entries(ctx)
-                                .map(([k, v]) => `${k}: ${v}`)
-                                .join(" · "),
-                          },
-                        ]}
-                      />
-                    </div>
+                    <ErrorGroupBlock key={g.code} group={g} />
                   ))}
                 </Space>
               ),
@@ -382,5 +383,58 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可预览的数据" />
       )}
     </section>
+  );
+}
+
+function ErrorGroupBlock({ group }: { group: ImportErrorGroup }) {
+  const copyAll = async () => {
+    try {
+      await navigator.clipboard.writeText(group.distinct.join("\n"));
+      message.success(`已复制 ${group.distinct.length} 个名称`);
+    } catch {
+      message.error("复制失败，请手动选中下方文本");
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>
+        {describeErrorGroup(group)}
+      </div>
+      {group.distinct.length > 0 && (
+        <>
+          <div className="dit-error-values">
+            {group.distinct.join("、")}
+          </div>
+          <Button
+            size="small"
+            type="link"
+            icon={<CopyOutlined />}
+            onClick={copyAll}
+            style={{ paddingLeft: 0 }}
+          >
+            复制全部 {group.distinct.length} 个名称
+          </Button>
+        </>
+      )}
+      <Table
+        size="small"
+        rowKey="row"
+        pagination={{ pageSize: 5, size: "small" }}
+        style={{ marginTop: 8 }}
+        dataSource={group.samples}
+        columns={[
+          { title: "行号", dataIndex: "row", width: 70 },
+          {
+            title: "内容",
+            dataIndex: "context",
+            render: (ctx: Record<string, string>) =>
+              Object.entries(ctx)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(" · "),
+          },
+        ]}
+      />
+    </div>
   );
 }

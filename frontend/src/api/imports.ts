@@ -37,6 +37,8 @@ export interface SheetPreview {
   importable_rows: number;
   blocked_rows: number;
   subtasks: number;
+  /** 这一张是否被勾选导入 —— 未勾选的 sheet 不参与校验，不该报「阻断」。 */
+  selected: boolean;
   sample: Record<string, string>[];
 }
 
@@ -76,15 +78,22 @@ export interface ImportResult {
   errors: ImportErrorGroup[];
 }
 
-/** 解析 + 校验 + 聚合，不写库。 */
+/**
+ * 解析 + 校验 + 聚合，不写库。
+ *
+ * `sheets` 传当前勾选的 sheet —— 后端按这个口径算「可导入」，
+ * 页面上的数字才跟实际要写入的量一致（切勾选要重新预览）。
+ */
 export async function previewImportData(
   projectId: number,
   file: File,
+  sheets?: ImportSheetKey[],
 ): Promise<ImportPreview> {
   const fd = new FormData();
   fd.append("file", file);
+  const query = sheets && sheets.length ? `?sheets=${sheets.join(",")}` : "";
   const { data } = await client.post<ImportPreview>(
-    `/projects/${projectId}/imports/preview`,
+    `/projects/${projectId}/imports/preview${query}`,
     fd,
     { headers: { "Content-Type": "multipart/form-data" } },
   );

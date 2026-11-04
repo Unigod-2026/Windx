@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ImportErrorGroup, ImportTotals, SheetPreview } from "../../api/imports";
 import {
+  apiErrorText,
   describeErrorGroup,
   describeTotals,
   sheetTone,
@@ -14,6 +15,7 @@ const sheet = (over: Partial<SheetPreview> = {}): SheetPreview => ({
   importable_rows: 10,
   blocked_rows: 0,
   subtasks: 3,
+  selected: true,
   sample: [],
   ...over,
 });
@@ -80,5 +82,29 @@ describe("describeTotals", () => {
     expect(describeTotals(totals)).toContain("9936");
     expect(describeTotals(totals)).toContain("7746");
     expect(describeTotals(totals)).toContain("2190");
+  });
+});
+
+describe("apiErrorText", () => {
+  it("优先取后端 detail 里的可操作文案", () => {
+    const err = {
+      message: "Request failed with status code 400",
+      response: { data: { detail: "请到项目「编辑」里的『监控模型』补充" } },
+    };
+    expect(apiErrorText(err)).toBe("请到项目「编辑」里的『监控模型』补充");
+  });
+
+  it("后端没给 detail 时丢掉 axios 的废话，用兜底文案", () => {
+    const err = { message: "Request failed with status code 500" };
+    expect(apiErrorText(err, "解析失败")).toBe("解析失败");
+  });
+
+  it("非 http 错误保留原始 message", () => {
+    expect(apiErrorText(new Error("Network Error"))).toBe("Network Error");
+  });
+
+  it("422 的对象数组也能转成人话", () => {
+    const err = { response: { data: { detail: [{ msg: "field required" }] } } };
+    expect(apiErrorText(err)).toContain("field required");
   });
 });

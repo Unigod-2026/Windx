@@ -16,11 +16,13 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 
 import openpyxl
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -61,6 +63,13 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "DeepSeek": ("deepseek", "deepseek_mobile"),
     "百度文心": ("baiduai", "baidu_mobile"),
     "文心": ("baiduai", "baidu_mobile"),
+    # 这两个在向导里没有手机版（wizardConfig.ts: hasMobile: false），
+    # mobile 映射回自身 —— 项目里若没有对应的 mobile 行，会被
+    # platform_unregistered 挡下。
+    "ChatGPT": ("chatgpt", "chatgpt"),
+    "chatgpt": ("chatgpt", "chatgpt"),
+    "蚂蚁阿福": ("antafu", "antafu"),
+    "antafu": ("antafu", "antafu"),
 }
 
 #: 模型标签后缀 -> delivery_mode
@@ -363,7 +372,14 @@ def parse_workbook(content: bytes) -> ParsedWorkbook:
     找不到某张 sheet 不报错，对应列表为空，``found_sheets`` 里记实际找到的；
     但**一张都认不出来**时必须报错 —— 静默返回 0 行会让用户以为导入成功。
     """
-    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except (zipfile.BadZipFile, InvalidFileException) as exc:
+        # .csv / 老式 .xls 改名成 .xlsx 就会走到这里 —— 说人话，别让用户看 500
+        raise ValueError(
+            "文件不是有效的 xlsx（可能是 csv 或旧版 xls 改了后缀），"
+            "请用服务商导出的原始 xlsx 文件"
+        ) from exc
     try:
         located = _locate_sheets(wb)
         if not located:
@@ -398,6 +414,8 @@ class ImportConfigError(Exception):
 @dataclass(frozen=True)
 class ProjectConfig:
     brand: str
+    #: 品牌别名（项目 4：brand=伊速达 / alias=玛舒拉沙韦）
+    aliases: frozenset[str]
     #: 归一化问题 -> 项目里的 prompt 原文列表（>1 说明归一化后有歧义）
     prompt_texts: dict[str, list[str]]
     keywords: frozenset[str]
@@ -480,6 +498,7 @@ def load_project_config(db: Session, project_id: int) -> ProjectConfig:
 
     return ProjectConfig(
         brand=(project.brand or "").strip(),
+        aliases=frozenset(a for a in (project.aliases or []) if a),
         prompt_texts=prompt_texts,
         keywords=keywords,
         platform_keys=platform_keys,
@@ -494,9 +513,24 @@ def _issue(sheet: str, row: int, code: str, message: str, **context) -> RowIssue
     )
 
 
+def _keyword_allowed(config: ProjectConfig) -> frozenset[str]:
+    """文件「核心词」列的合法取值。
+
+    那一列存的是**被监控的产品词**，不等于项目的核心词表 —— 真实样本里
+    是「玛舒拉沙韦」（品牌），而项目 4 的 brand 是「伊速达」、核心词才是
+    「玛舒拉沙韦」。所以合法集 = 项目核心词 ∪ 品牌名 ∪ 品牌别名。
+    """
+    allowed = set(config.keywords)
+    if config.brand:
+        allowed.add(config.brand)
+    allowed |= set(config.aliases)
+    return frozenset(allowed)
+
+
 def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
                    delivery_mode: str, thinking_mode: bool, prompt_raw: str,
-                   keyword: str, config: ProjectConfig) -> list[RowIssue]:
+                   keyword: str, model_label: str,
+                   config: ProjectConfig) -> list[RowIssue]:
     """与品牌无关的五个维度：日期 / 问题 / 平台 / 核心词 / 归一化歧义。"""
     issues: list[RowIssue] = []
     if not date:
@@ -506,7 +540,8 @@ def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
     if not texts:
         issues.append(_issue(
             sheet, row_no, "prompt_unregistered",
-            "监控问题不在当前项目的问题配置里，请先在「监控问题」Tab 添加",
+            "监控问题不在当前项目的问题配置里，"
+            "请到项目「编辑」里的『监控问题』补充",
             监控问题=prompt_raw,
         ))
     elif len(texts) > 1:
@@ -518,13 +553,16 @@ def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
     if (platform_code, delivery_mode, thinking_mode) not in config.platform_keys:
         issues.append(_issue(
             sheet, row_no, "platform_unregistered",
-            "该模型 / 终端组合不在当前项目的模型配置里，请先在「AI 模型」Tab 添加",
-            AI大模型=platform_code,
+            "该模型 / 终端组合不在当前项目的模型配置里，"
+            "请到项目「编辑」里的『监控模型』补充",
+            AI大模型=model_label or platform_code,
         ))
-    if config.keywords and keyword not in config.keywords:
+    # 核心词维度：项目没配核心词就整体跳过；该 sheet 没有「核心词」列
+    # （引用媒体）时 keyword 为空串，同样跳过 —— 否则会把整张引用表挡掉。
+    if keyword and config.keywords and keyword not in _keyword_allowed(config):
         issues.append(_issue(
             sheet, row_no, "keyword_unregistered",
-            "核心词不在当前项目的核心词配置里",
+            "核心词与当前项目的核心词 / 品牌 / 品牌别名都不一致",
             核心词=keyword,
         ))
     return issues
@@ -534,12 +572,17 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
                   selected_sheets=None) -> ValidationOutcome:
     """六维逐行校验 —— 通过的行进 outcome，不通过的进 issues。"""
     config = load_project_config(db, project_id)
-    selected = set(selected_sheets) if selected_sheets else set(SHEET_KEYS)
+    # None = 三张全导（默认）；空列表 = 一张都不导（不能 fallback 成全导）
+    selected = set(SHEET_KEYS) if selected_sheets is None else set(selected_sheets)
     issues: list[RowIssue] = []
     warnings: list[str] = []
     resolved_prompts = {
         norm: texts[0] for norm, texts in config.prompt_texts.items() if len(texts) == 1
     }
+
+    # 没勾「问题问答」时，竞品分析 / 引用媒体的行没有可挂载的子任务 ——
+    # 错误要说清是「没勾那张 sheet」，而不是「回答记录不存在」。
+    answers_selected = "answers" in selected
 
     # --- 问题问答 ---
     ok_answers: list[AnswerRow] = []
@@ -548,7 +591,7 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
             continue
         row_issues = _common_issues(
             "问题问答", row.row, row.date, row.platform_code, row.delivery_mode,
-            row.thinking_mode, row.prompt_raw, row.keyword, config,
+            row.thinking_mode, row.prompt_raw, row.keyword, row.model_label, config,
         )
         if config.brand and row.brand != config.brand:
             row_issues.append(_issue(
@@ -567,6 +610,29 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
                 "不完全一致，已按归一化匹配"
             )
 
+    # 同一 (日期, 模型, 问题) 在文件里出现多次 —— 它们会落到同一个
+    # subtask_id，重复插入会撞 UNIQUE 主键、整批 500。每组只留第一条，
+    # 并提示用户有几组被折叠了。
+    deduped: list[AnswerRow] = []
+    seen_keys: set[tuple] = set()
+    collapsed = 0
+    for row in ok_answers:
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        if key in seen_keys:
+            collapsed += 1
+            continue
+        seen_keys.add(key)
+        deduped.append(row)
+    if collapsed:
+        warnings.append(
+            f"文件里有 {collapsed} 行的（日期 / 模型 / 问题）与其它行重复，"
+            "导入时每组只保留第一条"
+        )
+    ok_answers = deduped
+
     subtask_index: dict[tuple, str] = {}
     for row in ok_answers:
         key = subtask_key(
@@ -582,7 +648,7 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
             continue
         row_issues = _common_issues(
             "竞品分析", row.row, row.date, row.platform_code, row.delivery_mode,
-            row.thinking_mode, row.prompt_raw, row.keyword, config,
+            row.thinking_mode, row.prompt_raw, row.keyword, row.model_label, config,
         )
         if row.brand_type == "监控品牌":
             if config.brand and row.brand != config.brand:
@@ -594,7 +660,8 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
         elif row.brand not in config.competitor_names:
             row_issues.append(_issue(
                 "竞品分析", row.row, "competitor_unregistered",
-                "该品牌不在当前项目的竞品列表里，请先在「竞品信息」Tab 添加",
+                "该品牌不在当前项目的竞品列表里，"
+                "请到项目「编辑」里的『竞品』补充",
                 品牌名称=row.brand,
             ))
         key = subtask_key(
@@ -603,8 +670,11 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
         )
         if key not in subtask_index:
             row_issues.append(_issue(
-                "竞品分析", row.row, "subtask_not_found",
-                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）",
+                "竞品分析", row.row,
+                "subtask_not_found" if answers_selected else "answers_not_selected",
+                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）"
+                if answers_selected else
+                "需要同时导入「问题问答」—— 竞品分析的数据要挂在对应的回答记录上",
                 监控日期=row.date, AI大模型=row.model_label, 监控问题=row.prompt_raw,
             ))
         if row_issues:
@@ -625,7 +695,7 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
             continue
         row_issues = _common_issues(
             "引用媒体", row.row, row.date, row.platform_code, row.delivery_mode,
-            row.thinking_mode, row.prompt_raw, "", config,
+            row.thinking_mode, row.prompt_raw, "", row.model_label, config,
         )
         if not row.media_name:
             row_issues.append(_issue(
@@ -639,8 +709,11 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
         )
         if key not in subtask_index:
             row_issues.append(_issue(
-                "引用媒体", row.row, "subtask_not_found",
-                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）",
+                "引用媒体", row.row,
+                "subtask_not_found" if answers_selected else "answers_not_selected",
+                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）"
+                if answers_selected else
+                "需要同时导入「问题问答」—— 引用媒体要挂在对应的回答记录上",
                 监控日期=row.date, AI大模型=row.model_label, 监控问题=row.prompt_raw,
             ))
         if row_issues:
@@ -673,7 +746,7 @@ _SHEET_TITLES = {
 
 #: 对账条内容 —— 外部列 -> 平台内部字段。
 _MAPPING_ROWS: list[MappingRow] = [
-    MappingRow(source="监控日期", target="Task.triggered_at · Run.triggered_at",
+    MappingRow(source="监控日期", target="Task.created_local_at · Run.triggered_at",
                note="按日期分组，一个日期一个任务"),
     MappingRow(source="AI大模型「豆包-网页版」",
                target="platform=doubao · delivery=web · thinking=否",
@@ -698,6 +771,20 @@ _MAPPING_ROWS: list[MappingRow] = [
 _MAX_DISTINCT = 500
 _MAX_SAMPLES = 20
 
+#: 每种错误码的「代表性取值」字段 —— distinct 列表只取这一个键的值，
+#: 否则 subtask_not_found 的日期 / 模型名 / 问题会混在同一个列表里。
+_DISTINCT_KEY: dict[str, str] = {
+    "brand_mismatch": "品牌名称",
+    "competitor_unregistered": "品牌名称",
+    "prompt_unregistered": "监控问题",
+    "prompt_ambiguous": "监控问题",
+    "platform_unregistered": "AI大模型",
+    "keyword_unregistered": "核心词",
+    "media_name_blank": "内容链接",
+    "subtask_not_found": "监控问题",
+    "answers_not_selected": "监控问题",
+}
+
 
 def _group_issues(issues: list[RowIssue]) -> list[ImportErrorGroup]:
     """按 (sheet, code) 聚合错误 —— 2190 行同因错误只带 20 条样本。"""
@@ -706,11 +793,11 @@ def _group_issues(issues: list[RowIssue]) -> list[ImportErrorGroup]:
         buckets.setdefault((issue.sheet, issue.code), []).append(issue)
     groups: list[ImportErrorGroup] = []
     for (sheet, code), items in buckets.items():
+        primary = _DISTINCT_KEY.get(code)
         distinct = sorted({
-            value
+            item.context.get(primary, "")
             for item in items
-            for value in item.context.values()
-            if value
+            if item.context.get(primary, "")
         })
         groups.append(ImportErrorGroup(
             sheet=sheet,
@@ -815,16 +902,21 @@ def preview_import(db: Session, project_id: int, content: bytes,
         "competitors": _sample_competitors,
         "citations": _sample_citations,
     }
+    chosen = set(SHEET_KEYS) if selected_sheets is None else set(selected_sheets)
     sheets: list[SheetPreview] = []
     for key in SHEET_KEYS:
         source = sources[key]
         ok = accepted[key]
+        is_selected = key in chosen
         sheets.append(SheetPreview(
             key=key,
             title=_SHEET_TITLES[key],
             total_rows=len(source),
             importable_rows=len(ok),
-            blocked_rows=len(source) - len(ok),
+            # 未勾选的 sheet 没参与校验 —— 「没选」不是「不匹配」，
+            # 别把它算成阻断行。
+            blocked_rows=(len(source) - len(ok)) if is_selected else 0,
+            selected=is_selected,
             subtasks=len({
                 subtask_key(r.date, r.platform_code, r.delivery_mode,
                             r.thinking_mode, normalize_prompt(r.prompt_raw))
@@ -833,10 +925,29 @@ def preview_import(db: Session, project_id: int, content: bytes,
             sample=samplers[key](source),
         ))
 
+    warnings = list(outcome.warnings)
+
+    # 与平台自身调度数据重叠：导入会为同一日期建一套平行的
+    # Task/Subtask/BrandMention，统计会翻倍 —— 明确告诉用户。
+    imported_dates = {r.date for r in outcome.answers}
+    if imported_dates:
+        existing = db.execute(
+            select(Task.created_local_at).where(Task.project_id == project_id)
+        ).scalars().all()
+        overlap = sorted({
+            d.strftime("%Y-%m-%d")
+            for d in existing
+            if isinstance(d, datetime) and d.strftime("%Y-%m-%d") in imported_dates
+        })
+        if overlap:
+            warnings.append(
+                f"这些日期平台已有监控数据（{overlap[0]} ~ {overlap[-1]}，"
+                f"共 {len(overlap)} 天）：导入后问题提及分析等页面的统计会包含两份数据"
+            )
+
     # 媒体词典覆盖检查：文件里出现但词典没有的域名，其引用在信源偏好里
     # 会落「其他」分类。字典的 category 是非空必填而 xlsx 没有该字段，
     # 所以**不自动补字典**，只在提示里列出缺失清单。
-    warnings = list(outcome.warnings)
     missing_hosts = _missing_media_hosts(db, outcome.citations)
     if missing_hosts:
         shown = "、".join(missing_hosts[:10])
@@ -933,6 +1044,36 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
     for row in outcome.answers:
         by_date[row.date].append(row)
 
+    # --- run 行先建 ---
+    # Task 要回填 schedule_run_id（信源偏好按它把引用归到执行期），
+    # 所以 run 必须先落库拿到 id。
+    runs: dict[str, ScheduleRun] = {}
+    for day in sorted(by_date):
+        cooldown = f"import:{project_id}:{day}"
+        run = db.scalar(
+            select(ScheduleRun).where(ScheduleRun.cooldown_key == cooldown)
+        )
+        modes = {"think" if r.thinking_mode else "fast" for r in by_date[day]}
+        mode = modes.pop() if len(modes) == 1 else ""
+        if run is None:
+            run = ScheduleRun(
+                project_id=project_id,
+                slot_index=0,
+                trigger_type=RunTrigger.MANUAL,
+                mode=mode,
+                cooldown_key=cooldown,
+                status=RunStatus.SUCCESS,
+                triggered_at=_day_start(day),
+                started_at=_day_start(day),
+                finished_at=_day_start(day),
+            )
+            db.add(run)
+            stats["runs_written"] += 1
+        run.task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
+        run.status = RunStatus.SUCCESS
+        runs[day] = run
+    db.flush()
+
     # --- task + subtask ---
     for day in sorted(by_date):
         rows = by_date[day]
@@ -953,7 +1094,11 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
         platforms: dict[tuple[str, bool], None] = {}
         for row in rows:
             platforms[(row.platform_code, row.thinking_mode)] = None
-        task.prompts_json = sorted({r.prompt_raw for r in rows})
+        # 用**项目配置里的 prompt 原文**，跟 subtask.prompt 保持一致
+        # （文件里的原文带 / 不带编号前缀，跟项目配置不一定一样）。
+        task.prompts_json = sorted({
+            outcome.resolved_prompts[normalize_prompt(r.prompt_raw)] for r in rows
+        })
         task.platforms_json = [
             {
                 "platform": code,
@@ -966,6 +1111,7 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
         task.total_items = len(rows)
         task.completed_items = len(rows)
         task.failed_items = 0
+        task.schedule_run_id = runs[day].id
         db.flush()
 
         for row in rows:
@@ -1070,35 +1216,10 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
         merged = existing + [r for r in new_refs if r["url"] not in existing_urls]
         # JSON 列必须整体重新赋值，不能原地 mutate。
         subtask.reference_list_json = merged
-        stats["citations_written"] += len(new_refs)
+        # 只记**实际新增**的引用 —— 重复导入时 url 已在库里，不能虚报。
+        stats["citations_written"] += len(merged) - len(existing)
 
     db.flush()
-
-    # --- run 行（一个监控日期一条） ---
-    for day in sorted(by_date):
-        task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
-        cooldown = f"import:{project_id}:{day}"
-        run = db.scalar(
-            select(ScheduleRun).where(ScheduleRun.cooldown_key == cooldown)
-        )
-        modes = {"think" if r.thinking_mode else "fast" for r in by_date[day]}
-        mode = modes.pop() if len(modes) == 1 else ""
-        if run is None:
-            run = ScheduleRun(
-                project_id=project_id,
-                slot_index=0,
-                trigger_type=RunTrigger.MANUAL,
-                mode=mode,
-                cooldown_key=cooldown,
-                status=RunStatus.SUCCESS,
-                triggered_at=_day_start(day),
-                started_at=_day_start(day),
-                finished_at=_day_start(day),
-            )
-            db.add(run)
-            stats["runs_written"] += 1
-        run.task_id = task_id
-        run.status = RunStatus.SUCCESS
 
     db.flush()
     return stats

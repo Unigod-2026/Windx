@@ -32,3 +32,25 @@ export function describeErrorGroup(group: ImportErrorGroup): string {
 export function describeTotals(totals: ImportTotals): string {
   return `共解析 ${totals.total_rows} 条，可导入 ${totals.importable_rows} 条，阻断 ${totals.blocked_rows} 条`;
 }
+
+/**
+ * 从 axios 错误里取出后端给的**可操作**文案。
+ *
+ * axios 的 `err.message` 是 "Request failed with status code 400" 这种
+ * 废话，后端的 `detail` 才是人话（"请到项目「编辑」里的『监控模型』补充"）。
+ * 仓库既有写法见 OwnArticlesImportModal.tsx / List.tsx / SettingsPane.tsx。
+ */
+export function apiErrorText(err: unknown, fallback = "操作失败"): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data
+    ?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    // FastAPI 的 422 校验错误是对象数组
+    return detail
+      .map((d) => (d as { msg?: string }).msg ?? JSON.stringify(d))
+      .join("；");
+  }
+  const msg = (err as Error)?.message;
+  if (msg && !/^Request failed with status code/.test(msg)) return msg;
+  return fallback;
+}

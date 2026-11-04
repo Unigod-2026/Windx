@@ -42,15 +42,21 @@ _MAX_XLSX_BYTES = 10 * 1024 * 1024
 async def preview(
     project_id: int,
     file: UploadFile = File(...),
+    sheets: str | None = Query(None),
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """解析 + 校验 + 聚合，不写库。可安全反复调用。"""
+    """解析 + 校验 + 聚合，不写库。可安全反复调用。
+
+    ``?sheets=`` 传勾选的 sheet —— 前端切换勾选时重新预览，页面上的
+    数字才跟实际要写入的量一致。
+    """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
     content = await _read_xlsx(file)
+    selected = _parse_sheets(sheets)
     try:
-        result = preview_import(db, project_id, content)
+        result = preview_import(db, project_id, content, selected)
     except ImportConfigError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -82,6 +88,10 @@ async def apply(
 
 
 def _parse_sheets(raw: str | None) -> list[str] | None:
+    """``?sheets=answers,citations`` -> 列表；参数缺省 -> None（全导）。
+
+    显式给了但解析出空列表（``?sheets=,``）→ 400，不让它静默变成「全导」。
+    """
     if not raw:
         return None
     keys = [item.strip() for item in raw.split(",") if item.strip()]
@@ -90,6 +100,11 @@ def _parse_sheets(raw: str | None) -> list[str] | None:
         raise HTTPException(
             status_code=400,
             detail=f"unknown sheet key(s): {', '.join(unknown)}",
+        )
+    if not keys:
+        raise HTTPException(
+            status_code=400,
+            detail="至少选择一张 sheet",
         )
     return keys
 

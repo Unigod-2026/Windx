@@ -55,6 +55,9 @@ class SheetPreview(BaseModel):
     importable_rows: int
     blocked_rows: int
     subtasks: int
+    #: 这一张是否被勾选导入 —— 未勾选的 sheet 不参与校验，
+    #: 不该报「阻断」（那是「没选」不是「不匹配」）。
+    selected: bool = True
     sample: list[dict[str, str]] = Field(default_factory=list)
 
 
