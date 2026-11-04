@@ -23,10 +23,11 @@ from datetime import date, datetime, time
 
 import openpyxl
 from openpyxl.utils.exceptions import InvalidFileException
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.enums import ExtractStatus, RunStatus, RunTrigger
+from app.models.import_batch import ImportBatch
 from app.models.media_dictionary import MediaDictionary
 from app.models.project import (
     BrandMention,
@@ -39,6 +40,7 @@ from app.models.project import (
 from app.models.schedule import ScheduleRun
 from app.models.task import Subtask, Task
 from app.schemas.import_data import (
+    DeleteImpact,
     ImportErrorGroup,
     ImportErrorSample,
     ImportPreviewOut,
@@ -446,20 +448,47 @@ class ValidationOutcome:
     subtask_index: dict[tuple, str]
 
 
+BATCH_ID_LEN = 16
+
+
+def file_hash_for(content: bytes) -> str:
+    """文件**内容**的 sha256 —— 同一份数据换个文件名重传仍是同一批次。"""
+    return hashlib.sha256(content).hexdigest()
+
+
+def batch_id_for(project_id: int, file_hash: str) -> str:
+    """批次 id = sha256(project_id:file_hash)[:16] —— 内容与项目共同决定。"""
+    return hashlib.sha256(
+        f"{project_id}:{file_hash}".encode()
+    ).hexdigest()[:BATCH_ID_LEN]
+
+
+def make_task_id(project_id: int, batch_id: str, date_str: str) -> str:
+    """导入的 task id —— 批次号编进去，每个批次的数据自成一体。"""
+    return f"imp_task_{project_id}_{batch_id}_{date_str.replace('-', '')}"
+
+
 def subtask_key(date: str, platform_code: str, delivery_mode: str,
                 thinking_mode: bool, prompt_norm: str) -> tuple:
     """跨表主键 —— 日期 × 平台 × 终端 × 思考 × 归一化问题。"""
     return (date, platform_code, delivery_mode, thinking_mode, prompt_norm)
 
 
-def make_subtask_id(project_id: int, key: tuple) -> str:
-    """确定性 subtask_id（列宽 64）。哈希取**归一化后**的问题，
-    文件里问题文本微调不会造出重复 subtask。"""
+def make_subtask_id(project_id: int, batch_id: str, key: tuple) -> str:
+    """导入的 subtask id。
+
+    批次号编进去，两个批次覆盖同一日期也不会撞主键。hash 里**必须包含
+    delivery_mode** —— chatgpt / 蚂蚁阿福 没有 mobile 变体，
+    (chatgpt, web) 与 (chatgpt, mobile) 的 platform_code 相同，
+    只有 hash 能区分。
+    """
     date, platform_code, delivery_mode, thinking_mode, prompt_norm = key
-    digest = hashlib.sha1(prompt_norm.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(
+        f"{date}|{platform_code}|{delivery_mode}|{int(thinking_mode)}|{prompt_norm}".encode()
+    ).hexdigest()[:8]
     return (
-        f"imp_{project_id}_{date.replace('-', '')}_{platform_code}"
-        f"_{delivery_mode}_{'T' if thinking_mode else 'F'}_{digest}"
+        f"imp_{project_id}_{batch_id}_{date.replace('-', '')}_{platform_code}"
+        f"_{'T' if thinking_mode else 'F'}_{digest}"
     )
 
 
@@ -569,7 +598,7 @@ def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
 
 
 def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
-                  selected_sheets=None) -> ValidationOutcome:
+                  selected_sheets=None, batch_id: str = "") -> ValidationOutcome:
     """六维逐行校验 —— 通过的行进 outcome，不通过的进 issues。"""
     config = load_project_config(db, project_id)
     # None = 三张全导（默认）；空列表 = 一张都不导（不能 fallback 成全导）
@@ -639,7 +668,7 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
             row.date, row.platform_code, row.delivery_mode,
             row.thinking_mode, normalize_prompt(row.prompt_raw),
         )
-        subtask_index[key] = make_subtask_id(project_id, key)
+        subtask_index[key] = make_subtask_id(project_id, batch_id, key)
 
     # --- 竞品分析 ---
     ok_competitors: list[CompetitorRow] = []
@@ -881,7 +910,9 @@ def preview_import(db: Session, project_id: int, content: bytes,
                    selected_sheets=None) -> ImportPreviewOut:
     """解析 + 校验 + 聚合，**不写库**。"""
     parsed = parse_workbook(content)
-    outcome = validate_rows(db, project_id, parsed, selected_sheets)
+    file_hash = file_hash_for(content)
+    batch_id = batch_id_for(project_id, file_hash)
+    outcome = validate_rows(db, project_id, parsed, selected_sheets, batch_id)
     project = db.get(Project, project_id)
     if project is None:
         raise ImportConfigError(f"project {project_id} not found")
@@ -926,6 +957,24 @@ def preview_import(db: Session, project_id: int, content: bytes,
         ))
 
     warnings = list(outcome.warnings)
+
+    # 与其它导入批次的数据重叠：新旧两个批次覆盖同一批日期 → 数据会有两份
+    imported_dates = {r.date for r in outcome.answers}
+    if imported_dates:
+        other_dates: set[str] = set()
+        for row in db.execute(
+            select(ImportBatch).where(ImportBatch.project_id == project_id)
+        ).scalars():
+            if row.id == batch_id:
+                continue          # 同一批次重导不算重叠
+            other_dates |= set(row.dates or [])
+        overlap = sorted(imported_dates & other_dates)
+        if overlap:
+            warnings.append(
+                f"这些日期已有其它导入批次的数据（{overlap[0]} ~ {overlap[-1]}，"
+                f"共 {len(overlap)} 天）：导入后同一批数据会有两份，"
+                "可在「导入历史」里撤销其中一次"
+            )
 
     # 与平台自身调度数据重叠：导入会为同一日期建一套平行的
     # Task/Subtask/BrandMention，统计会翻倍 —— 明确告诉用户。
@@ -988,6 +1037,72 @@ def preview_import(db: Session, project_id: int, content: bytes,
 # --------------------------------------------------------------------------
 
 
+def _compute_totals(parsed: ParsedWorkbook, outcome: ValidationOutcome) -> dict:
+    """批次的行数统计 —— 与 ImportTotals 同结构。"""
+    return {
+        "total_rows": len(parsed.answers) + len(parsed.competitors) + len(parsed.citations),
+        "importable_rows": (
+            len(outcome.answers) + len(outcome.competitors) + len(outcome.citations)
+        ),
+        "blocked_rows": _blocked_row_count(outcome.issues),
+        "tasks": len({r.date for r in outcome.answers}),
+        "subtasks": len(outcome.subtask_index),
+        "brand_mentions": len(outcome.competitors),
+        "citations": len(outcome.citations),
+    }
+
+
+def _batch_status(totals: dict) -> str:
+    """success / partial / failed。"""
+    if not totals.get("importable_rows"):
+        return "failed"
+    if totals.get("blocked_rows"):
+        return "partial"
+    return "success"
+
+
+def _upsert_batch(db: Session, *, batch_id: str, project_id: int, customer_id: int,
+                  file_name: str, file_hash: str, file_size: int,
+                  selected_sheets: list[str], totals: dict, errors: list[dict],
+                  warnings: list[str], dates: list[str], created_by: str) -> ImportBatch:
+    """取或建批次行。同一批次重复导入 → attempts +1，其余字段刷新。"""
+    batch = db.get(ImportBatch, batch_id)
+    if batch is not None and batch.project_id != project_id:
+        # 批次 id 碰撞（不同项目算出同一个 id）—— 绝不能静默复用别人的批次
+        raise ImportConfigError(
+            f"batch {batch_id} belongs to another project"
+        )
+    if batch is None:
+        batch = ImportBatch(
+            id=batch_id,
+            project_id=project_id,
+            customer_id=customer_id,
+            file_name=file_name or "未命名.xlsx",
+            file_hash=file_hash,
+            file_size=file_size,
+            status="failed",
+            selected_sheets=list(selected_sheets),
+            totals={},
+            errors=[],
+            warnings=[],
+            dates=[],
+            attempts=0,
+            created_by=created_by,
+        )
+        db.add(batch)
+    batch.attempts += 1
+    batch.file_name = file_name or batch.file_name
+    batch.file_size = file_size
+    batch.selected_sheets = list(selected_sheets)
+    batch.totals = dict(totals)
+    batch.errors = list(errors)
+    batch.warnings = list(warnings)
+    batch.dates = list(dates)
+    batch.status = _batch_status(totals)
+    db.flush()
+    return batch
+
+
 def _day_start(date_str: str) -> datetime:
     """监控日期 00:00:00 —— 平台所有分析窗口都按 created_at 过滤，
     历史数据必须回填到它自己的监控日，否则全堆在导入当天。"""
@@ -995,30 +1110,51 @@ def _day_start(date_str: str) -> datetime:
 
 
 def apply_import(db: Session, project_id: int, content: bytes,
-                 selected_sheets=None) -> ImportResultOut:
-    """解析 + 校验 + 落库（单事务）。
+                 selected_sheets=None, file_name: str = "",
+                 created_by: str = "") -> ImportResultOut:
+    """解析 + 校验 + 落库（单事务），并记录 / 更新导入批次。
 
-    幂等：subtask_id 由 (项目, 日期, 平台, 终端, 思考, 归一化问题) 确定性
-    合成；brand_mentions 靠表级 UNIQUE (subtask_id, brand)；run 靠
-    UNIQUE cooldown_key。
+    批次 = 「一份文件内容」×「一个项目」：同一份文件重复导入命中同一批次，
+    upsert 同一批行（不产生重复数据），批次的 status / totals / errors /
+    attempts / updated_at 刷新。
 
     与 ``extraction.py`` 的「SUCCESS sticky」契约**不同** —— 这里以文件
     为权威源，重传修正版文件必须能改写已填的重字段。
     """
     parsed = parse_workbook(content)
-    outcome = validate_rows(db, project_id, parsed, selected_sheets)
+    file_hash = file_hash_for(content)
+    batch_id = batch_id_for(project_id, file_hash)
+    outcome = validate_rows(db, project_id, parsed, selected_sheets, batch_id)
     project = db.get(Project, project_id)
     if project is None:
         raise ImportConfigError(f"project {project_id} not found")
 
     try:
-        stats = _write_rows(db, project_id, project, outcome)
+        stats = _write_rows(db, project_id, project, outcome, batch_id)
+        _upsert_batch(
+            db,
+            batch_id=batch_id,
+            project_id=project_id,
+            customer_id=project.customer_id,
+            file_name=file_name,
+            file_hash=file_hash,
+            file_size=len(content),
+            selected_sheets=(
+                sorted(selected_sheets) if selected_sheets else list(SHEET_KEYS)
+            ),
+            totals=_compute_totals(parsed, outcome),
+            errors=[g.model_dump() for g in _group_issues(outcome.issues)],
+            warnings=list(outcome.warnings),
+            dates=sorted({r.date for r in parsed.answers}),
+            created_by=created_by,
+        )
         db.commit()
     except Exception:
         db.rollback()
         raise
 
     return ImportResultOut(
+        batch_id=batch_id,
         tasks_created=stats["tasks_created"],
         tasks_updated=stats["tasks_updated"],
         subtasks_created=stats["subtasks_created"],
@@ -1032,7 +1168,8 @@ def apply_import(db: Session, project_id: int, content: bytes,
     )
 
 
-def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int]:
+def _write_rows(db: Session, project_id: int, project, outcome,
+                batch_id: str) -> dict[str, int]:
     stats = {
         "tasks_created": 0, "tasks_updated": 0,
         "subtasks_created": 0, "subtasks_updated": 0,
@@ -1049,7 +1186,7 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
     # 所以 run 必须先落库拿到 id。
     runs: dict[str, ScheduleRun] = {}
     for day in sorted(by_date):
-        cooldown = f"import:{project_id}:{day}"
+        cooldown = f"import:{project_id}:{batch_id}:{day}"
         run = db.scalar(
             select(ScheduleRun).where(ScheduleRun.cooldown_key == cooldown)
         )
@@ -1069,7 +1206,7 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
             )
             db.add(run)
             stats["runs_written"] += 1
-        run.task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
+        run.task_id = make_task_id(project_id, batch_id, day)
         run.status = RunStatus.SUCCESS
         runs[day] = run
     db.flush()
@@ -1077,7 +1214,7 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
     # --- task + subtask ---
     for day in sorted(by_date):
         rows = by_date[day]
-        task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
+        task_id = make_task_id(project_id, batch_id, day)
         task = db.get(Task, task_id)
         if task is None:
             task = Task(
@@ -1112,6 +1249,7 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
         task.completed_items = len(rows)
         task.failed_items = 0
         task.schedule_run_id = runs[day].id
+        task.import_batch_id = batch_id
         db.flush()
 
         for row in rows:
@@ -1223,3 +1361,87 @@ def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int
 
     db.flush()
     return stats
+
+
+# --------------------------------------------------------------------------
+# 撤销导入
+# --------------------------------------------------------------------------
+
+
+def _get_batch(db: Session, project_id: int, batch_id: str) -> ImportBatch:
+    batch = db.get(ImportBatch, batch_id)
+    if batch is None or batch.project_id != project_id:
+        raise ImportConfigError(f"import batch {batch_id} not found")
+    return batch
+
+
+def _batch_task_ids(db: Session, batch_id: str) -> list[str]:
+    return list(db.execute(
+        select(Task.task_id).where(Task.import_batch_id == batch_id)
+    ).scalars())
+
+
+def _batch_subtask_ids(db: Session, task_ids: list[str]) -> list[str]:
+    if not task_ids:
+        return []
+    return list(db.execute(
+        select(Subtask.subtask_id).where(Subtask.task_id.in_(task_ids))
+    ).scalars())
+
+
+def _chunks(items: list[str], size: int = 500):
+    """分片 —— IN (...) 的参数太多会撞 MySQL 的 max_allowed_packet。"""
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def compute_delete_impact(db: Session, project_id: int, batch_id: str) -> DeleteImpact:
+    """撤销这个批次会少掉多少数据 —— 撤销前先算给用户看。"""
+    _get_batch(db, project_id, batch_id)
+    task_ids = _batch_task_ids(db, batch_id)
+    subtask_ids = _batch_subtask_ids(db, task_ids)
+    mentions = 0
+    if subtask_ids:
+        mentions = db.execute(
+            select(func.count()).select_from(BrandMention).where(
+                BrandMention.subtask_id.in_(subtask_ids)
+            )
+        ).scalar() or 0
+    runs = db.execute(
+        select(func.count()).select_from(ScheduleRun).where(
+            ScheduleRun.cooldown_key.like(f"import:{project_id}:{batch_id}:%")
+        )
+    ).scalar() or 0
+    return DeleteImpact(
+        tasks=len(task_ids),
+        subtasks=len(subtask_ids),
+        brand_mentions=int(mentions),
+        runs=int(runs),
+    )
+
+
+def undo_import(db: Session, project_id: int, batch_id: str) -> DeleteImpact:
+    """撤销一次导入 —— 删掉它写入的全部行。
+
+    跨表关联列都是普通列、没有 ForeignKey，所以删除要手工按顺序做：
+    task → subtask → brand_mention → run → 批次行。
+    **平台自身抽取流水线写的 brand_mentions 不受影响** —— 删除只限定在
+    本批次的 subtask 集合内。
+    """
+    _get_batch(db, project_id, batch_id)
+    impact = compute_delete_impact(db, project_id, batch_id)
+    task_ids = _batch_task_ids(db, batch_id)
+    subtask_ids = _batch_subtask_ids(db, task_ids)
+
+    for chunk in _chunks(subtask_ids):
+        db.execute(delete(BrandMention).where(BrandMention.subtask_id.in_(chunk)))
+    for chunk in _chunks(subtask_ids):
+        db.execute(delete(Subtask).where(Subtask.subtask_id.in_(chunk)))
+    for chunk in _chunks(task_ids):
+        db.execute(delete(Task).where(Task.task_id.in_(chunk)))
+    db.execute(delete(ScheduleRun).where(
+        ScheduleRun.cooldown_key.like(f"import:{project_id}:{batch_id}:%")
+    ))
+    db.delete(db.get(ImportBatch, batch_id))
+    db.commit()
+    return impact

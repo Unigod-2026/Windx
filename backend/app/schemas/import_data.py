@@ -13,6 +13,15 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class DeleteImpact(BaseModel):
+    """撤销一次导入会少掉多少数据 —— 撤销前先算给用户看。"""
+
+    tasks: int = 0
+    subtasks: int = 0
+    brand_mentions: int = 0
+    runs: int = 0
+
+
 class ImportErrorSample(BaseModel):
     """单行明细样本。"""
 
@@ -85,6 +94,8 @@ class ImportPreviewOut(BaseModel):
 
 
 class ImportResultOut(BaseModel):
+    #: 本次导入所属批次（内容哈希 × 项目）—— 前端拿它跳到导入历史
+    batch_id: str = ""
     tasks_created: int
     tasks_updated: int
     subtasks_created: int
