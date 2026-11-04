@@ -53,6 +53,9 @@ class Task(Base):
         # whose lexical order matches insertion order, so "newest first" =
         # "task_id DESC".
         Index("ix_tasks_project_task", "project_id", "task_id"),
+        # ``WHERE import_batch_id = ?`` —— 撤销一次导入 / 算删除影响时按批次
+        # 找 task，没有索引就是全表扫。
+        Index("ix_tasks_import_batch", "import_batch_id"),
     )
 
     # Remote taskId (32-char hex) doubles as the PK — see

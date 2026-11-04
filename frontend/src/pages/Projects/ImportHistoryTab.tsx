@@ -47,6 +47,9 @@ export default function ImportHistoryTab({ projectId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<ImportBatchDetail | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // 撤销目标单独锁一份 —— 连点两行时两次 fetch 是并发的，后返回的响应会
+  // 覆盖共享的 detail，撤销就会删错批次（不可逆操作）。
+  const [pending, setPending] = useState<ImportBatchDetail | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [undoing, setUndoing] = useState(false);
 
@@ -67,26 +70,22 @@ export default function ImportHistoryTab({ projectId }: Props) {
     void load();
   }, [load]);
 
-  /** 取详情但不打开详情框 —— 撤销确认框也要用这些数字（删除影响）。 */
-  const fetchDetail = async (batchId: string) => {
-    const d = await getImportBatch(projectId, batchId);
-    setDetail(d);
-    return d;
-  };
-
   const openDetail = async (batchId: string) => {
     try {
-      await fetchDetail(batchId);
+      const d = await getImportBatch(projectId, batchId);
+      setDetail(d);
       setDetailOpen(true);
     } catch (err) {
       message.error(apiErrorText(err, "读取导入详情失败"));
     }
   };
 
-  /** 列表里的「撤销」：取到影响数字后直接开确认框，不叠开详情框。 */
+  /** 列表里的「撤销」：取到影响数字后直接开确认框，不叠开详情框。
+   *  取到的这份单独存进 pending —— 撤销只认 pending，不读共享的 detail。 */
   const openConfirm = async (batchId: string) => {
     try {
-      await fetchDetail(batchId);
+      const d = await getImportBatch(projectId, batchId);
+      setPending(d);
       setConfirmOpen(true);
     } catch (err) {
       message.error(apiErrorText(err, "读取导入详情失败"));
@@ -94,14 +93,15 @@ export default function ImportHistoryTab({ projectId }: Props) {
   };
 
   const handleUndo = async () => {
-    if (!detail) return;
+    if (!pending) return;
     setUndoing(true);
     try {
-      await deleteImportBatch(projectId, detail.id);
+      await deleteImportBatch(projectId, pending.id);
       message.success("已撤销这次导入");
       setConfirmOpen(false);
       setDetailOpen(false);
       setDetail(null);
+      setPending(null);
       await load();
     } catch (err) {
       message.error(apiErrorText(err, "撤销失败"));
@@ -132,9 +132,9 @@ export default function ImportHistoryTab({ projectId }: Props) {
       ),
     },
     {
-      title: "写入行数",
+      title: "最近一次写入",
       dataIndex: "totals",
-      width: 110,
+      width: 130,
       render: (t: Record<string, number>) => t.importable_rows ?? 0,
     },
     {
@@ -214,7 +214,10 @@ export default function ImportHistoryTab({ projectId }: Props) {
             key="undo"
             type="primary"
             danger
-            onClick={() => setConfirmOpen(true)}
+            onClick={() => {
+              setDetailOpen(false);
+              void openConfirm(detail?.id ?? "");
+            }}
           >
             撤销这次导入
           </Button>,
@@ -296,7 +299,7 @@ export default function ImportHistoryTab({ projectId }: Props) {
         onCancel={() => setConfirmOpen(false)}
         onOk={handleUndo}
       >
-        {detail && (
+        {pending && (
           <Space direction="vertical" size={8}>
             <Alert
               type="warning"
@@ -304,10 +307,10 @@ export default function ImportHistoryTab({ projectId }: Props) {
               message="撤销会永久删除这次导入写入的数据，无法撤销。"
             />
             <div className="imh-impact">
-              将删除 <strong>{detail.delete_impact.tasks}</strong> 个任务、
-              <strong>{detail.delete_impact.subtasks}</strong> 个子任务、
-              <strong>{detail.delete_impact.brand_mentions}</strong> 条品牌提及、
-              <strong>{detail.delete_impact.runs}</strong> 条执行记录。
+              将删除 <strong>{pending.delete_impact.tasks}</strong> 个任务、
+              <strong>{pending.delete_impact.subtasks}</strong> 个子任务、
+              <strong>{pending.delete_impact.brand_mentions}</strong> 条品牌提及、
+              <strong>{pending.delete_impact.runs}</strong> 条执行记录。
             </div>
             <div className="imh-impact-hint">
               删除后项目会回到导入前的状态。重新导入同一份文件即可重新入库。

@@ -49,7 +49,7 @@ function ErrorGroupBlock({ group }: { group: ImportErrorGroup }) {
             onClick={copyAll}
             style={{ paddingLeft: 0 }}
           >
-            复制全部 {group.distinct.length} 个名称
+            复制这 {group.distinct.length} 个名称
           </Button>
         </>
       )}

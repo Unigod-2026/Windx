@@ -33,6 +33,7 @@ from app.schemas.import_data import (
 )
 from app.services.import_monitor_data import (
     SHEET_KEYS,
+    ImportBatchCollision,
     ImportConfigError,
     apply_import,
     compute_delete_impact,
@@ -49,7 +50,7 @@ _MAX_XLSX_BYTES = 10 * 1024 * 1024
 
 
 @router.post("/preview", response_model=ImportPreviewOut)
-async def preview(
+def preview(
     project_id: int,
     file: UploadFile = File(...),
     sheets: str | None = Query(None),
@@ -63,10 +64,15 @@ async def preview(
     """
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
-    content = await _read_xlsx(file)
+    content = _read_xlsx(file)
     selected = _parse_sheets(sheets)
     try:
         result = preview_import(db, project_id, content, selected)
+    except ImportBatchCollision as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="批次标识与其它项目冲突，请重试或联系管理员",
+        ) from exc
     except ImportConfigError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -77,7 +83,7 @@ async def preview(
 
 
 @router.post("/apply", response_model=ImportResultOut)
-async def apply(
+def apply(
     project_id: int,
     file: UploadFile = File(...),
     sheets: str | None = Query(None),
@@ -87,7 +93,7 @@ async def apply(
     """解析 + 校验 + 落库（单事务）。``?sheets=`` 缺省 = 三张全导。"""
     project = _get_project(db, project_id)
     _assert_customer_access(user, project)
-    content = await _read_xlsx(file)
+    content = _read_xlsx(file)
     selected = _parse_sheets(sheets)
     try:
         return apply_import(
@@ -98,6 +104,11 @@ async def apply(
             file_name=file.filename or "",
             created_by=user.username or "",
         )
+    except ImportBatchCollision as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="批次标识与其它项目冲突，请重试或联系管理员",
+        ) from exc
     except ImportConfigError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -126,11 +137,17 @@ def _parse_sheets(raw: str | None) -> list[str] | None:
     return keys
 
 
-async def _read_xlsx(file: UploadFile) -> bytes:
+def _read_xlsx(file: UploadFile) -> bytes:
+    """读 xlsx 字节。
+
+    端点是同步 def（丢给 FastAPI 的线程池），所以直接读底层文件对象 ——
+    解析 + 校验 + 落库都是 CPU/IO 密集的同步工作，跑在事件循环里会把整个
+    平台（回调 / polling / 所有页面 API）一起卡住。
+    """
     name = (file.filename or "").lower()
     if not name.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="only .xlsx files supported")
-    content = await file.read()
+    content = file.file.read()
     if len(content) > _MAX_XLSX_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 10MB)")
     return content

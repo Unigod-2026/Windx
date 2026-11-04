@@ -413,6 +413,15 @@ class ImportConfigError(Exception):
     """项目不存在或配置读不出来 —— endpoint 层转 404 / 400。"""
 
 
+class ImportBatchCollision(ImportConfigError):
+    """批次 id 撞上了别的项目的批次 —— endpoint 层转 409。
+
+    正常情况下算不出来（批次 id 的哈希里含 project_id），只有哈希截断
+    碰撞或手工插库才会遇到。绝不能静默复用别人的批次 —— 那会让撤销
+    删错数据。
+    """
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     brand: str
@@ -579,7 +588,14 @@ def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
             "该问题在项目配置里有多个候选，无法确定对应哪一条",
             监控问题=prompt_raw,
         ))
-    if (platform_code, delivery_mode, thinking_mode) not in config.platform_keys:
+    if not platform_code:
+        # 模型名根本认不出来 —— 指路「去项目里补」是错的，加了也没用
+        issues.append(_issue(
+            sheet, row_no, "unknown_model",
+            "认不出这个模型名（不在已知模型列表里），请确认文件里的模型名称",
+            AI大模型=model_label,
+        ))
+    elif (platform_code, delivery_mode, thinking_mode) not in config.platform_keys:
         issues.append(_issue(
             sheet, row_no, "platform_unregistered",
             "该模型 / 终端组合不在当前项目的模型配置里，"
@@ -717,6 +733,36 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
                 "已按模型标签为准"
             )
 
+    # 竞品分析按 (日期/模型/问题, 品牌) 去重。
+    # 落库时 BrandMention 的 (subtask_id, brand) 是 UNIQUE，而生产 session
+    # factory 是 autoflush=False —— 同一事务里刚 add 的行下一次 SELECT 查不到，
+    # 重复行会 add 两次 → IntegrityError → 整批 500。
+    # 同一品牌同时被文件标成「监控品牌」和「竞品品牌」时也走这里折叠，
+    # 保留「监控品牌」那条（is_self 语义更准）。
+    kept_competitors: list[CompetitorRow] = []
+    competitor_index: dict[tuple, int] = {}
+    collapsed_competitors = 0
+    for row in ok_competitors:
+        ckey = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        ) + (row.brand,)
+        at = competitor_index.get(ckey)
+        if at is None:
+            competitor_index[ckey] = len(kept_competitors)
+            kept_competitors.append(row)
+            continue
+        collapsed_competitors += 1
+        kept = kept_competitors[at]
+        if row.brand_type == "监控品牌" and kept.brand_type != "监控品牌":
+            kept_competitors[at] = row
+    if collapsed_competitors:
+        warnings.append(
+            f"文件里有 {collapsed_competitors} 行的（日期 / 模型 / 问题 / 品牌）"
+            "与其它行重复，导入时每组只保留第一条"
+        )
+    ok_competitors = kept_competitors
+
     # --- 引用媒体 ---
     ok_citations: list[CitationRow] = []
     for row in parsed.citations:
@@ -797,7 +843,7 @@ _MAPPING_ROWS: list[MappingRow] = [
                note="site 存中文媒体名，host 从 url 提取"),
 ]
 
-_MAX_DISTINCT = 500
+_MAX_DISTINCT = 5000
 _MAX_SAMPLES = 20
 
 #: 每种错误码的「代表性取值」字段 —— distinct 列表只取这一个键的值，
@@ -808,6 +854,7 @@ _DISTINCT_KEY: dict[str, str] = {
     "prompt_unregistered": "监控问题",
     "prompt_ambiguous": "监控问题",
     "platform_unregistered": "AI大模型",
+    "unknown_model": "AI大模型",
     "keyword_unregistered": "核心词",
     "media_name_blank": "内容链接",
     "subtask_not_found": "监控问题",
@@ -918,6 +965,12 @@ def preview_import(db: Session, project_id: int, content: bytes,
         raise ImportConfigError(f"project {project_id} not found")
 
     blocked = _blocked_row_count(outcome.issues)
+    # 每张 sheet 的阻断行数也从 issues 统计 —— 「被折叠的重复行」不是阻断，
+    # 否则同一屏上「2 行 · 可导入 1 · 阻断 1」和绿色的「通过」互相打架。
+    blocked_pairs = {(i.sheet, i.row) for i in outcome.issues}
+    blocked_by_sheet: dict[str, int] = {}
+    for sheet_name, _row_no in blocked_pairs:
+        blocked_by_sheet[sheet_name] = blocked_by_sheet.get(sheet_name, 0) + 1
     sources = {
         "answers": parsed.answers,
         "competitors": parsed.competitors,
@@ -945,8 +998,9 @@ def preview_import(db: Session, project_id: int, content: bytes,
             total_rows=len(source),
             importable_rows=len(ok),
             # 未勾选的 sheet 没参与校验 —— 「没选」不是「不匹配」，
-            # 别把它算成阻断行。
-            blocked_rows=(len(source) - len(ok)) if is_selected else 0,
+            # 别把它算成阻断行。已勾选的 sheet 阻断数按 issues 去重统计
+            # （同一行命中多个维度只算一行）。
+            blocked_rows=blocked_by_sheet.get(_SHEET_TITLES[key], 0) if is_selected else 0,
             selected=is_selected,
             subtasks=len({
                 subtask_key(r.date, r.platform_code, r.delivery_mode,
@@ -958,17 +1012,23 @@ def preview_import(db: Session, project_id: int, content: bytes,
 
     warnings = list(outcome.warnings)
 
-    # 与其它导入批次的数据重叠：新旧两个批次覆盖同一批日期 → 数据会有两份
+    # 与其它导入批次的数据重叠：新旧两个批次覆盖同一批日期 → 数据会有两份。
+    # 查的是**实际落库的 task**（import_batch_id 非空），不是批次的 dates ——
+    # 后者记的是「解析到的日期」，一个 0 行写入的批次会让这里误报重叠。
     imported_dates = {r.date for r in outcome.answers}
     if imported_dates:
-        other_dates: set[str] = set()
-        for row in db.execute(
-            select(ImportBatch).where(ImportBatch.project_id == project_id)
-        ).scalars():
-            if row.id == batch_id:
-                continue          # 同一批次重导不算重叠
-            other_dates |= set(row.dates or [])
-        overlap = sorted(imported_dates & other_dates)
+        existing_import_days = db.execute(
+            select(Task.created_local_at).where(
+                Task.project_id == project_id,
+                Task.import_batch_id.isnot(None),
+                Task.import_batch_id != batch_id,
+            )
+        ).scalars().all()
+        overlap = sorted({
+            d.strftime("%Y-%m-%d")
+            for d in existing_import_days
+            if isinstance(d, datetime) and d.strftime("%Y-%m-%d") in imported_dates
+        })
         if overlap:
             warnings.append(
                 f"这些日期已有其它导入批次的数据（{overlap[0]} ~ {overlap[-1]}，"
@@ -981,7 +1041,10 @@ def preview_import(db: Session, project_id: int, content: bytes,
     imported_dates = {r.date for r in outcome.answers}
     if imported_dates:
         existing = db.execute(
-            select(Task.created_local_at).where(Task.project_id == project_id)
+            select(Task.created_local_at).where(
+                Task.project_id == project_id,
+                Task.import_batch_id.is_(None),
+            )
         ).scalars().all()
         overlap = sorted({
             d.strftime("%Y-%m-%d")
@@ -1069,7 +1132,7 @@ def _upsert_batch(db: Session, *, batch_id: str, project_id: int, customer_id: i
     batch = db.get(ImportBatch, batch_id)
     if batch is not None and batch.project_id != project_id:
         # 批次 id 碰撞（不同项目算出同一个 id）—— 绝不能静默复用别人的批次
-        raise ImportConfigError(
+        raise ImportBatchCollision(
             f"batch {batch_id} belongs to another project"
         )
     if batch is None:
@@ -1140,7 +1203,9 @@ def apply_import(db: Session, project_id: int, content: bytes,
             file_hash=file_hash,
             file_size=len(content),
             selected_sheets=(
-                sorted(selected_sheets) if selected_sheets else list(SHEET_KEYS)
+                sorted(selected_sheets)
+                if selected_sheets is not None
+                else list(SHEET_KEYS)
             ),
             totals=_compute_totals(parsed, outcome),
             errors=[g.model_dump() for g in _group_issues(outcome.issues)],
@@ -1170,6 +1235,11 @@ def apply_import(db: Session, project_id: int, content: bytes,
 
 def _write_rows(db: Session, project_id: int, project, outcome,
                 batch_id: str) -> dict[str, int]:
+    # 项目填了核心卖点 → is_correct 要靠 LLM 判断，导入不跑（留 NULL）；
+    # 没填 → 按抽取流水线的短路规则置 True。
+    semantic = project.semantic_json if isinstance(project.semantic_json, dict) else {}
+    raw_points = semantic.get("selling_points")
+    selling_points = [p for p in raw_points if str(p).strip()] if isinstance(raw_points, list) else []
     stats = {
         "tasks_created": 0, "tasks_updated": 0,
         "subtasks_created": 0, "subtasks_updated": 0,
@@ -1313,6 +1383,11 @@ def _write_rows(db: Session, project_id: int, project, outcome,
             stats["brand_mentions_written"] += 1
         else:
             stats["brand_mentions_updated"] += 1
+        # is_correct 对齐 extraction.py 的短路规则：项目没填核心卖点时，
+        # 「没有基准就谈不上错」→ True。留 NULL 会进 KPI 分母不進分子，
+        # 把工作台的正确率摊薄。
+        if not selling_points:
+            mention.is_correct = True
         mention.is_mention = 1 if row.mention_count and row.mention_count > 0 else 0
         mention.rank_position = row.avg_rank
         mention.sentiment = row.sentiment
