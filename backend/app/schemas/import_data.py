@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -106,3 +108,37 @@ class ImportResultOut(BaseModel):
     runs_written: int
     skipped_rows: int
     errors: list[ImportErrorGroup] = Field(default_factory=list)
+
+
+class ImportBatchSummary(BaseModel):
+    """批次列表里的一行。"""
+
+    id: str
+    file_name: str
+    #: success / partial / failed
+    status: str
+    totals: dict = Field(default_factory=dict)
+    #: 同一批次被导入过几次
+    attempts: int = 0
+    #: 本批次覆盖的监控日期
+    dates: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    created_by: str = ""
+
+
+class ImportBatchListOut(BaseModel):
+    items: list[ImportBatchSummary] = Field(default_factory=list)
+    total: int = 0
+
+
+class ImportBatchDetailOut(ImportBatchSummary):
+    """批次详情 —— 含完整错误清单与撤销影响统计。"""
+
+    customer_id: int = 0
+    file_hash: str = ""
+    file_size: int = 0
+    selected_sheets: list[str] = Field(default_factory=list)
+    errors: list[dict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    delete_impact: DeleteImpact = Field(default_factory=DeleteImpact)
