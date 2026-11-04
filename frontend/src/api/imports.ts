@@ -66,6 +66,8 @@ export interface ImportPreview {
 }
 
 export interface ImportResult {
+  /** 本次导入所属批次（内容哈希 × 项目）—— 前端拿它跳到导入历史。 */
+  batch_id: string;
   tasks_created: number;
   tasks_updated: number;
   subtasks_created: number;
@@ -115,4 +117,73 @@ export async function applyImportData(
     { headers: { "Content-Type": "multipart/form-data" } },
   );
   return data;
+}
+
+
+export type ImportBatchStatus = "success" | "partial" | "failed";
+
+export interface ImportBatchSummary {
+  id: string;
+  file_name: string;
+  status: ImportBatchStatus;
+  totals: Record<string, number>;
+  /** 同一批次被导入过几次。 */
+  attempts: number;
+  /** 本批次覆盖的监控日期。 */
+  dates: string[];
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export interface ImportBatchListOut {
+  items: ImportBatchSummary[];
+  total: number;
+}
+
+/** 撤销这次导入会少掉多少数据。 */
+export interface DeleteImpact {
+  tasks: number;
+  subtasks: number;
+  brand_mentions: number;
+  runs: number;
+}
+
+export interface ImportBatchDetail extends ImportBatchSummary {
+  customer_id: number;
+  file_hash: string;
+  file_size: number;
+  selected_sheets: string[];
+  errors: ImportErrorGroup[];
+  warnings: string[];
+  delete_impact: DeleteImpact;
+}
+
+/** 批次列表 —— 按最近导入时间倒序。 */
+export async function listImportBatches(
+  projectId: number,
+): Promise<ImportBatchListOut> {
+  const { data } = await client.get<ImportBatchListOut>(
+    `/projects/${projectId}/imports/batches`,
+  );
+  return data;
+}
+
+/** 批次详情 —— 含完整错误清单与撤销影响统计。 */
+export async function getImportBatch(
+  projectId: number,
+  batchId: string,
+): Promise<ImportBatchDetail> {
+  const { data } = await client.get<ImportBatchDetail>(
+    `/projects/${projectId}/imports/batches/${batchId}`,
+  );
+  return data;
+}
+
+/** 撤销一次导入 —— 硬删它写入的全部行，不可撤销。 */
+export async function deleteImportBatch(
+  projectId: number,
+  batchId: string,
+): Promise<void> {
+  await client.delete(`/projects/${projectId}/imports/batches/${batchId}`);
 }

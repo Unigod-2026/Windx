@@ -54,3 +54,19 @@ export function apiErrorText(err: unknown, fallback = "操作失败"): string {
   if (msg && !/^Request failed with status code/.test(msg)) return msg;
   return fallback;
 }
+
+export type BatchStatus = "success" | "partial" | "failed";
+
+/** 批次状态 → 中文标签。未知状态兜底成「失败」（宁可警示也不要假装成功）。 */
+export function batchStatusLabel(status: string): string {
+  if (status === "success") return "成功";
+  if (status === "partial") return "部分成功";
+  return "失败";
+}
+
+/** 批次状态 → antd Tag 的颜色。 */
+export function batchStatusTone(status: string): "green" | "orange" | "red" {
+  if (status === "success") return "green";
+  if (status === "partial") return "orange";
+  return "red";
+}

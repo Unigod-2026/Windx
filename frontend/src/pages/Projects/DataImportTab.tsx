@@ -17,7 +17,6 @@ import {
   Button,
   Collapse,
   Empty,
-  Space,
   Spin,
   Switch,
   Table,
@@ -26,7 +25,7 @@ import {
   message,
 } from "antd";
 import type { TableColumnsType, UploadProps } from "antd";
-import { CloudUploadOutlined, CopyOutlined } from "@ant-design/icons";
+import { CloudUploadOutlined } from "@ant-design/icons";
 import {
   applyImportData,
   previewImportData,
@@ -38,11 +37,11 @@ import {
 } from "../../api/imports";
 import {
   apiErrorText,
-  describeErrorGroup,
   describeTotals,
   sheetTone,
   toneLabel,
 } from "./importPreview";
+import ImportErrorGroups from "./ImportErrorGroups";
 import "./DataImportTab.css";
 
 type Phase = "idle" | "previewing" | "previewed" | "importing" | "done";
@@ -359,13 +358,7 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
                   查看 {sheet.blocked_rows} 行被阻断的原因
                 </span>
               ),
-              children: (
-                <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                  {errors.map((g) => (
-                    <ErrorGroupBlock key={g.code} group={g} />
-                  ))}
-                </Space>
-              ),
+              children: <ImportErrorGroups groups={errors} />,
             },
           ]}
         />
@@ -383,58 +376,5 @@ function SheetSection({ sheet, errors, checked, onToggle }: SheetSectionProps) {
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可预览的数据" />
       )}
     </section>
-  );
-}
-
-function ErrorGroupBlock({ group }: { group: ImportErrorGroup }) {
-  const copyAll = async () => {
-    try {
-      await navigator.clipboard.writeText(group.distinct.join("\n"));
-      message.success(`已复制 ${group.distinct.length} 个名称`);
-    } catch {
-      message.error("复制失败，请手动选中下方文本");
-    }
-  };
-
-  return (
-    <div>
-      <div style={{ fontSize: 13, fontWeight: 600 }}>
-        {describeErrorGroup(group)}
-      </div>
-      {group.distinct.length > 0 && (
-        <>
-          <div className="dit-error-values">
-            {group.distinct.join("、")}
-          </div>
-          <Button
-            size="small"
-            type="link"
-            icon={<CopyOutlined />}
-            onClick={copyAll}
-            style={{ paddingLeft: 0 }}
-          >
-            复制全部 {group.distinct.length} 个名称
-          </Button>
-        </>
-      )}
-      <Table
-        size="small"
-        rowKey="row"
-        pagination={{ pageSize: 5, size: "small" }}
-        style={{ marginTop: 8 }}
-        dataSource={group.samples}
-        columns={[
-          { title: "行号", dataIndex: "row", width: 70 },
-          {
-            title: "内容",
-            dataIndex: "context",
-            render: (ctx: Record<string, string>) =>
-              Object.entries(ctx)
-                .map(([k, v]) => `${k}: ${v}`)
-                .join(" · "),
-          },
-        ]}
-      />
-    </div>
   );
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ImportErrorGroup, ImportTotals, SheetPreview } from "../../api/imports";
 import {
   apiErrorText,
+  batchStatusLabel,
+  batchStatusTone,
   describeErrorGroup,
   describeTotals,
   sheetTone,
@@ -106,5 +108,26 @@ describe("apiErrorText", () => {
   it("422 的对象数组也能转成人话", () => {
     const err = { response: { data: { detail: [{ msg: "field required" }] } } };
     expect(apiErrorText(err)).toContain("field required");
+  });
+});
+
+
+describe("batchStatusLabel", () => {
+  it("三种状态各有中文标签", () => {
+    expect(batchStatusLabel("success")).toBe("成功");
+    expect(batchStatusLabel("partial")).toBe("部分成功");
+    expect(batchStatusLabel("failed")).toBe("失败");
+  });
+
+  it("未知状态兜底成「失败」", () => {
+    expect(batchStatusLabel("weird" as never)).toBe("失败");
+  });
+});
+
+describe("batchStatusTone", () => {
+  it("success 绿 / partial 橙 / failed 红", () => {
+    expect(batchStatusTone("success")).toBe("green");
+    expect(batchStatusTone("partial")).toBe("orange");
+    expect(batchStatusTone("failed")).toBe("red");
   });
 });
