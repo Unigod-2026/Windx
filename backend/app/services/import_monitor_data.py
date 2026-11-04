@@ -16,24 +16,31 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 
 import openpyxl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.enums import ExtractStatus, RunStatus, RunTrigger
 from app.models.media_dictionary import MediaDictionary
 from app.models.project import (
+    BrandMention,
     Project,
     ProjectCompetitor,
     ProjectKeyword,
     ProjectPlatform,
     ProjectPrompt,
 )
+from app.models.schedule import ScheduleRun
+from app.models.task import Subtask, Task
 from app.schemas.import_data import (
     ImportErrorGroup,
     ImportErrorSample,
     ImportPreviewOut,
+    ImportResultOut,
     ImportTotals,
     ImportWarning,
     MappingRow,
@@ -863,3 +870,235 @@ def preview_import(db: Session, project_id: int, content: bytes,
             _SHEET_TITLES[key] for key in SHEET_KEYS if key not in parsed.found_sheets
         ],
     )
+
+
+# --------------------------------------------------------------------------
+# 落库
+# --------------------------------------------------------------------------
+
+
+def _day_start(date_str: str) -> datetime:
+    """监控日期 00:00:00 —— 平台所有分析窗口都按 created_at 过滤，
+    历史数据必须回填到它自己的监控日，否则全堆在导入当天。"""
+    return datetime.combine(date.fromisoformat(date_str), time.min)
+
+
+def apply_import(db: Session, project_id: int, content: bytes,
+                 selected_sheets=None) -> ImportResultOut:
+    """解析 + 校验 + 落库（单事务）。
+
+    幂等：subtask_id 由 (项目, 日期, 平台, 终端, 思考, 归一化问题) 确定性
+    合成；brand_mentions 靠表级 UNIQUE (subtask_id, brand)；run 靠
+    UNIQUE cooldown_key。
+
+    与 ``extraction.py`` 的「SUCCESS sticky」契约**不同** —— 这里以文件
+    为权威源，重传修正版文件必须能改写已填的重字段。
+    """
+    parsed = parse_workbook(content)
+    outcome = validate_rows(db, project_id, parsed, selected_sheets)
+    project = db.get(Project, project_id)
+    if project is None:
+        raise ImportConfigError(f"project {project_id} not found")
+
+    try:
+        stats = _write_rows(db, project_id, project, outcome)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return ImportResultOut(
+        tasks_created=stats["tasks_created"],
+        tasks_updated=stats["tasks_updated"],
+        subtasks_created=stats["subtasks_created"],
+        subtasks_updated=stats["subtasks_updated"],
+        brand_mentions_written=stats["brand_mentions_written"],
+        brand_mentions_updated=stats["brand_mentions_updated"],
+        citations_written=stats["citations_written"],
+        runs_written=stats["runs_written"],
+        skipped_rows=_blocked_row_count(outcome.issues),
+        errors=_group_issues(outcome.issues),
+    )
+
+
+def _write_rows(db: Session, project_id: int, project, outcome) -> dict[str, int]:
+    stats = {
+        "tasks_created": 0, "tasks_updated": 0,
+        "subtasks_created": 0, "subtasks_updated": 0,
+        "brand_mentions_written": 0, "brand_mentions_updated": 0,
+        "citations_written": 0, "runs_written": 0,
+    }
+
+    by_date: dict[str, list] = defaultdict(list)
+    for row in outcome.answers:
+        by_date[row.date].append(row)
+
+    # --- task + subtask ---
+    for day in sorted(by_date):
+        rows = by_date[day]
+        task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
+        task = db.get(Task, task_id)
+        if task is None:
+            task = Task(
+                task_id=task_id,
+                status="completed",
+                project_id=project_id,
+                customer_id=project.customer_id,
+                created_local_at=_day_start(day),
+            )
+            db.add(task)
+            stats["tasks_created"] += 1
+        else:
+            stats["tasks_updated"] += 1
+        platforms: dict[tuple[str, bool], None] = {}
+        for row in rows:
+            platforms[(row.platform_code, row.thinking_mode)] = None
+        task.prompts_json = sorted({r.prompt_raw for r in rows})
+        task.platforms_json = [
+            {
+                "platform": code,
+                "mode": "reasoning_search" if thinking else "search",
+                "screenshot": False,
+                "thinkingMode": thinking,
+            }
+            for (code, thinking) in sorted(platforms)
+        ]
+        task.total_items = len(rows)
+        task.completed_items = len(rows)
+        task.failed_items = 0
+        db.flush()
+
+        for row in rows:
+            key = subtask_key(
+                row.date, row.platform_code, row.delivery_mode,
+                row.thinking_mode, normalize_prompt(row.prompt_raw),
+            )
+            subtask_id = outcome.subtask_index[key]
+            subtask = db.get(Subtask, subtask_id)
+            if subtask is None:
+                subtask = Subtask(subtask_id=subtask_id, task_id=task_id)
+                db.add(subtask)
+                stats["subtasks_created"] += 1
+            else:
+                stats["subtasks_updated"] += 1
+            subtask.platform = row.platform_code
+            subtask.mode = "reasoning_search" if row.thinking_mode else "search"
+            subtask.prompt = outcome.resolved_prompts[normalize_prompt(row.prompt_raw)]
+            subtask.status = "completed"
+            subtask.time = day
+            subtask.answer_content = row.answer_content
+            subtask.page_screenshot = row.screenshot or None
+            # geo_subtasks 没有 created_at 列；信源偏好的时间窗口走
+            # Task.created_local_at（source_preferences.py join Task 后过滤）。
+            # updated_at 不回填 —— 该列带 onupdate=now_local，任何 UPDATE 都会
+            # 盖成当前时刻，它的语义本来就是「最后写入时间」。
+
+    db.flush()
+
+    # --- brand_mentions ---
+    for row in outcome.competitors:
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        subtask_id = outcome.subtask_index[key]
+        subtask = db.get(Subtask, subtask_id)
+        if subtask is None:
+            continue
+        mention = db.scalar(
+            select(BrandMention).where(
+                BrandMention.subtask_id == subtask_id,
+                BrandMention.brand == row.brand,
+            )
+        )
+        if mention is None:
+            mention = BrandMention(
+                subtask_id=subtask_id,
+                task_id=subtask.task_id,
+                project_id=project_id,
+                customer_id=project.customer_id,
+                prompt=outcome.resolved_prompts[normalize_prompt(row.prompt_raw)],
+                platform=row.platform_code,
+                brand=row.brand,
+                is_self=(row.brand_type == "监控品牌"),
+                thinking_mode=row.thinking_mode,
+                delivery_mode=row.delivery_mode,
+                created_at=_day_start(row.date),
+            )
+            db.add(mention)
+            stats["brand_mentions_written"] += 1
+        else:
+            stats["brand_mentions_updated"] += 1
+        mention.is_mention = 1 if row.mention_count and row.mention_count > 0 else 0
+        mention.rank_position = row.avg_rank
+        mention.sentiment = row.sentiment
+        mention.is_recommended = bool(
+            row.avg_rank is not None and 1 <= row.avg_rank <= 5
+        )
+        mention.extract_status = (
+            ExtractStatus.SUCCESS if row.avg_rank is not None else ExtractStatus.SKIPPED
+        )
+        mention.extract_error = None
+
+    db.flush()
+
+    # --- 引用媒体（按 subtask 合并进 reference_list_json，url 去重） ---
+    refs_by_subtask: dict[str, list[dict]] = defaultdict(list)
+    seen_urls: dict[str, set[str]] = defaultdict(set)
+    for row in outcome.citations:
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        subtask_id = outcome.subtask_index[key]
+        if row.url in seen_urls[subtask_id]:
+            continue
+        seen_urls[subtask_id].add(row.url)
+        refs_by_subtask[subtask_id].append({
+            "url": row.url,
+            "site": row.media_name,
+            "title": row.title,
+        })
+    for subtask_id, new_refs in refs_by_subtask.items():
+        subtask = db.get(Subtask, subtask_id)
+        if subtask is None:
+            continue
+        existing = list(subtask.reference_list_json or [])
+        existing_urls = {
+            item.get("url") for item in existing if isinstance(item, dict)
+        }
+        merged = existing + [r for r in new_refs if r["url"] not in existing_urls]
+        # JSON 列必须整体重新赋值，不能原地 mutate。
+        subtask.reference_list_json = merged
+        stats["citations_written"] += len(new_refs)
+
+    db.flush()
+
+    # --- run 行（一个监控日期一条） ---
+    for day in sorted(by_date):
+        task_id = f"imp_task_{project_id}_{day.replace('-', '')}"
+        cooldown = f"import:{project_id}:{day}"
+        run = db.scalar(
+            select(ScheduleRun).where(ScheduleRun.cooldown_key == cooldown)
+        )
+        modes = {"think" if r.thinking_mode else "fast" for r in by_date[day]}
+        mode = modes.pop() if len(modes) == 1 else ""
+        if run is None:
+            run = ScheduleRun(
+                project_id=project_id,
+                slot_index=0,
+                trigger_type=RunTrigger.MANUAL,
+                mode=mode,
+                cooldown_key=cooldown,
+                status=RunStatus.SUCCESS,
+                triggered_at=_day_start(day),
+                started_at=_day_start(day),
+                finished_at=_day_start(day),
+            )
+            db.add(run)
+            stats["runs_written"] += 1
+        run.task_id = task_id
+        run.status = RunStatus.SUCCESS
+
+    db.flush()
+    return stats
