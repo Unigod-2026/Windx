@@ -22,12 +22,22 @@ import openpyxl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.media_dictionary import MediaDictionary
 from app.models.project import (
     Project,
     ProjectCompetitor,
     ProjectKeyword,
     ProjectPlatform,
     ProjectPrompt,
+)
+from app.schemas.import_data import (
+    ImportErrorGroup,
+    ImportErrorSample,
+    ImportPreviewOut,
+    ImportTotals,
+    ImportWarning,
+    MappingRow,
+    SheetPreview,
 )
 
 SHEET_KEYS: tuple[str, ...] = ("answers", "competitors", "citations")
@@ -641,4 +651,215 @@ def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
         warnings=unique_warnings,
         resolved_prompts=resolved_prompts,
         subtask_index=subtask_index,
+    )
+
+
+# --------------------------------------------------------------------------
+# 预览聚合
+# --------------------------------------------------------------------------
+
+_SHEET_TITLES = {
+    "answers": "问题问答",
+    "competitors": "竞品分析",
+    "citations": "引用媒体",
+}
+
+#: 对账条内容 —— 外部列 -> 平台内部字段。
+_MAPPING_ROWS: list[MappingRow] = [
+    MappingRow(source="监控日期", target="Task.triggered_at · Run.triggered_at",
+               note="按日期分组，一个日期一个任务"),
+    MappingRow(source="AI大模型「豆包-网页版」",
+               target="platform=doubao · delivery=web · thinking=否",
+               note="中文名查别名表，后缀拆终端"),
+    MappingRow(source="模式「快速」/「思考」", target="thinking_mode = 否 / 是", note=""),
+    MappingRow(source="监控问题", target="Subtask.prompt（项目配置原文）",
+               note="归一化后匹配，落库存项目原文"),
+    MappingRow(source="回答内容", target="Subtask.answer_content", note="原样存 Markdown"),
+    MappingRow(source="回答截图", target="Subtask.page_screenshot", note=""),
+    MappingRow(source="品牌类型「监控品牌」", target="BrandMention.is_self = 1",
+               note="品牌名须等于项目 brand"),
+    MappingRow(source="品牌类型「竞品品牌」", target="BrandMention.is_self = 0",
+               note="品牌名须在项目竞品列表"),
+    MappingRow(source="提及次数 · 平均排名", target="is_mention · rank_position",
+               note="is_recommended 由 rank ≤ 5 派生"),
+    MappingRow(source="正面 · 中性 · 负面", target="sentiment",
+               note="取占比最高者，并列取中性"),
+    MappingRow(source="内容链接 · 媒体名称 · 内容标题", target="url · site · title",
+               note="site 存中文媒体名，host 从 url 提取"),
+]
+
+_MAX_DISTINCT = 500
+_MAX_SAMPLES = 20
+
+
+def _group_issues(issues: list[RowIssue]) -> list[ImportErrorGroup]:
+    """按 (sheet, code) 聚合错误 —— 2190 行同因错误只带 20 条样本。"""
+    buckets: dict[tuple[str, str], list[RowIssue]] = {}
+    for issue in issues:
+        buckets.setdefault((issue.sheet, issue.code), []).append(issue)
+    groups: list[ImportErrorGroup] = []
+    for (sheet, code), items in buckets.items():
+        distinct = sorted({
+            value
+            for item in items
+            for value in item.context.values()
+            if value
+        })
+        groups.append(ImportErrorGroup(
+            sheet=sheet,
+            code=code,
+            message=items[0].message,
+            row_count=len(items),
+            distinct=distinct[:_MAX_DISTINCT],
+            samples=[
+                ImportErrorSample(row=item.row, context=item.context)
+                for item in items[:_MAX_SAMPLES]
+            ],
+        ))
+    groups.sort(key=lambda g: (-g.row_count, g.sheet, g.code))
+    return groups
+
+
+def _blocked_row_count(issues: list[RowIssue]) -> int:
+    """被阻断的**行数**（不是错误条数）—— 一行可能命中多个维度。"""
+    return len({(issue.sheet, issue.row) for issue in issues})
+
+
+def _truncate(text: str, limit: int = 60) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _sample_answers(rows, limit: int = 10) -> list[dict[str, str]]:
+    return [
+        {
+            "监控日期": r.date,
+            "AI大模型": r.model_label,
+            "监控问题": _truncate(r.prompt_raw, 40),
+            "回答内容": _truncate(r.answer_content),
+        }
+        for r in rows[:limit]
+    ]
+
+
+def _sample_competitors(rows, limit: int = 10) -> list[dict[str, str]]:
+    return [
+        {
+            "监控日期": r.date,
+            "品牌类型": r.brand_type,
+            "品牌名称": r.brand,
+            "模型": r.model_label,
+            "提及次数": str(r.mention_count),
+            "平均排名": "-" if r.avg_rank is None else str(r.avg_rank),
+        }
+        for r in rows[:limit]
+    ]
+
+
+def _sample_citations(rows, limit: int = 10) -> list[dict[str, str]]:
+    return [
+        {
+            "引用日期": r.date,
+            "模型": r.model_label,
+            "媒体名称": r.media_name,
+            "内容标题": _truncate(r.title, 40),
+        }
+        for r in rows[:limit]
+    ]
+
+
+def _missing_media_hosts(db: Session, citations) -> list[str]:
+    """文件里出现、但官方媒体词典里没有的域名（按 host 小写比对）。"""
+    hosts = {
+        row.media_host.strip().lower()
+        for row in citations
+        if row.media_host and row.media_host.strip()
+    }
+    if not hosts:
+        return []
+    known = {
+        item.host.lower() for item in db.execute(select(MediaDictionary)).scalars()
+    }
+    return sorted(hosts - known)
+
+
+def preview_import(db: Session, project_id: int, content: bytes,
+                   selected_sheets=None) -> ImportPreviewOut:
+    """解析 + 校验 + 聚合，**不写库**。"""
+    parsed = parse_workbook(content)
+    outcome = validate_rows(db, project_id, parsed, selected_sheets)
+    project = db.get(Project, project_id)
+    if project is None:
+        raise ImportConfigError(f"project {project_id} not found")
+
+    blocked = _blocked_row_count(outcome.issues)
+    sources = {
+        "answers": parsed.answers,
+        "competitors": parsed.competitors,
+        "citations": parsed.citations,
+    }
+    accepted = {
+        "answers": outcome.answers,
+        "competitors": outcome.competitors,
+        "citations": outcome.citations,
+    }
+    samplers = {
+        "answers": _sample_answers,
+        "competitors": _sample_competitors,
+        "citations": _sample_citations,
+    }
+    sheets: list[SheetPreview] = []
+    for key in SHEET_KEYS:
+        source = sources[key]
+        ok = accepted[key]
+        sheets.append(SheetPreview(
+            key=key,
+            title=_SHEET_TITLES[key],
+            total_rows=len(source),
+            importable_rows=len(ok),
+            blocked_rows=len(source) - len(ok),
+            subtasks=len({
+                subtask_key(r.date, r.platform_code, r.delivery_mode,
+                            r.thinking_mode, normalize_prompt(r.prompt_raw))
+                for r in ok
+            }),
+            sample=samplers[key](source),
+        ))
+
+    # 媒体词典覆盖检查：文件里出现但词典没有的域名，其引用在信源偏好里
+    # 会落「其他」分类。字典的 category 是非空必填而 xlsx 没有该字段，
+    # 所以**不自动补字典**，只在提示里列出缺失清单。
+    warnings = list(outcome.warnings)
+    missing_hosts = _missing_media_hosts(db, outcome.citations)
+    if missing_hosts:
+        shown = "、".join(missing_hosts[:10])
+        more = " 等" if len(missing_hosts) > 10 else ""
+        warnings.append(
+            f"文件里有 {len(missing_hosts)} 个域名不在官方媒体词典中，"
+            f"这些引用的信源分类会落「其他」：{shown}{more}"
+        )
+
+    return ImportPreviewOut(
+        project_id=project_id,
+        project_name=project.name or "",
+        project_brand=(project.brand or "").strip(),
+        file_name="",
+        sheets=sheets,
+        warnings=[ImportWarning(code="normalized", message=w) for w in warnings],
+        mapping=list(_MAPPING_ROWS),
+        errors=_group_issues(outcome.issues),
+        totals=ImportTotals(
+            total_rows=len(parsed.answers) + len(parsed.competitors) + len(parsed.citations),
+            importable_rows=(
+                len(outcome.answers) + len(outcome.competitors) + len(outcome.citations)
+            ),
+            blocked_rows=blocked,
+            tasks=len({r.date for r in outcome.answers}),
+            subtasks=len(outcome.subtask_index),
+            brand_mentions=len(outcome.competitors),
+            citations=len(outcome.citations),
+        ),
+        missing_sheets=[
+            _SHEET_TITLES[key] for key in SHEET_KEYS if key not in parsed.found_sheets
+        ],
     )
