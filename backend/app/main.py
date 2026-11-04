@@ -25,6 +25,7 @@ from app.api import (
     customers,
     dashboard,
     molizhishu,
+    project_import,
     projects,
     public_reports,
     reports,
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="windx-backend", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(config.router)
+app.include_router(project_import.router)
 app.include_router(customers.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
