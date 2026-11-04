@@ -13,11 +13,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 from dataclasses import dataclass, field
 
 import openpyxl
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.project import (
+    Project,
+    ProjectCompetitor,
+    ProjectKeyword,
+    ProjectPlatform,
+    ProjectPrompt,
+)
 
 SHEET_KEYS: tuple[str, ...] = ("answers", "competitors", "citations")
 
@@ -356,3 +367,278 @@ def parse_workbook(content: bytes) -> ParsedWorkbook:
         )
     finally:
         wb.close()
+
+
+# --------------------------------------------------------------------------
+# 项目配置快照与六维校验
+# --------------------------------------------------------------------------
+
+
+class ImportConfigError(Exception):
+    """项目不存在或配置读不出来 —— endpoint 层转 404 / 400。"""
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    brand: str
+    #: 归一化问题 -> 项目里的 prompt 原文列表（>1 说明归一化后有歧义）
+    prompt_texts: dict[str, list[str]]
+    keywords: frozenset[str]
+    #: (platform_code, delivery_mode, thinking_mode)
+    platform_keys: frozenset[tuple[str, str, bool]]
+    competitor_names: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RowIssue:
+    sheet: str
+    row: int
+    code: str
+    message: str
+    context: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ValidationOutcome:
+    answers: list[AnswerRow]
+    competitors: list[CompetitorRow]
+    citations: list[CitationRow]
+    issues: list[RowIssue]
+    warnings: list[str]
+    #: 归一化问题 -> 项目里的 prompt 原文（只含无歧义的）
+    resolved_prompts: dict[str, str]
+    #: subtask_key -> subtask_id
+    subtask_index: dict[tuple, str]
+
+
+def subtask_key(date: str, platform_code: str, delivery_mode: str,
+                thinking_mode: bool, prompt_norm: str) -> tuple:
+    """跨表主键 —— 日期 × 平台 × 终端 × 思考 × 归一化问题。"""
+    return (date, platform_code, delivery_mode, thinking_mode, prompt_norm)
+
+
+def make_subtask_id(project_id: int, key: tuple) -> str:
+    """确定性 subtask_id（列宽 64）。哈希取**归一化后**的问题，
+    文件里问题文本微调不会造出重复 subtask。"""
+    date, platform_code, delivery_mode, thinking_mode, prompt_norm = key
+    digest = hashlib.sha1(prompt_norm.encode("utf-8")).hexdigest()[:10]
+    return (
+        f"imp_{project_id}_{date.replace('-', '')}_{platform_code}"
+        f"_{delivery_mode}_{'T' if thinking_mode else 'F'}_{digest}"
+    )
+
+
+def load_project_config(db: Session, project_id: int) -> ProjectConfig:
+    """读项目的配置快照 —— 校验的唯一真源。"""
+    project = db.get(Project, project_id)
+    if project is None:
+        raise ImportConfigError(f"project {project_id} not found")
+
+    prompt_texts: dict[str, list[str]] = {}
+    for prompt in db.execute(
+        select(ProjectPrompt).where(ProjectPrompt.project_id == project_id)
+    ).scalars():
+        prompt_texts.setdefault(normalize_prompt(prompt.prompt), []).append(prompt.prompt)
+
+    keywords = frozenset(
+        row.keyword
+        for row in db.execute(
+            select(ProjectKeyword).where(ProjectKeyword.project_id == project_id)
+        ).scalars()
+    )
+
+    platform_keys = frozenset(
+        (row.platform_code, row.delivery_mode.value, bool(row.thinking_mode))
+        for row in db.execute(
+            select(ProjectPlatform).where(ProjectPlatform.project_id == project_id)
+        ).scalars()
+    )
+
+    competitor_names = frozenset(
+        row.name
+        for row in db.execute(
+            select(ProjectCompetitor).where(ProjectCompetitor.project_id == project_id)
+        ).scalars()
+    )
+
+    return ProjectConfig(
+        brand=(project.brand or "").strip(),
+        prompt_texts=prompt_texts,
+        keywords=keywords,
+        platform_keys=platform_keys,
+        competitor_names=competitor_names,
+    )
+
+
+def _issue(sheet: str, row: int, code: str, message: str, **context) -> RowIssue:
+    return RowIssue(
+        sheet=sheet, row=row, code=code, message=message,
+        context={k: v for k, v in context.items() if v},
+    )
+
+
+def _common_issues(sheet: str, row_no: int, date: str, platform_code: str,
+                   delivery_mode: str, thinking_mode: bool, prompt_raw: str,
+                   keyword: str, config: ProjectConfig) -> list[RowIssue]:
+    """与品牌无关的五个维度：日期 / 问题 / 平台 / 核心词 / 归一化歧义。"""
+    issues: list[RowIssue] = []
+    if not date:
+        issues.append(_issue(sheet, row_no, "date_missing", "监控日期缺失或无法解析"))
+    prompt_norm = normalize_prompt(prompt_raw)
+    texts = config.prompt_texts.get(prompt_norm)
+    if not texts:
+        issues.append(_issue(
+            sheet, row_no, "prompt_unregistered",
+            "监控问题不在当前项目的问题配置里，请先在「监控问题」Tab 添加",
+            监控问题=prompt_raw,
+        ))
+    elif len(texts) > 1:
+        issues.append(_issue(
+            sheet, row_no, "prompt_ambiguous",
+            "该问题在项目配置里有多个候选，无法确定对应哪一条",
+            监控问题=prompt_raw,
+        ))
+    if (platform_code, delivery_mode, thinking_mode) not in config.platform_keys:
+        issues.append(_issue(
+            sheet, row_no, "platform_unregistered",
+            "该模型 / 终端组合不在当前项目的模型配置里，请先在「AI 模型」Tab 添加",
+            AI大模型=platform_code,
+        ))
+    if config.keywords and keyword not in config.keywords:
+        issues.append(_issue(
+            sheet, row_no, "keyword_unregistered",
+            "核心词不在当前项目的核心词配置里",
+            核心词=keyword,
+        ))
+    return issues
+
+
+def validate_rows(db: Session, project_id: int, parsed: ParsedWorkbook,
+                  selected_sheets=None) -> ValidationOutcome:
+    """六维逐行校验 —— 通过的行进 outcome，不通过的进 issues。"""
+    config = load_project_config(db, project_id)
+    selected = set(selected_sheets) if selected_sheets else set(SHEET_KEYS)
+    issues: list[RowIssue] = []
+    warnings: list[str] = []
+    resolved_prompts = {
+        norm: texts[0] for norm, texts in config.prompt_texts.items() if len(texts) == 1
+    }
+
+    # --- 问题问答 ---
+    ok_answers: list[AnswerRow] = []
+    for row in parsed.answers:
+        if "answers" not in selected:
+            continue
+        row_issues = _common_issues(
+            "问题问答", row.row, row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, row.prompt_raw, row.keyword, config,
+        )
+        if config.brand and row.brand != config.brand:
+            row_issues.append(_issue(
+                "问题问答", row.row, "brand_mismatch",
+                "品牌名称与当前项目的监控品牌不一致",
+                品牌名称=row.brand,
+            ))
+        if row_issues:
+            issues.extend(row_issues)
+            continue
+        ok_answers.append(row)
+        project_text = resolved_prompts[normalize_prompt(row.prompt_raw)]
+        if project_text != row.prompt_raw:
+            warnings.append(
+                f"监控问题「{row.prompt_raw}」与项目配置里的「{project_text}」"
+                "不完全一致，已按归一化匹配"
+            )
+
+    subtask_index: dict[tuple, str] = {}
+    for row in ok_answers:
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        subtask_index[key] = make_subtask_id(project_id, key)
+
+    # --- 竞品分析 ---
+    ok_competitors: list[CompetitorRow] = []
+    for row in parsed.competitors:
+        if "competitors" not in selected:
+            continue
+        row_issues = _common_issues(
+            "竞品分析", row.row, row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, row.prompt_raw, row.keyword, config,
+        )
+        if row.brand_type == "监控品牌":
+            if config.brand and row.brand != config.brand:
+                row_issues.append(_issue(
+                    "竞品分析", row.row, "brand_mismatch",
+                    "监控品牌与当前项目的监控品牌不一致",
+                    品牌名称=row.brand,
+                ))
+        elif row.brand not in config.competitor_names:
+            row_issues.append(_issue(
+                "竞品分析", row.row, "competitor_unregistered",
+                "该品牌不在当前项目的竞品列表里，请先在「竞品信息」Tab 添加",
+                品牌名称=row.brand,
+            ))
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        if key not in subtask_index:
+            row_issues.append(_issue(
+                "竞品分析", row.row, "subtask_not_found",
+                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）",
+                监控日期=row.date, AI大模型=row.model_label, 监控问题=row.prompt_raw,
+            ))
+        if row_issues:
+            issues.extend(row_issues)
+            continue
+        ok_competitors.append(row)
+        column_delivery = DELIVERY_BY_COLUMN.get(row.delivery_column)
+        if column_delivery and column_delivery != row.delivery_mode:
+            warnings.append(
+                f"第 {row.row} 行的「网页版/移动版」列与模型标签后缀不一致，"
+                "已按模型标签为准"
+            )
+
+    # --- 引用媒体 ---
+    ok_citations: list[CitationRow] = []
+    for row in parsed.citations:
+        if "citations" not in selected:
+            continue
+        row_issues = _common_issues(
+            "引用媒体", row.row, row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, row.prompt_raw, "", config,
+        )
+        if not row.media_name:
+            row_issues.append(_issue(
+                "引用媒体", row.row, "media_name_blank",
+                "媒体名称为空，无法归类信源",
+                内容链接=row.url,
+            ))
+        key = subtask_key(
+            row.date, row.platform_code, row.delivery_mode,
+            row.thinking_mode, normalize_prompt(row.prompt_raw),
+        )
+        if key not in subtask_index:
+            row_issues.append(_issue(
+                "引用媒体", row.row, "subtask_not_found",
+                "找不到对应的回答记录（日期 / 模型 / 问题组合在「问题问答」里不存在）",
+                监控日期=row.date, AI大模型=row.model_label, 监控问题=row.prompt_raw,
+            ))
+        if row_issues:
+            issues.extend(row_issues)
+            continue
+        ok_citations.append(row)
+
+    # 汇总去重后的 warning
+    unique_warnings = list(dict.fromkeys(warnings))
+    return ValidationOutcome(
+        answers=ok_answers,
+        competitors=ok_competitors,
+        citations=ok_citations,
+        issues=issues,
+        warnings=unique_warnings,
+        resolved_prompts=resolved_prompts,
+        subtask_index=subtask_index,
+    )
