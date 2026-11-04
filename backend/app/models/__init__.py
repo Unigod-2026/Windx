@@ -10,6 +10,7 @@ The split into submodules roughly follows the table families:
 - ``project`` — projects, their config rows and the competitor log.
 - ``task`` — ingestion tables (``Task`` / ``Subtask`` / ``Callback`` / ``Compensation``).
 - ``schedule`` — embedded-schedule execution log (``ScheduleRun``).
+- ``import_batch`` — 外部监控数据每次导入的留痕与数据归属（``ImportBatch``）。
 - ``enums`` / ``common`` — shared Python enums and timezone-aware defaults.
 """
 
@@ -33,6 +34,7 @@ from app.models.enums import (  # noqa: F401
     RunStatus,
     RunTrigger,
 )
+from app.models.import_batch import ImportBatch  # noqa: F401
 from app.models.media_dictionary import MediaDictionary  # noqa: F401
 from app.models.project import (  # noqa: F401
     BrandMention,

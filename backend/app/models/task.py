@@ -88,6 +88,9 @@ class Task(Base):
     # Multi-tenant / schedule linkage (all nullable: ad-hoc tasks have none).
     # Plain columns (no FK) — see CLAUDE.md "外键约定".
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 导入批次 —— 导入产生的 task 记归属，平台自身的 task 为 NULL。
+    # 跨表关联列用普通列，不上 ForeignKey（CLAUDE.md「外键约定」）。
+    import_batch_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     schedule_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
