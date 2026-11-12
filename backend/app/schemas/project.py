@@ -197,7 +197,13 @@ class ProjectOut(BaseModel):
 
 class WizardQuestion(BaseModel):
     text: str = Field(..., min_length=1)
-    category: str = Field(default="引流类", min_length=1, max_length=32)
+    # ``category`` 允许空串 —— 空串 = 「未分类」。编辑监控项目弹窗允许把
+    # 某个问题留在任何分类之外(分类勾选全部取消),分类功能上线之前导入的
+    # 旧问题在 ``geo_project_prompts.category`` 上也是 NULL,两种情况上
+    # 线后都是空串。之前这里挂 ``min_length=1`` 会把整个 draft PUT 打成
+    # 422(问题一个都存不进去);``_materialise_wizard_payload`` 本来就按
+    # ``q.category or None`` 落库,空串 → NULL,与「无分类」约定一致。
+    category: str = Field(default="引流类", max_length=32)
     tag: str | None = None
 
 

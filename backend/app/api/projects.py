@@ -757,6 +757,7 @@ def _materialise_wizard_payload(
     payload: WizardPayload,
     *,
     preserve_schedule_enabled: bool = False,
+    preserve_competitors: bool = False,
 ) -> None:
     """Write wizard payload fields onto an existing ``Project`` row.
 
@@ -771,6 +772,15 @@ def _materialise_wizard_payload(
     through ``put_wizard_draft``) the existing ``schedule_enabled`` is
     kept — that flag lives on the list-page Switch, so a wizard edit
     must not silently flip it.
+
+    ``preserve_competitors`` guards the competitor table the same way.
+    竞品在 ACTIVE / DISABLED 行上归 CRUD 接口管
+    (``POST|PUT|DELETE /projects/{id}/competitors``,弹窗里加完就落库),
+    而 wizard payload 里的 ``competitors`` 只是**打开弹窗那一刻**的快照;
+    保存时若照旧 wipe + rebuild,刚加的竞品会被旧快照覆盖掉(用户看到
+    「加了竞品,保存后没了」),顺带把 origin / status 冲成 manual /
+    confirmed。PENDING 行没有竞品行,归 wizard payload 管,仍然 wipe +
+    rebuild。
     """
     # Project-row fields owned by the wizard.
     project.brand = payload.brand.product
@@ -820,22 +830,24 @@ def _materialise_wizard_payload(
         )
 
     # Competitors — same delete + insert pattern; we accept whatever
-    # name / alias list the wizard provides.
-    db.query(ProjectCompetitor).filter(
-        ProjectCompetitor.project_id == project.id
-    ).delete()
-    for i, c in enumerate(payload.competitors):
-        db.add(
-            ProjectCompetitor(
-                project_id=project.id,
-                name=c.name,
-                note=c.product,
-                aliases=list(c.aliases),
-                origin="manual",
-                status="confirmed",
-                sort=i,
+    # name / alias list the wizard provides. ``preserve_competitors`` 时
+    # 整块跳过(ACTIVE / DISABLED 行:竞品归 CRUD 接口管,见 docstring)。
+    if not preserve_competitors:
+        db.query(ProjectCompetitor).filter(
+            ProjectCompetitor.project_id == project.id
+        ).delete()
+        for i, c in enumerate(payload.competitors):
+            db.add(
+                ProjectCompetitor(
+                    project_id=project.id,
+                    name=c.name,
+                    note=c.product,
+                    aliases=list(c.aliases),
+                    origin="manual",
+                    status="confirmed",
+                    sort=i,
+                )
             )
-        )
 
     # Platforms — wipe and rebuild from (model × device). Any mobile
     # rows whose model has no mobile variant are silently dropped
@@ -1039,6 +1051,11 @@ def put_wizard_draft(
         project,
         payload.payload,
         preserve_schedule_enabled=payload.preserve_schedule_enabled,
+        # ACTIVE / DISABLED 行的竞品归 CRUD 接口管(弹窗里加/改/删即时
+        # 落库),wizard payload 只带打开弹窗那一刻的快照 —— 按快照 wipe +
+        # rebuild 会把刚加的竞品冲掉。PENDING 行没有竞品行,仍归 payload 管。
+        preserve_competitors=project.status
+        in (ProjectStatus.ACTIVE, ProjectStatus.DISABLED),
     )
     # 「监控名称」属于项目行字段,wizard payload 不携带;PENDING 走这里
     # 更新(active/disabled 也可以带,但已有 update_project 路径同名改写,

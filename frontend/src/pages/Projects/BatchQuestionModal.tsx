@@ -103,6 +103,28 @@ function Card(props: { children: React.ReactNode; style?: React.CSSProperties })
   );
 }
 
+/** 把 API 报错拍平成一行可读文案。
+ *
+ *  FastAPI 的 422 ``detail`` 是**对象数组**(``[{type, loc, msg, ...}]``),
+ *  字符串 detail 才是大多数业务错误的形态。直接把它丢给
+ *  ``message.error()`` 的话,AntD 会拿数组当 React 子节点渲染 →
+ *  "Objects are not valid as a React child" → toast 根本渲染不出来 →
+ *  用户点了保存既看不到成功也看不到失败(只有 console 有报错)。
+ *  这里统一成字符串,任何后端错误都会以 toast 的形式露出来。 */
+export function apiErrorText(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response
+    ?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => (d as { msg?: unknown })?.msg)
+      .filter((m): m is string => typeof m === "string" && !!m);
+    if (msgs.length) return msgs.join("；");
+  }
+  const msg = (err as Error)?.message;
+  return msg || fallback;
+}
+
 function SettingSubCard(props: {
   label: string;
   extra?: React.ReactNode;
@@ -615,11 +637,15 @@ function CategoryAssignModal(props: {
  * ``submitWizardProject``) 走 ``buildWizardPayloadFromForm`` 时
  * 通过 opts 注入编辑后的字段。
  */
-function hydrateFromWizardPayload(payload: WizardPayload) {
+export function hydrateFromWizardPayload(payload: WizardPayload) {
   const questionLines = payload.questions.map((q) => q.text);
   const questionCategories: Record<string, string | null> = {};
   for (const q of payload.questions) {
-    if (q.category) questionCategories[q.text] = q.category;
+    // key 用「trim 后」的问题文本 —— 保存通道
+    // ``buildWizardPayloadFromForm`` 会先 trim 再查这张表,而历史问题
+    // 文本可能带首尾空格(导入的数据常见)。两边 key 不一致 → 分类整片
+    // 查不到 → 落成空串 → 后端 min_length 校验 422 → 点保存存不进去。
+    if (q.category) questionCategories[q.text.trim()] = q.category;
   }
   const modelsConfig = hydrateModelsConfig(payload);
   // 顶部「截图」下拉框是全局开关 —— 从已勾选卡的 screenshot 字段
@@ -641,6 +667,18 @@ function hydrateFromWizardPayload(payload: WizardPayload) {
     sentiment: payload.sentiment,
     semantic: cloneSemantic(payload.semantic),
   };
+}
+
+/** 把后端竞品行折成 wizard payload 里的竞品项。
+ *
+ *  ``note`` ↔ ``product`` 是后端 CompetitorOut 与前端 WizardCompetitor
+ *  的字段映射,旧 active 路径用 ``c.name`` 是历史 bug,统一纠正。 */
+function toWizardCompetitors(competitors: CompetitorOut[]): WizardCompetitor[] {
+  return competitors.map((c) => ({
+    name: c.name,
+    product: c.note || null,
+    aliases: c.aliases || [],
+  }));
 }
 
 /** 把 payload 折成「每张模型卡一条配置」。
@@ -712,13 +750,8 @@ function synthesizeWizardPayloadFromDetail(
       product: d.brand || "",
       aliases: d.aliases || [],
     },
-    // ``note`` ↔ ``product`` 是后端 CompetitorOut 与前端 WizardCompetitor
-    // 的字段映射,旧 active 路径用 ``c.name`` 是历史 bug,统一纠正。
-    competitors: competitors.map((c) => ({
-      name: c.name,
-      product: c.note || null,
-      aliases: c.aliases || [],
-    })),
+    // ``note`` ↔ ``product`` 的字段映射统一在 ``toWizardCompetitors`` 里。
+    competitors: toWizardCompetitors(competitors),
     models: normalizedModelsConfig.map((c) => c.code),
     models_config: normalizedModelsConfig,
     monitor: {
@@ -899,7 +932,7 @@ function deriveModes(cfg: WizardModelConfig[]): WizardMode[] {
 /** 把 modal 的可编辑字段 + originalWizardPayload 拼回 WizardPayload。
  *  categories 始终带默认两个分类 + 用户自定义,与 wizard submit()
  *  一致;其它字段以 opts 注入优先,opts 缺失时透传原 payload。 */
-function buildWizardPayloadFromForm(opts: {
+export function buildWizardPayloadFromForm(opts: {
   questionsText: string;
   questionCategories: Record<string, string | null>;
   categoryTaxonomy: string[];
@@ -1977,6 +2010,8 @@ export default function BatchQuestionModal({
   const [rejectBusy, setRejectBusy] = useState(false);
   const [withdrawBusy, setWithdrawBusy] = useState(false);
   const [resubmitBusy, setResubmitBusy] = useState(false);
+  // 保存进行中:保存按钮转圈 + 整个弹窗不可交互,防止重复提交。
+  const [saving, setSaving] = useState(false);
   // 单次 API 调用费用(元),后端从 API_COST_PER_CALL 读,用于底部
   // 「预计费用」实时计算。未加载完时为 0,UI 显示 ¥0.00 不至于误算。
   const [costPerCall, setCostPerCall] = useState<number>(0);
@@ -2143,7 +2178,10 @@ export default function BatchQuestionModal({
 
         const hydrated = hydrateFromWizardPayload(payload);
         // 「监控品牌」→ geo_projects.brand,与「核心词」独立。
-        setBrand(hydrated.brand);
+        // payload 里 brand.product 是空的老快照(brand 为 NULL / 空串)时
+        // 回落到项目行的 brand —— 项目行的值才是业务上生效的那个;不回落
+        // 的话 brand 会是 null,渲染期 brand.trim() 直接抛错、整个弹窗崩掉。
+        setBrand(hydrated.brand || d.brand || "");
         setBrandAliases(hydrated.brandAliases);
         setQuestions(hydrated.questionsText);
         setQuestionCategories(hydrated.questionCategories);
@@ -2258,8 +2296,7 @@ export default function BatchQuestionModal({
       setCompetitors(comp.items);
       setBrandEditModal(null);
     } catch (err) {
-      const e = err as { response?: { data?: { detail?: string } } };
-      message.error(e?.response?.data?.detail || (err as Error).message || "操作失败");
+      message.error(apiErrorText(err, "操作失败"));
     }
   };
 
@@ -2316,7 +2353,9 @@ export default function BatchQuestionModal({
   // 用 ``bool(days)`` 覆盖 ``schedule_enabled`` —— 调度开关是列表页
   // Switch 的职责,modal 不能默默改它。
   const saveAdapter = async () => {
-    if (!data || !originalWizardPayload) return;
+    // ``saving`` 兜底:按钮 loading 之前的那一瞬(React 还没重渲染)可能
+    // 再来一次点击,这里直接吞掉,保证一次保存只发一轮请求。
+    if (!data || !originalWizardPayload || saving) return;
     const payload = buildWizardPayloadFromForm({
       questionsText: questions,
       questionCategories,
@@ -2324,7 +2363,13 @@ export default function BatchQuestionModal({
       brand,
       brandName: name,
       brandAliases,
-      competitors: wizardCompetitors,
+      // 竞品有两个来源:PENDING / REJECTED 行没有 ``geo_project_competitors``
+      // 行,竞品只存在于 wizard payload 里(``wizardCompetitors``);ACTIVE /
+      // DISABLED 行的竞品归 CRUD 接口管(加/改/删即时落库),payload 里那份
+      // 只是打开弹窗时的快照 —— 用快照会把刚加的竞品漏掉。
+      competitors: isWizardRow
+        ? wizardCompetitors
+        : toWizardCompetitors(competitors),
       modelsConfig: wizardModelsConfig,
       monitor: wizardMonitor,
       geo: wizardGeo,
@@ -2334,6 +2379,7 @@ export default function BatchQuestionModal({
     });
     const preserveScheduleEnabled =
       status === "active" || status === "disabled";
+    setSaving(true);
     try {
       await putWizardDraft(data.id, {
         payload,
@@ -2368,9 +2414,10 @@ export default function BatchQuestionModal({
       message.success("已保存！");
       onSaved();
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })
-        ?.response?.data?.detail;
-      message.error(detail || (err as Error).message || "保存失败");
+      message.error(apiErrorText(err, "保存失败"));
+    } finally {
+      // 失败也要解锁 —— 用户得能改了再存一次。
+      setSaving(false);
     }
   };
 
@@ -2390,9 +2437,7 @@ export default function BatchQuestionModal({
       message.success("已审批通过");
       onSaved();
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })
-        ?.response?.data?.detail;
-      message.error(detail || (err as Error).message || "审批失败");
+      message.error(apiErrorText(err, "审批失败"));
     } finally {
       setApproveBusy(false);
     }
@@ -2412,9 +2457,7 @@ export default function BatchQuestionModal({
       setReviewNoteDraft("");
       onSaved();
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })
-        ?.response?.data?.detail;
-      message.error(detail || (err as Error).message || "驳回失败");
+      message.error(apiErrorText(err, "驳回失败"));
     } finally {
       setRejectBusy(false);
     }
@@ -2435,9 +2478,7 @@ export default function BatchQuestionModal({
           message.success("已撤回");
           onSaved();
         } catch (err) {
-          const detail = (err as { response?: { data?: { detail?: string } } })
-            ?.response?.data?.detail;
-          message.error(detail || (err as Error).message || "撤回失败");
+          message.error(apiErrorText(err, "撤回失败"));
         } finally {
           setWithdrawBusy(false);
         }
@@ -2476,9 +2517,7 @@ export default function BatchQuestionModal({
           // 让外部列表能拿到新行 id;这里仅关闭 modal,父级负责刷新。
           void next;
         } catch (err) {
-          const detail = (err as { response?: { data?: { detail?: string } } })
-            ?.response?.data?.detail;
-          message.error(detail || (err as Error).message || "提交失败");
+          message.error(apiErrorText(err, "提交失败"));
         } finally {
           setResubmitBusy(false);
         }
@@ -2498,12 +2537,17 @@ export default function BatchQuestionModal({
       centered
       closable={false}
       destroyOnHidden
+      // 保存进行中:整块内容不可交互(表单改不动、别的按钮点不了)、
+      // 遮罩点击 / ESC 也不关弹窗 —— 只留一个正在跑的保存动作。
+      maskClosable={!saving}
+      keyboard={!saving}
       styles={{
         body: {
           padding: 0,
           display: "flex",
           flexDirection: "column",
           height: "100%",
+          pointerEvents: saving ? "none" : "auto",
         },
         content: {
           padding: 0,
@@ -2511,6 +2555,9 @@ export default function BatchQuestionModal({
           borderRadius: 10,
           height: 800,
           maxHeight: "90vh",
+          // 指针落在弹窗上时显示「等待」光标 —— 表单被锁住这件事要看得见,
+          // 否则用户点了没反应会以为界面坏了。
+          cursor: saving ? "wait" : undefined,
         },
       }}
       maskStyle={{ background: "rgba(15, 23, 42, 0.45)" }}
@@ -2544,6 +2591,11 @@ export default function BatchQuestionModal({
           padding: "16px 24px",
           background: "#f5f6f8",
           overflow: "auto",
+          // 保存中:表单整体后退一步(变淡),底部那颗正在转圈的保存按钮
+          // 保持满亮度 —— 视线自然落在「正在发生什么」上,而不是被一整块
+          // 遮罩盖住刚填好的表单。
+          opacity: saving ? 0.55 : 1,
+          transition: "opacity 0.15s ease",
         }}
       >
         {data?.status === "rejected" && data.review_note && (
@@ -3187,7 +3239,8 @@ export default function BatchQuestionModal({
               <Button
                 type="primary"
                 onClick={() => void saveAdapter?.()}
-                disabled={!data || !saveAdapter}
+                disabled={!data || !saveAdapter || saving}
+                loading={saving}
                 style={{
                   background: "var(--brand-blue)",
                   borderColor: "var(--brand-blue)",
@@ -3205,7 +3258,8 @@ export default function BatchQuestionModal({
               <Button onClick={onClose}>关闭</Button>
               <Button
                 onClick={() => void saveAdapter?.()}
-                disabled={!data || !saveAdapter}
+                disabled={!data || !saveAdapter || saving}
+                loading={saving}
                 style={{
                   background: "var(--brand-blue)",
                   borderColor: "var(--brand-blue)",
@@ -3251,7 +3305,8 @@ export default function BatchQuestionModal({
               <Button
                 type="primary"
                 onClick={() => void saveAdapter?.()}
-                disabled={!data || !saveAdapter}
+                disabled={!data || !saveAdapter || saving}
+                loading={saving}
                 style={{
                   background: "var(--brand-blue)",
                   borderColor: "var(--brand-blue)",
