@@ -191,7 +191,7 @@ def _label_for_platform(code: str) -> str:
         "doubao": "豆包", "doubao_mobile": "豆包",
         "yuanbao": "元宝", "yuanbao_mobile": "元宝",
         "qianwen": "千问", "qianwen_mobile": "千问",
-        "kimi": "Kimi",
+        "kimi": "Kimi", "kimi_mobile": "Kimi",
         "deepseek": "DeepSeek", "deepseek_mobile": "DeepSeek",
         "baiduai": "文心", "baidu": "文心", "baidu_mobile": "文心",
         "antafu": "蚂蚁阿福",

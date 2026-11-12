@@ -882,8 +882,9 @@ function normalizeAllNoThink(cfg: WizardModelConfig[]): WizardModelConfig[] {
 
 // 与 WizardModelCard 内的 pushPair 顺序保持一致:豆包 / 元宝 / 千问 /
 // DeepSeek / 文心 / Kimi / 阿福,每个 model 视 hasMobile 决定是否再
-// 加一张 mobile 卡;共 12 张卡。把这里提到模块作用域,active 加载
-// 时反推 wizardModelsConfig 也复用同一份顺序。
+// 加一张 mobile 卡;共 13 张卡(Kimi 自 2026-11-12 起有手机版)。
+// 把这里提到模块作用域,active 加载时反推 wizardModelsConfig 也复用
+// 同一份顺序。
 const WIZARD_MODEL_CARD_CODES: string[] = (() => {
   const out: string[] = [];
   for (const idx of [0, 1, 2, 4, 5, 3, 6]) {

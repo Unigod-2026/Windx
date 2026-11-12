@@ -26,6 +26,7 @@ _LABELS: dict[str, str] = {
     "qianwen": "千问",
     "qianwen_mobile": "千问",
     "kimi": "Kimi",
+    "kimi_mobile": "Kimi",
     "deepseek": "DeepSeek",
     "deepseek_mobile": "DeepSeek",
     "baiduai": "文心",

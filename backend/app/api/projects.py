@@ -573,7 +573,8 @@ _WIZARD_MODEL_CATALOG: dict[
     "doubao": {"has_mobile": True, "mobile_code": "doubao_mobile"},
     "yuanbao": {"has_mobile": True, "mobile_code": "yuanbao_mobile"},
     "qianwen": {"has_mobile": True, "mobile_code": "qianwen_mobile"},
-    "kimi": {"has_mobile": False, "mobile_code": None},
+    # 2026-11-12 远端新增 kimi_mobile(Kimi_App);实测支持深度思考。
+    "kimi": {"has_mobile": True, "mobile_code": "kimi_mobile"},
     "deepseek": {"has_mobile": True, "mobile_code": "deepseek_mobile"},
     "baiduai": {"has_mobile": True, "mobile_code": "baidu_mobile"},
     "antafu": {"has_mobile": False, "mobile_code": None},

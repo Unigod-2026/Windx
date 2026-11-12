@@ -51,7 +51,7 @@ export interface WizardModelOption {
    *  降饱和后 graphic 色做 12px 文字对比度 < 4.5,这里给同色相压暗版。 */
   inkColor: string;
   /** 是否存在对应的移动端 modelCode;用于监控配置里阻止无移动版的模型被勾上「移动端」,
-   * 否则审批后会写出 platform=kimi + DeliveryMode.MOBILE 这种下游找不到映射的组合。 */
+   * 否则审批后会写出 platform=antafu + DeliveryMode.MOBILE 这种下游找不到映射的组合。 */
   hasMobile: boolean;
   /** 移动端对应的真实 modelCode(与 /business/system.models 的 clientType=mobile 项对齐)。
    * 命名规则不是统一的 +_mobile 后缀:baiduai → baidu_mobile, douyinai → douyin_mobile,
@@ -63,7 +63,10 @@ export const WIZARD_MODELS: WizardModelOption[] = [
   { value: "doubao", name: "豆包", color: "#3f6bc4", inkColor: "#456ebf", hasMobile: true, mobileCode: "doubao_mobile" },
   { value: "yuanbao", name: "元宝", color: "#c9803a", inkColor: "#a46932", hasMobile: true, mobileCode: "yuanbao_mobile" },
   { value: "qianwen", name: "千问", color: "#3d9070", inkColor: "#3c8066", hasMobile: true, mobileCode: "qianwen_mobile" },
-  { value: "kimi", name: "Kimi", color: "#8250bd", inkColor: "#8456b8", hasMobile: false, mobileCode: null },
+  // 2026-11-12 远端 GET /api/business/system/models 新增 kimi_mobile(Kimi_App);
+  // 此前「Kimi 无手机版」的判断已过期。实测 reasoning / reasoning_search 均被接受,
+  // 且 reasoningProcess.content 有完整思考链(501 字)—— 思考模式确认生效。
+  { value: "kimi", name: "Kimi", color: "#8250bd", inkColor: "#8456b8", hasMobile: true, mobileCode: "kimi_mobile" },
   { value: "deepseek", name: "DeepSeek", color: "#2b8b9b", inkColor: "#2b7e8c", hasMobile: true, mobileCode: "deepseek_mobile" },
   { value: "baiduai", name: "文心", color: "#b4487e", inkColor: "#ae4c7d", hasMobile: true, mobileCode: "baidu_mobile" },
   { value: "antafu", name: "蚂蚁阿福", color: "#8c3a2c", inkColor: "#883d30", hasMobile: false, mobileCode: null },

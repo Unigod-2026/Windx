@@ -14,6 +14,13 @@ import httpx
 # ``weibo_zhisou`` / ``quark`` / ``douyinai``;mobile 新增 ``xiaohongshu_mobile``
 # / ``douyin_mobile``。``xiaohongshu`` 无 web 版,``douyinai`` 是 douyin 的
 # web code(命名仍是 baiduai → baidu_mobile 那种不规则映射)。
+# 2026-11-12 远端清单补上 ``kimi_mobile``(Kimi_App)—— 此前「Kimi 无手机版」
+# 的判断已过期。实测 ``kimi_mobile`` 的 ``reasoning`` / ``reasoning_search``
+# 都被接受,且 ``reasoningProcess.content`` 有完整思考链,思考模式确认生效。
+# 同轮实测发现远端实际不支持深度思考的平台有一批(baiduai / chatgpt /
+# quark / weibo_zhisou / xiaohongshu* / gemini / grok / copilot 等,提交阶段
+# 直接 code=500「模型X不支持深度思考」),这跟本文件的白名单是两回事:
+# 白名单管「能不能提交」,深度思考能力管「提交后跑不跑得动」。
 #
 # 远端去重键是 ``(platform, mode)`` 元组,不是单一 ``platform`` 名 —— 同一
 # ``platform_code`` 配不同 ``mode`` 会被算成两次调用。``platform_code`` 严格
@@ -38,6 +45,7 @@ MOLIZHISHU_SUPPORTED_PLATFORMS: frozenset[str] = frozenset(
         "baidu_mobile",
         "xiaohongshu_mobile",
         "douyin_mobile",
+        "kimi_mobile",
     }
 )
 
@@ -54,6 +62,7 @@ MOBILE_PLATFORM_CODE_MAP: dict[str, str] = {
     "qianwen": "qianwen_mobile",
     "baiduai": "baidu_mobile",
     "douyinai": "douyin_mobile",
+    "kimi": "kimi_mobile",
 }
 
 # Wizard monitor.mode → Molizhishu API mode. The wizard uses ``fast`` / ``think``;
