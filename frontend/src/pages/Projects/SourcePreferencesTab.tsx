@@ -17,9 +17,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { Button } from "antd";
-import { CloudUploadOutlined } from "@ant-design/icons";
-import { listMediaDictionary, type MediaDictionaryImportResult } from "../../api/admin";
+import { Button, Popconfirm, message } from "antd";
+import { CloudUploadOutlined, DeleteOutlined } from "@ant-design/icons";
+import {
+  clearMediaDictionary,
+  listMediaDictionary,
+  type MediaDictionaryImportResult,
+} from "../../api/admin";
 import { useAuth } from "../../auth/AuthProvider";
 import MediaDictionaryImportModal from "../../components/MediaDictionaryImportModal";
 import AllSources from "./sourcePreferences/AllSources";
@@ -47,6 +51,7 @@ export default function SourcePreferencesTab({ projectId }: Props) {
   const [sub, setSub] = useState<SubTab>("all");
   const [dictTotal, setDictTotal] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   // mount-once:拉一次字典总数,作为按钮旁的「已导入 N 条」提示。
   useEffect(() => {
@@ -58,6 +63,19 @@ export default function SourcePreferencesTab({ projectId }: Props) {
 
   const handleImported = (result: MediaDictionaryImportResult) => {
     setDictTotal(result.total_in_dictionary);
+  };
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      const res = await clearMediaDictionary();
+      setDictTotal(0);
+      message.success(`已清空 ${res.deleted} 条媒体字典数据`);
+    } catch (err) {
+      message.error((err as Error).message || "清空失败");
+    } finally {
+      setClearing(false);
+    }
   };
 
   return (
@@ -88,6 +106,20 @@ export default function SourcePreferencesTab({ projectId }: Props) {
                 <span className="sp-dict-pill">已导入 {dictTotal} 条</span>
               )}
             </Button>
+            {dictTotal !== null && dictTotal > 0 && (
+              <Popconfirm
+                title={`清空 ${dictTotal} 条媒体字典数据?`}
+                description="清空后需要重新导入 xlsx 才能恢复。"
+                okText="清空"
+                cancelText="取消"
+                okType="danger"
+                onConfirm={handleClear}
+              >
+                <Button danger icon={<DeleteOutlined />} loading={clearing}>
+                  清空字典
+                </Button>
+              </Popconfirm>
+            )}
           </div>
         )}
       </div>

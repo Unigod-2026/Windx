@@ -25,6 +25,8 @@ export interface MediaDictionaryImportPreview {
   new_hosts: string[];
   update_hosts: string[];
   invalid_rows: MediaDictionaryInvalidRow[];
+  /** 解析出的数据行总数(含无效行)——「共解析 N 条」用这个,不是 entries.length。 */
+  total_parsed: number;
 }
 
 export interface MediaDictionaryImportResult {
@@ -32,6 +34,11 @@ export interface MediaDictionaryImportResult {
   updated: number;
   skipped: number;
   total_in_dictionary: number;
+}
+
+/** 清空字典的结果 —— deleted = 被删掉的行数。 */
+export interface MediaDictionaryClearOut {
+  deleted: number;
 }
 
 export interface MediaDictionaryListOut {
@@ -70,6 +77,14 @@ export async function importMediaDictionary(
 /** 字典全表(按 category, host 排序),带 total。 */
 export async function listMediaDictionary(): Promise<MediaDictionaryListOut> {
   const { data } = await client.get<MediaDictionaryListOut>(
+    "/admin/media-dictionary",
+  );
+  return data;
+}
+
+/** 清空字典(全表删除)。仅 super_admin。返回被删掉的行数。 */
+export async function clearMediaDictionary(): Promise<MediaDictionaryClearOut> {
+  const { data } = await client.delete<MediaDictionaryClearOut>(
     "/admin/media-dictionary",
   );
   return data;

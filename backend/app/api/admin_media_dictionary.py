@@ -14,13 +14,14 @@ read_only 模式一次性 IO,在内存中处理即可,不流式。
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import require_super_admin
 from app.models import AdminUser, MediaDictionary
 from app.schemas.media_dictionary import (
+    MediaDictionaryClearOut,
     MediaDictionaryEntry,
     MediaDictionaryImportPreview,
     MediaDictionaryImportResult,
@@ -67,9 +68,13 @@ async def preview_dict(
     """解析 xlsx → 返回预览(合法行 + new/update 分桶 + 无效行)。
 
     不写库,只读,可在导入前安全反复调用。
+    列按**表头名**定位,列序任意;表头认不出来 → 400。
     """
     content = await _read_and_validate(file)
-    return preview_import(db, content)
+    try:
+        return preview_import(db, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/import", response_model=MediaDictionaryImportResult)
@@ -80,7 +85,24 @@ async def import_dict(
 ):
     """解析 + upsert(单事务),返回 inserted / updated / 总数。"""
     content = await _read_and_validate(file)
-    return apply_import(db, content)
+    try:
+        return apply_import(db, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("", response_model=MediaDictionaryClearOut)
+def clear_dict(
+    db: Session = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    """清空媒体字典(全表删除)。
+
+    字典表没有外键引用,全表删除安全。返回值 = 实际删掉的行数。
+    """
+    deleted = db.execute(delete(MediaDictionary)).rowcount or 0
+    db.commit()
+    return MediaDictionaryClearOut(deleted=deleted)
 
 
 async def _read_and_validate(file: UploadFile) -> bytes:

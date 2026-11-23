@@ -42,6 +42,9 @@ class MediaDictionaryImportPreview(BaseModel):
     new_hosts: list[str]
     update_hosts: list[str]
     invalid_rows: list[MediaDictionaryInvalidRow]
+    #: 解析出的数据行总数(含无效行)—— 前端「共解析 N 条」用这个,
+    #: 不是 len(entries)(那个只是有效条数)。
+    total_parsed: int = 0
 
 
 class MediaDictionaryImportResult(BaseModel):
@@ -49,6 +52,12 @@ class MediaDictionaryImportResult(BaseModel):
     updated: int
     skipped: int
     total_in_dictionary: int
+
+
+class MediaDictionaryClearOut(BaseModel):
+    """清空字典的结果 —— deleted = 被删掉的行数。"""
+
+    deleted: int
 
 
 class MediaDictionaryListOut(BaseModel):

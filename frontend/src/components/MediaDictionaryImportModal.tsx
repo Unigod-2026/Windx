@@ -152,7 +152,7 @@ export default function MediaDictionaryImportModal({
             type="info"
             showIcon
             message="支持格式"
-            description="仅 .xlsx 文件,大小 5MB 以内。文件需包含三列:域名、媒体名称、媒体分类(顺序不限)。"
+            description="仅 .xlsx 文件,大小 5MB 以内。文件需包含三列:域名、媒体名称、媒体分类(顺序不限;「域名」也可写作「注册域名」)。"
           />
           <Upload {...uploadProps}>
             <Button icon={<UploadOutlined />}>选择 .xlsx 文件</Button>
@@ -214,7 +214,7 @@ function PreviewBlock({ preview, entriesWithStatus, onChangeFile }: PreviewBlock
         }}
       >
         <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-          共解析 <strong>{entriesWithStatus.length}</strong> 条
+          共解析 <strong>{preview.total_parsed}</strong> 条
         </span>
         <Tag color="green">新增 {newCount}</Tag>
         <Tag color="blue">更新 {updateCount}</Tag>
