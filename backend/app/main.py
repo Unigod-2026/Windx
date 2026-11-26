@@ -26,6 +26,7 @@ from app.api import (
     dashboard,
     molizhishu,
     project_import,
+    exports,
     projects,
     public_reports,
     reports,
@@ -87,6 +88,7 @@ app.include_router(config.router)
 app.include_router(project_import.router)
 app.include_router(customers.router)
 app.include_router(projects.router)
+app.include_router(exports.router)
 app.include_router(tasks.router)
 app.include_router(dashboard.router)
 app.include_router(molizhishu.router)
