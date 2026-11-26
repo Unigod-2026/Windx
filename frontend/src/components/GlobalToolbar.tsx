@@ -519,9 +519,6 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
       disabled: exporting,
       onClick: () => void submitExport(),
     },
-    { key: "config", label: "全局筛选配置", onClick: () => message.info("导出 CSV — 全局筛选配置（开发中）") },
-    { key: "business", label: "业务数据", onClick: () => message.info("导出 CSV — 业务数据（开发中）") },
-    { key: "all", label: "全部导出", onClick: () => message.info("导出 CSV — 全部（开发中）") },
   ];
 
   const applyDatePreset = (preset: "7" | "15" | "30" | "60") => {

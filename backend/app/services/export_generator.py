@@ -196,8 +196,6 @@ def _write_detail_sheet(
     ws.set_column(5, 5, 30)
     ws.set_column(6, 6, 22)
     ws.set_column(7, 7, 12)
-    ws.set_column(8, 8, 4)
-    ws.set_column(9, 9, 16)
 
     header = book.add_format(
         {
@@ -234,7 +232,6 @@ def _write_detail_sheet(
     ws.write(1, 5, "截图链接", subheader)
     ws.write(1, 6, "排名", subheader)
     ws.write(1, 7, "监控词排名", subheader)
-    ws.merge_range(0, 9, 1, 9, "反向监测", header)
 
     for row_idx, row in enumerate(rows, start=2):
         ws.write(row_idx, 0, data.brand, body)
@@ -245,7 +242,6 @@ def _write_detail_sheet(
         ws.write(row_idx, 5, row.share_url, body)
         ws.write(row_idx, 6, "\n".join(row.rankings), body)
         ws.write(row_idx, 7, "-", body)
-        ws.write(row_idx, 9, "无匹配内容", body)
 
     ws.freeze_panes(2, 0)
 
