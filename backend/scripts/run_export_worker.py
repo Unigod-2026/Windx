@@ -26,7 +26,8 @@ from app.services.export_worker import DEFAULT_DATA_ROOT, worker_loop
 def main() -> int:
     configure_logging()
     print(f"export worker started, data_root={DEFAULT_DATA_ROOT}", flush=True)
-    worker_loop(get_session_factory, DEFAULT_DATA_ROOT)
+    # get_session_factory() 返回的是 sessionmaker,worker_loop 会用它开新 Session
+    worker_loop(get_session_factory(), DEFAULT_DATA_ROOT)
     return 0
 
 

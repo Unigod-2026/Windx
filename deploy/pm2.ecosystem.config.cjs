@@ -30,5 +30,19 @@ module.exports = {
       restart_delay: 5000,
       max_restarts: 10,
     },
+    {
+      name: "windx-export-worker",
+      script: `${repoRoot}/deploy/start-export-worker.sh`,
+      interpreter: "none",
+      exec_mode: "fork",
+      cwd: `${repoRoot}/backend`,
+      // 单实例 —— worker 是串行的,起多个只是多进程抢同一个任务。
+      instances: 1,
+      // 导出 xlsx 的内存峰值可达上百 MB(答案全文进工作簿),
+      // 给到 2G,别让 pm2 在大导出中途把它杀掉。
+      max_memory_restart: "2G",
+      restart_delay: 5000,
+      max_restarts: 10,
+    },
   ],
 };

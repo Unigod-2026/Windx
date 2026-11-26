@@ -75,6 +75,13 @@ if pm2 describe windx-backend >/dev/null 2>&1; then
 else
   pm2 start "$REPO_ROOT/deploy/pm2.ecosystem.config.cjs"
 fi
+# 导出 worker —— 首次部署时上面那个不带 --only 的 pm2 start 已经把它带起来
+# 了;这里再 describe/reload 一次,保证代码更新后 worker 也跟着重启。
+if pm2 describe windx-export-worker >/dev/null 2>&1; then
+  pm2 reload windx-export-worker
+else
+  pm2 start "$REPO_ROOT/deploy/pm2.ecosystem.config.cjs" --only windx-export-worker
+fi
 pm2 save --force || true
 
 # --- 6. smoke check ----------------------------------------------------

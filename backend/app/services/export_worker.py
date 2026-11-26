@@ -173,18 +173,18 @@ def run_once(db: Session, data_root: Path = DEFAULT_DATA_ROOT) -> bool:
 
 
 def worker_loop(
-    db_factory,
+    session_factory,
     data_root: Path = DEFAULT_DATA_ROOT,
     poll_seconds: float = 3.0,
 ) -> None:
     """死循环 —— 给 ``scripts/run_export_worker.py`` 用。
 
-    ``db_factory`` 是无参可调用,返回一个新的 Session(用完即弃)——
-    worker 进程不持有长连接,避免会话被远端 MySQL 掐断。
+    ``session_factory`` 是 **sessionmaker**(不是 session)—— 调用它得到一个
+    新 Session,用完即弃。worker 进程不持有长连接,避免会话被远端 MySQL 掐断。
     """
     while True:
         try:
-            with db_factory() as db:
+            with session_factory() as db:
                 reset_stale_running(db)
                 worked = run_once(db, data_root)
                 if not worked:
