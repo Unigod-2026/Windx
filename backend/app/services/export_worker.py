@@ -26,11 +26,13 @@ from app.models.common import now_local
 from app.models.export_task import ExportTask
 from app.services.export_generator import write_export_workbook
 from app.services.export_query import collect_export_data, parse_export_params
+from app.services.export_storage import (
+    DEFAULT_DATA_ROOT,
+    relative_path_for,
+    resolve_export_path,
+)
 
 logger = logging.getLogger("app.export")
-
-#: 产物根目录 —— 相对 backend/ 的 ``data/exports``。
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "exports"
 
 #: running 超过这么久还没结果,认为是 worker 被 kill 了,重新排队。
 STALE_RUNNING_MINUTES = 30
@@ -69,17 +71,18 @@ def claim_next_pending(db: Session) -> ExportTask | None:
 
 
 def mark_success(
-    db: Session, task: ExportTask, path: Path, size: int, file_name: str
+    db: Session, task: ExportTask, relative_path: str, size: int, file_name: str
 ) -> None:
     task.status = "success"
-    task.file_path = str(path)
+    task.file_path = relative_path
     task.file_size = size
     task.file_name = file_name
     task.error = None
     task.finished_at = now_local()
     db.commit()
     logger.info(
-        "source=export:worker task_id=%s success size=%s", task.id, size
+        "source=export:worker task_id=%s success size=%s path=%s",
+        task.id, size, relative_path,
     )
 
 
@@ -118,7 +121,11 @@ def reset_stale_running(db: Session, stale_minutes: int = STALE_RUNNING_MINUTES)
     return len(rows)
 
 
-def cleanup_expired(db: Session, retention_days: int = RETENTION_DAYS) -> int:
+def cleanup_expired(
+    db: Session,
+    retention_days: int = RETENTION_DAYS,
+    data_root: Path = DEFAULT_DATA_ROOT,
+) -> int:
     """删过保留期的文件,并把任务的 ``file_path`` 置 NULL。返回清理条数。
 
     任务行保留 —— 历史记录比文件重要;前端据此显示「文件已过期」。
@@ -134,7 +141,7 @@ def cleanup_expired(db: Session, retention_days: int = RETENTION_DAYS) -> int:
     ).scalars().all()
     for task in rows:
         if task.file_path:
-            Path(task.file_path).unlink(missing_ok=True)
+            resolve_export_path(task.file_path, data_root).unlink(missing_ok=True)
         task.file_path = None
     db.commit()
     if rows:
@@ -142,8 +149,14 @@ def cleanup_expired(db: Session, retention_days: int = RETENTION_DAYS) -> int:
     return len(rows)
 
 
-def generate_for_task(db: Session, task: ExportTask, data_root: Path) -> tuple[Path, int, str]:
-    """跑生成。返回 ``(落盘路径, 字节数, 下载文件名)``。
+def generate_for_task(
+    db: Session, task: ExportTask, data_root: Path
+) -> tuple[str, int, str]:
+    """跑生成。返回 ``(相对路径, 字节数, 下载文件名)``。
+
+    落盘用**相对路径**入库 —— 本地开发与生产共用同一个 MySQL,绝对路径
+    只在生成它的那台机器上有意义,另一台读到就 404。详见
+    ``app/services/export_storage.py``。
 
     参数不合法 / 项目没了都算失败 —— 抛异常,调用方转成 failed。
     """
@@ -154,7 +167,7 @@ def generate_for_task(db: Session, task: ExportTask, data_root: Path) -> tuple[P
     path = target_dir / f"{task.id}.xlsx"
     write_export_workbook(data, path)
     file_name = f"{data.project_name}_提及率导出_{params.start}_{params.end}.xlsx"
-    return path, path.stat().st_size, file_name
+    return relative_path_for(task.project_id, task.id), path.stat().st_size, file_name
 
 
 def run_once(db: Session, data_root: Path = DEFAULT_DATA_ROOT) -> bool:
@@ -163,12 +176,12 @@ def run_once(db: Session, data_root: Path = DEFAULT_DATA_ROOT) -> bool:
     if task is None:
         return False
     try:
-        path, size, file_name = generate_for_task(db, task, Path(data_root))
+        relative_path, size, file_name = generate_for_task(db, task, Path(data_root))
     except Exception as exc:  # 任何失败都要落到 failed,不能让 worker 死
         logger.exception("source=export:worker task_id=%s crashed", task.id)
         mark_failed(db, task, str(exc) or exc.__class__.__name__)
         return True
-    mark_success(db, task, path, size, file_name)
+    mark_success(db, task, relative_path, size, file_name)
     return True
 
 

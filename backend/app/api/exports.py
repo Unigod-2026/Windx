@@ -18,7 +18,6 @@ HTTP 请求不放。
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -37,6 +36,7 @@ from app.schemas.export import (
     ExportTaskOut,
 )
 from app.services.export_query import ExportParamError, parse_export_params
+from app.services.export_storage import resolve_export_path
 
 logger = logging.getLogger("app.export")
 
@@ -162,15 +162,24 @@ def download_export(
     db: Session = Depends(get_db),
     user: AdminUser = Depends(get_current_user),
 ):
-    """下载 xlsx。任务没成功 / 文件已过期 → 404。"""
+    """下载 xlsx。任务没成功 / 文件不在本机 → 404。
+
+    路径是**相对**数据根存的(``62/17.xlsx``),由本机用自己的数据根解析
+    —— 本地开发与生产共用同一个 MySQL,存绝对路径只在那台机器上有意义。
+    详见 ``app/services/export_storage.py``。
+    """
     task = _get_task(db, task_id)
     project = _get_project(db, task.project_id)
     _assert_customer_access(user, project)
     if task.status != "success" or not task.file_path:
-        raise HTTPException(404, "文件不可用")
-    path = Path(task.file_path)
+        raise HTTPException(404, "文件不可用:任务未成功或文件已过期")
+    path = resolve_export_path(task.file_path)
     if not path.exists():
-        raise HTTPException(404, "文件不可用")
+        raise HTTPException(
+            404,
+            "文件不存在:可能已过期,或该导出是在另一台机器上生成的"
+            "(本地开发与生产共用同一个数据库)",
+        )
     return FileResponse(
         path,
         media_type=XLSX_MIME,
@@ -194,7 +203,7 @@ def delete_export(
             detail="任务正在生成中,无法删除",
         )
     if task.file_path:
-        Path(task.file_path).unlink(missing_ok=True)
+        resolve_export_path(task.file_path).unlink(missing_ok=True)
     db.delete(task)
     db.commit()
     logger.info(
