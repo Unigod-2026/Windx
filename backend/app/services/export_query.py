@@ -97,9 +97,11 @@ class DetailRow:
     platform_code: str
     answer_content: str
     share_url: str
-    #: 本品牌在这次回答里的**真实排名** —— 来自
-    #: ``BrandMention.rank_position``。没被提及时是 None。
-    rank: int | None
+    #: **排名**列 —— 这次回答里所有品牌的排名(自身 + 竞品),按名次升序,
+    #: 格式化成「雅培第1名」。没有品牌被排名时是空元组。
+    rankings: tuple[str, ...]
+    #: **监控词排名**列 —— 本品牌(监控词)自己的名次;没被排名时是 None。
+    monitor_rank: int | None
     #: 问题核心词。
     keyword: str
 
@@ -390,19 +392,36 @@ def _load_detail_rows(
     ).all()
     sub_ids = [r[0] for r in rows]
 
-    # 本品牌在每次回答里的真实排名 —— ``BrandMention.rank_position``。
-    # 导入数据没有 ``raw_result_json.allRankings``(那是远端 payload 里的),
-    # 但 rank_position 两条链路都写,才是「真实排名」的可靠来源。
-    rank_by_subtask: dict[str, int] = {}
+    # 这次回答里的品牌排名 —— 每条 ``BrandMention`` 行是一个品牌(自身 +
+    # 竞品),``rank_position`` 是它在答案里的名次。两条数据链路(导入 /
+    # 流水线抽取)都按 (subtask × 品牌) 写满行,所以这里不用
+    # ``raw_result_json.allRankings`` —— 导入数据那一列是 NULL。
+    #
+    #   「排名」列     = 所有有排名的品牌,按名次升序
+    #   「监控词排名」列 = 自身(self)那一行的名次
+    rankings_by_subtask: dict[str, tuple[str, ...]] = {}
+    monitor_rank_by_subtask: dict[str, int] = {}
     if sub_ids:
-        for sid, rank in db.execute(
-            select(BrandMention.subtask_id, BrandMention.rank_position).where(
+        brand_rows = db.execute(
+            select(
+                BrandMention.subtask_id,
+                BrandMention.brand,
+                BrandMention.is_self,
+                BrandMention.rank_position,
+            ).where(
                 BrandMention.subtask_id.in_(sub_ids),
-                BrandMention.is_self.is_(True),
                 BrandMention.rank_position.isnot(None),
             )
-        ).all():
-            rank_by_subtask[sid] = rank
+        ).all()
+        grouped: dict[str, list[tuple[int, str]]] = {}
+        for sid, brand_name, is_self, rank in brand_rows:
+            grouped.setdefault(sid, []).append((rank, brand_name))
+            if is_self:
+                monitor_rank_by_subtask[sid] = rank
+        for sid, items in grouped.items():
+            # 名次升序;同名次按品牌名排,保证同一份数据每次导出顺序一致
+            items.sort(key=lambda it: (it[0], it[1]))
+            rankings_by_subtask[sid] = tuple(f"{brand}第{rank}名" for rank, brand in items)
 
     out: list[DetailRow] = []
     for subtask_id, prompt, platform, mode, answer, share_url, created in rows:
@@ -420,7 +439,8 @@ def _load_detail_rows(
                 platform_code=platform or "",
                 answer_content=answer or "",
                 share_url=share_url or "",
-                rank=rank_by_subtask.get(subtask_id),
+                rankings=rankings_by_subtask.get(subtask_id, ()),
+                monitor_rank=monitor_rank_by_subtask.get(subtask_id),
                 keyword=_pick_keyword(prompt or "", keywords, brand),
             )
         )

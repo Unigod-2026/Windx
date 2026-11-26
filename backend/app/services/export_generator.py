@@ -271,12 +271,13 @@ def _write_detail_sheet(
         ws.write(row_idx, 3, row.day.isoformat(), body)
         ws.write(row_idx, 4, _truncate(row.answer_content), body)
         ws.write(row_idx, 5, row.share_url, body)
-        # 排名列 = 本品牌在这次回答里的**真实排名**;没被提到就写「未提及」。
-        if row.rank is not None:
-            ws.write_number(row_idx, 6, row.rank, body)
+        # 「排名」= 这次回答里所有品牌(自身 + 竞品)的排名,一行一个;
+        # 「监控词排名」= 自身(监控词)自己的名次。
+        ws.write(row_idx, 6, "\n".join(row.rankings), body)
+        if row.monitor_rank is not None:
+            ws.write_number(row_idx, 7, row.monitor_rank, body)
         else:
-            ws.write(row_idx, 6, "未提及", body)
-        ws.write(row_idx, 7, "-", body)
+            ws.write(row_idx, 7, "-", body)
 
     ws.freeze_panes(2, 0)
 
