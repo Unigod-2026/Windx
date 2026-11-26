@@ -20,6 +20,7 @@ dependencies = [
   # publish 时用 headless Chromium 渲染 admin 视图 → 公网静态 HTML。
   # 见 app/services/report_render.py::_render_admin_html_via_browser
   "playwright>=1.40",
+  "xlsxwriter>=3.3",
 ]
 
 [project.optional-dependencies]

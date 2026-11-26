@@ -36,6 +36,23 @@ _LABELS: dict[str, str] = {
     "chatgpt": "ChatGPT",
 }
 
+# 列头配色 —— 与前端 ``wizardConfig.ts`` 的 ``WIZARD_MODELS[].color`` 保持
+# 同步(加新模型时两处都要改,口径同 ``_LABELS``)。导出 xlsx 的「提及率」
+# sheet 用它给平台列表头上色,和 UI 里模型卡片的颜色对得上。
+_COLORS: dict[str, str] = {
+    "doubao": "#3f6bc4",
+    "yuanbao": "#c9803a",
+    "qianwen": "#3d9070",
+    "kimi": "#8250bd",
+    "deepseek": "#2b8b9b",
+    "baiduai": "#b4487e",
+    "antafu": "#8c3a2c",
+    "chatgpt": "#4a8e84",
+}
+
+#: 未知平台的中性底色。
+DEFAULT_COLOR = "#2F3A4F"
+
 
 def platform_label_for_code(raw: str | None) -> str:
     """Return the Chinese display name for a ``Subtask.platform`` value.
@@ -52,3 +69,18 @@ def platform_label_for_code(raw: str | None) -> str:
     if stripped in _LABELS:
         return _LABELS[stripped]
     return raw
+
+
+def platform_color_for_code(raw: str | None) -> str:
+    """Return the hex colour for a platform code.
+
+    Falls back to :data:`DEFAULT_COLOR` for unknown codes so a newly
+    supported model still renders a legible header instead of crashing
+    the export.
+    """
+    if not raw:
+        return DEFAULT_COLOR
+    if raw in _COLORS:
+        return _COLORS[raw]
+    stripped = raw.removesuffix("_mobile")
+    return _COLORS.get(stripped, DEFAULT_COLOR)
