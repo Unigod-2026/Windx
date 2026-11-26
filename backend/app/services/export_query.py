@@ -57,6 +57,10 @@ class ExportParamError(ValueError):
     """导出参数不合法 —— API 层转 400。"""
 
 
+#: Top3 的门槛 —— 排名 ≤ 3 算「被推荐进 Top3」。
+TOP3_RANK = 3
+
+
 @dataclass(frozen=True)
 class ExportParams:
     """一次导出的筛选条件(已归一)。"""
@@ -121,6 +125,8 @@ class StatBlock:
     day: date
     mentioned: dict[str, int]
     not_mentioned: dict[str, int]
+    #: 进 Top3 的 (问题, 平台) 对数 —— 排名 ≤ 3(按该组合当天的**最佳**排名判)。
+    top3: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -474,10 +480,12 @@ def collect_export_data(
     settled_pairs: set[tuple[int, str]] = set()
     #: (问题, 平台组) → 窗口内的最佳排名(数值最小 = 排名最高)。
     best_rank_by_pair: dict[tuple[int, str], int] = {}
-    per_day: dict[date, dict[str, tuple[int, int]]] = {}
+    #: day → label → (已提及数, 未提及数, 进Top3数)
+    per_day: dict[date, dict[str, tuple[int, int, int]]] = {}
     for (pid, label, day), (mentioned, best) in verdict.items():
         pair = (pid, label)
         settled_pairs.add(pair)
+        in_top3 = bool(mentioned and best is not None and best <= TOP3_RANK)
         if mentioned:
             mentioned_pairs.add(pair)
             if best is not None:
@@ -485,8 +493,12 @@ def collect_export_data(
                 if current is None or best < current:
                     best_rank_by_pair[pair] = best
         bucket = per_day.setdefault(day, {})
-        m, n = bucket.get(label, (0, 0))
-        bucket[label] = (m + (1 if mentioned else 0), n + (0 if mentioned else 1))
+        m, n, t = bucket.get(label, (0, 0, 0))
+        bucket[label] = (
+            m + (1 if mentioned else 0),
+            n + (0 if mentioned else 1),
+            t + (1 if in_top3 else 0),
+        )
 
     cells: dict[tuple[int, str], MentionCell] = {}
     for p in prompts:
@@ -512,10 +524,13 @@ def collect_export_data(
             StatBlock(
                 day=day,
                 mentioned={
-                    g.label: bucket.get(g.label, (0, 0))[0] for g in groups
+                    g.label: bucket.get(g.label, (0, 0, 0))[0] for g in groups
                 },
                 not_mentioned={
-                    g.label: bucket.get(g.label, (0, 0))[1] for g in groups
+                    g.label: bucket.get(g.label, (0, 0, 0))[1] for g in groups
+                },
+                top3={
+                    g.label: bucket.get(g.label, (0, 0, 0))[2] for g in groups
                 },
             )
         )
