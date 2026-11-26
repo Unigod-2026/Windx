@@ -14,6 +14,7 @@ export type ProjectTabKey =
   | "report"
   | "import"
   | "import-history"
+  | "download-history"
   | "settings";
 
 export const PROJECT_GROUP_LAYOUT: { title: string; keys: ProjectTabKey[] }[] = [
@@ -21,7 +22,10 @@ export const PROJECT_GROUP_LAYOUT: { title: string; keys: ProjectTabKey[] }[] = 
     title: "数据洞察",
     keys: ["overview", "question", "competitor", "source", "self-articles", "citation"],
   },
-  { title: "数据中心", keys: ["answer", "report", "import", "import-history"] },
+  {
+    title: "数据中心",
+    keys: ["answer", "report", "import", "import-history", "download-history"],
+  },
   { title: "系统", keys: ["settings"] },
 ];
 

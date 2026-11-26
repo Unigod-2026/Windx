@@ -11,6 +11,7 @@ import AnswerTab from "./AnswerTab";
 import ReportTab from "./ReportTab";
 import DataImportTab from "./DataImportTab";
 import ImportHistoryTab from "./ImportHistoryTab";
+import DownloadHistoryTab from "./DownloadHistoryTab";
 import SelfArticles from "./sourcePreferences/SelfArticles";
 import SourcePreferencesTab from "./SourcePreferencesTab";
 import EditProjectTab from "./EditProjectTab";
@@ -27,6 +28,7 @@ const VALID_TABS = [
   "report",
   "import",
   "import-history",
+  "download-history",
   "edit",
   "settings",
 ] as const;
@@ -135,6 +137,8 @@ export default function ProjectDetail() {
         );
       case "import-history":
         return <ImportHistoryTab projectId={projectId} />;
+      case "download-history":
+        return <DownloadHistoryTab projectId={projectId} />;
       case "edit":
         return <EditProjectTab projectId={projectId} />;
       case "settings":

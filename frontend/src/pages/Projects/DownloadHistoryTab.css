@@ -1,0 +1,71 @@
+/* 下载历史页 —— 沿用 ImportHistoryTab.css 的 token 与结构,只是前缀换成 .dlt- */
+
+.dlt {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 0 28px;
+}
+
+.dlt-head {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0);
+}
+
+.dlt-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #181818);
+}
+
+.dlt-sub {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-tertiary, #8c8c8c);
+  max-width: 76ch;
+}
+
+.dlt-counts {
+  padding: 10px 14px;
+  background: var(--bg-page, #f5f6f8);
+  border: 1px solid var(--border-light, #f0f0f0);
+  border-radius: 3px;
+  font-size: 13px;
+  color: var(--text-secondary, #4f4f4f);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 进行中的状态点 —— 全页唯一的动效,让「后台在跑」无法被忽略。 */
+.dlt-pulse {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+  vertical-align: middle;
+  animation: dlt-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes dlt-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dlt-pulse {
+    animation: none;
+  }
+}
+
+.dlt-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

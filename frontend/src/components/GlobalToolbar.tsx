@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -26,6 +26,7 @@ import {
 import { DatePicker } from "antd";
 import dayjs from "dayjs";
 import { getProject, type ProjectPlatform, type PromptOut } from "../api/projects";
+import { createExport, type ExportParamsPayload } from "../api/exports";
 import type { ToolbarDateRange } from "./ToolbarFilterContext";
 import { WIZARD_MODELS } from "../pages/Projects/wizardConfig";
 import { rowKeyOfPlatform } from "../pages/Projects/platforms";
@@ -59,6 +60,9 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
   const params = useParams<{ id?: string }>();
   const projectId = params.id ? Number(params.id) : null;
   const toolbar = useToolbarFilter();
+  // 切到项目的某个 tab —— 工具栏和侧边栏用的是同一套 ?tab= 参数
+  // (AppLayout.onProjectClick 也是这么写的)。
+  const [, setSearchParams] = useSearchParams();
 
   // 日期下拉 —— 预设(7/15/30/60)直接生效,自定义通过两个独立 DatePicker
   // 选完(先 start 后 end)后 apply。disabledDate 限制:不超过 30 天,不超今天。
@@ -472,7 +476,49 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
           ? "未选"
           : `已选 ${appliedModels.size}`;
 
+  const switchTab = (tab: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("tab", tab);
+      return next;
+    });
+  };
+
+  const [exporting, setExporting] = useState(false);
+
+  const submitExport = async () => {
+    if (projectId === null) return;
+    setExporting(true);
+    try {
+      // 工具栏的「全选」= null(不筛),原样传 —— 后端按不筛处理。
+      const range = toolbar.selectedDateRange;
+      const dateRange: ExportParamsPayload["date_range"] =
+        range && "start" in range && range.start && range.end
+          ? { start: range.start, end: range.end }
+          : { days: range && "days" in range && range.days ? range.days : 7 };
+      await createExport(projectId, {
+        date_range: dateRange,
+        platforms: toolbar.selectedModels,
+        prompt_ids: toolbar.selectedPromptIds,
+      });
+      message.success("导出任务已提交，生成完成后可在下载历史中下载");
+      switchTab("download-history");
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } }).response
+        ?.data?.detail;
+      message.error(detail || "提交导出任务失败");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const exportItems: MenuProps["items"] = [
+    {
+      key: "mention-rate",
+      label: "导出提及率数据",
+      disabled: exporting,
+      onClick: () => void submitExport(),
+    },
     { key: "config", label: "全局筛选配置", onClick: () => message.info("导出 CSV — 全局筛选配置（开发中）") },
     { key: "business", label: "业务数据", onClick: () => message.info("导出 CSV — 业务数据（开发中）") },
     { key: "all", label: "全部导出", onClick: () => message.info("导出 CSV — 全部（开发中）") },
@@ -975,11 +1021,11 @@ export default function GlobalToolbar({ visible }: GlobalToolbarProps) {
           </Button>
         </Dropdown>
 
-        <Tooltip title="下载管理">
+        <Tooltip title="下载历史">
           <Button
             className="gt-icon-btn"
             icon={<CloudDownloadOutlined />}
-            onClick={() => message.info("下载管理（开发中）")}
+            onClick={() => switchTab("download-history")}
           >
             下载
           </Button>

@@ -17,6 +17,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   CloudUploadOutlined,
+  CloudDownloadOutlined,
   HistoryOutlined,
 } from "@ant-design/icons";
 import { ChevronRight, Plus, User } from "lucide-react";
@@ -82,6 +83,11 @@ const PROJECT_TABS: Record<ProjectTabKey, NavLeaf> = {
     key: "import-history",
     label: "导入历史",
     icon: <HistoryOutlined />,
+  },
+  "download-history": {
+    key: "download-history",
+    label: "下载历史",
+    icon: <CloudDownloadOutlined />,
   },
   settings: { key: "settings", label: "设置", icon: <SettingOutlined /> },
 };
