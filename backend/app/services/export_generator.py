@@ -98,15 +98,17 @@ def _write_mention_rate_sheet(book, data: ExportData) -> None:
         ws.write_number(row_idx, 0, row_idx, plain_fmt)
         ws.write(row_idx, 1, _truncate(prompt.text), text_fmt)
         for col_idx, group in enumerate(data.platforms):
-            value = data.cells.get((prompt.id, group.label), "-")
-            fmt = (
-                mentioned_fmt
-                if value == "已提及"
-                else dash_fmt
-                if value == "-"
-                else plain_fmt
-            )
-            ws.write(row_idx, 2 + col_idx, value, fmt)
+            cell = data.cells.get((prompt.id, group.label))
+            if cell is None or cell.state == "unknown":
+                ws.write(row_idx, 2 + col_idx, "-", dash_fmt)
+            elif cell.state == "not_mentioned":
+                ws.write(row_idx, 2 + col_idx, "未提及", plain_fmt)
+            elif cell.rank is not None:
+                # 提到了 → 显示**最高的那次排名**(数值最小 = 排最前)
+                ws.write_number(row_idx, 2 + col_idx, cell.rank, mentioned_fmt)
+            else:
+                # 提到了但排名未知(远端没给名次)→ 只能写「已提及」
+                ws.write(row_idx, 2 + col_idx, "已提及", mentioned_fmt)
 
     # 统计块:每个日期一块,块与块之间空一行
     row = len(data.prompts) + 2
@@ -240,7 +242,11 @@ def _write_detail_sheet(
         ws.write(row_idx, 3, row.day.isoformat(), body)
         ws.write(row_idx, 4, _truncate(row.answer_content), body)
         ws.write(row_idx, 5, row.share_url, body)
-        ws.write(row_idx, 6, "\n".join(row.rankings), body)
+        # 排名列 = 本品牌在这次回答里的**真实排名**;没被提到就写「未提及」。
+        if row.rank is not None:
+            ws.write_number(row_idx, 6, row.rank, body)
+        else:
+            ws.write(row_idx, 6, "未提及", body)
         ws.write(row_idx, 7, "-", body)
 
     ws.freeze_panes(2, 0)

@@ -93,10 +93,25 @@ class DetailRow:
     platform_code: str
     answer_content: str
     share_url: str
-    #: ``allRankings`` 格式化成「雅培第1名」。
-    rankings: tuple[str, ...]
+    #: 本品牌在这次回答里的**真实排名** —— 来自
+    #: ``BrandMention.rank_position``。没被提及时是 None。
+    rank: int | None
     #: 问题核心词。
     keyword: str
+
+
+@dataclass(frozen=True)
+class MentionCell:
+    """总表(「提及率」sheet)里的一格。
+
+    ``state``:
+    - ``mentioned``     —— 提及了,``rank`` 带最佳排名(数值越小越靠前);
+    - ``not_mentioned`` —— 有回答但品牌没被提及;
+    - ``unknown``       —— 没有已结算的抽取结论(没回答 / 抽取还在跑)。
+    """
+
+    state: str
+    rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -117,8 +132,8 @@ class ExportData:
     keywords: tuple[str, ...]
     platforms: tuple[PlatformGroup, ...]
     prompts: tuple[PromptRow, ...]
-    #: (prompt_id, 平台 label) → 「已提及」/「未提及」/「-」
-    cells: dict[tuple[int, str], str]
+    #: (prompt_id, 平台 label) → 该格的提及结论(带最佳排名)
+    cells: dict[tuple[int, str], MentionCell]
     stat_blocks: tuple[StatBlock, ...]
     #: 平台 label → 明细行
     details: dict[str, tuple[DetailRow, ...]]
@@ -278,29 +293,6 @@ def _pick_keyword(prompt_text: str, keywords: Sequence[str], fallback: str) -> s
     return fallback
 
 
-def _format_rankings(raw_result_json: object) -> tuple[str, ...]:
-    """``raw_result_json.allRankings`` → ``("雅培第1名", "三诺生物第5名")``。
-
-    平台侧 payload 结构不完全一致(有的包一层、有的直接给数组、有的失败轮
-    干脆没有),这里只认 ``{"name": str, "rank": int > 0}`` 的项,其余静默
-    丢弃,免得表里出现 ``None第None名``。
-    """
-    if not isinstance(raw_result_json, dict):
-        return ()
-    rows = raw_result_json.get("allRankings")
-    if not isinstance(rows, list):
-        return ()
-    out: list[str] = []
-    for entry in rows:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        rank = entry.get("rank")
-        if isinstance(name, str) and name.strip() and isinstance(rank, int) and rank > 0:
-            out.append(f"{name.strip()}第{rank}名")
-    return tuple(out)
-
-
 def _load_mention_facts(
     db: Session,
     project_id: int,
@@ -308,8 +300,12 @@ def _load_mention_facts(
     texts: Sequence[str],
     codes: Sequence[str],
     selected: set[tuple[str, bool]] | None,
-) -> list[tuple[str, str, date, int, bool]]:
-    """self 抽取结论 → ``(prompt_text, platform_code, day, is_mention, settled)``。"""
+) -> list[tuple[str, str, date, int, bool, int | None]]:
+    """self 抽取结论 → ``(prompt_text, platform_code, day, is_mention, settled, rank)``。
+
+    ``rank`` 是本品牌在这次回答里的真实排名(``BrandMention.rank_position``)
+    —— 导入数据和流水线抽取都写这一列,不用去翻 ``raw_result_json``。
+    """
     if not texts or not codes:
         return []
     win_start = datetime.combine(params.start, time.min)
@@ -320,6 +316,7 @@ def _load_mention_facts(
             BrandMention.platform,
             BrandMention.thinking_mode,
             BrandMention.is_mention,
+            BrandMention.rank_position,
             BrandMention.extract_status,
             Task.created_local_at,
         )
@@ -333,8 +330,8 @@ def _load_mention_facts(
             Task.created_local_at <= win_end,
         )
     ).all()
-    facts: list[tuple[str, str, date, int, bool]] = []
-    for prompt, platform, thinking, is_mention, extract_status, created in rows:
+    facts: list[tuple[str, str, date, int, bool, int | None]] = []
+    for prompt, platform, thinking, is_mention, rank, extract_status, created in rows:
         if selected is not None:
             want = {t for code, t in selected if code == platform}
             if not want:
@@ -346,7 +343,7 @@ def _load_mention_facts(
                 continue
         settled = extract_status != ExtractStatus.PENDING
         facts.append(
-            (prompt, platform, created.date(), is_mention, settled)
+            (prompt, platform, created.date(), is_mention, settled, rank)
         )
     return facts
 
@@ -368,12 +365,12 @@ def _load_detail_rows(
     win_end = datetime.combine(params.end, time.max)
     rows = db.execute(
         select(
+            Subtask.subtask_id,
             Subtask.prompt,
             Subtask.platform,
             Subtask.mode,
             Subtask.answer_content,
             Subtask.share_url,
-            Subtask.raw_result_json,
             Task.created_local_at,
         )
         .join(Task, Task.task_id == Subtask.task_id)
@@ -385,8 +382,24 @@ def _load_detail_rows(
             Task.created_local_at <= win_end,
         )
     ).all()
+    sub_ids = [r[0] for r in rows]
+
+    # 本品牌在每次回答里的真实排名 —— ``BrandMention.rank_position``。
+    # 导入数据没有 ``raw_result_json.allRankings``(那是远端 payload 里的),
+    # 但 rank_position 两条链路都写,才是「真实排名」的可靠来源。
+    rank_by_subtask: dict[str, int] = {}
+    if sub_ids:
+        for sid, rank in db.execute(
+            select(BrandMention.subtask_id, BrandMention.rank_position).where(
+                BrandMention.subtask_id.in_(sub_ids),
+                BrandMention.is_self.is_(True),
+                BrandMention.rank_position.isnot(None),
+            )
+        ).all():
+            rank_by_subtask[sid] = rank
+
     out: list[DetailRow] = []
-    for prompt, platform, mode, answer, share_url, raw, created in rows:
+    for subtask_id, prompt, platform, mode, answer, share_url, created in rows:
         if selected is not None:
             want = {t for code, t in selected if code == platform}
             if not want:
@@ -401,7 +414,7 @@ def _load_detail_rows(
                 platform_code=platform or "",
                 answer_content=answer or "",
                 share_url=share_url or "",
-                rankings=_format_rankings(raw),
+                rank=rank_by_subtask.get(subtask_id),
                 keyword=_pick_keyword(prompt or "", keywords, brand),
             )
         )
@@ -439,38 +452,54 @@ def collect_export_data(
     )
 
     # ---- 单元格 + 统计块 -------------------------------------------------
-    # verdict[(prompt_id, label, day)] = 该组合当天是否被提及。
-    verdict: dict[tuple[int, str, date], bool] = {}
-    for prompt_text, code, day, is_mention, settled in facts:
+    # verdict[(prompt_id, label, day)] = (当天是否被提及, 当天的最佳排名)。
+    # 「最佳」= 排名数值最小 —— 同一问题同一天被多个档位答到时取最好的那次。
+    verdict: dict[tuple[int, str, date], tuple[bool, int | None]] = {}
+    for prompt_text, code, day, is_mention, settled, rank in facts:
         if not settled:
             continue
         pid = text_to_id.get(prompt_text)
         if pid is None:
             continue
         key = (pid, code_to_label.get(code, code), day)
-        verdict[key] = verdict.get(key, False) or bool(is_mention)
+        was_mentioned, best = verdict.get(key, (False, None))
+        if is_mention:
+            if best is None or (rank is not None and rank < best):
+                best = rank
+            verdict[key] = (True, best)
+        else:
+            verdict[key] = (was_mentioned, best)
 
     mentioned_pairs: set[tuple[int, str]] = set()
     settled_pairs: set[tuple[int, str]] = set()
+    #: (问题, 平台组) → 窗口内的最佳排名(数值最小 = 排名最高)。
+    best_rank_by_pair: dict[tuple[int, str], int] = {}
     per_day: dict[date, dict[str, tuple[int, int]]] = {}
-    for (pid, label, day), mentioned in verdict.items():
-        settled_pairs.add((pid, label))
+    for (pid, label, day), (mentioned, best) in verdict.items():
+        pair = (pid, label)
+        settled_pairs.add(pair)
         if mentioned:
-            mentioned_pairs.add((pid, label))
+            mentioned_pairs.add(pair)
+            if best is not None:
+                current = best_rank_by_pair.get(pair)
+                if current is None or best < current:
+                    best_rank_by_pair[pair] = best
         bucket = per_day.setdefault(day, {})
         m, n = bucket.get(label, (0, 0))
         bucket[label] = (m + (1 if mentioned else 0), n + (0 if mentioned else 1))
 
-    cells: dict[tuple[int, str], str] = {}
+    cells: dict[tuple[int, str], MentionCell] = {}
     for p in prompts:
         for g in groups:
             pair = (p.id, g.label)
             if pair in mentioned_pairs:
-                cells[pair] = "已提及"
+                cells[pair] = MentionCell(
+                    state="mentioned", rank=best_rank_by_pair.get(pair)
+                )
             elif pair in settled_pairs:
-                cells[pair] = "未提及"
+                cells[pair] = MentionCell(state="not_mentioned")
             else:
-                cells[pair] = "-"
+                cells[pair] = MentionCell(state="unknown")
 
     stat_blocks: list[StatBlock] = []
     # 统计块的日期集合 = **窗口内有回答的监控日** ∪ 有已结算结论的日子。
