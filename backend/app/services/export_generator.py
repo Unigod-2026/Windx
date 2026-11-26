@@ -73,6 +73,9 @@ def _write_mention_rate_sheet(book, data: ExportData) -> None:
     )
     plain_fmt = book.add_format({"align": "center"})
     dash_fmt = book.add_format({"align": "center", "font_color": _DASH_COLOR})
+    # 比率格:底层存小数(0.8947),用百分比格式显示成 89.47% —— 跟样例文件
+    # 一样(number_format='0.00%'),在 Excel 里仍是可计算的数值。
+    rate_fmt = book.add_format({"align": "center", "num_format": "0.00%"})
     text_fmt = book.add_format({"valign": "top", "text_wrap": True})
 
     # 表头:序号 | 问题 | <平台…>
@@ -113,7 +116,9 @@ def _write_mention_rate_sheet(book, data: ExportData) -> None:
     # 统计块:每个日期一块,块与块之间空一行
     row = len(data.prompts) + 2
     for block in data.stat_blocks:
-        row = _write_stat_blocks(book, ws, block, data, row, header, plain_fmt)
+        row = _write_stat_blocks(
+            book, ws, block, data, row, header, plain_fmt, rate_fmt
+        )
 
     ws.freeze_panes(1, 2)
 
@@ -126,6 +131,7 @@ def _write_stat_blocks(
     row: int,
     header,
     plain_fmt,
+    rate_fmt,
 ) -> int:
     """写一个日期的两块统计,返回下一个可用行号。
 
@@ -173,10 +179,10 @@ def _write_stat_blocks(
         m = block.mentioned.get(label, 0)
         n = block.not_mentioned.get(label, 0)
         denom = m + n
-        ws.write_number(row, 2 + idx, (m / denom) if denom else 0.0, plain_fmt)
+        ws.write_number(row, 2 + idx, (m / denom) if denom else 0.0, rate_fmt)
     grand = mentioned_total + sum(block.not_mentioned.values())
     ws.write_number(
-        row, total_col, (mentioned_total / grand) if grand else 0.0, plain_fmt
+        row, total_col, (mentioned_total / grand) if grand else 0.0, rate_fmt
     )
     row += 1
 
@@ -201,14 +207,14 @@ def _write_stat_blocks(
         denom = denominators[label]
         ws.write_number(
             row, 2 + idx, (block.top3.get(label, 0) / denom) if denom else 0.0,
-            plain_fmt,
+            rate_fmt,
         )
     grand_top3 = sum(block.top3.values())
     grand_top3_denom = sum(denominators.values())
     ws.write_number(
         row, total_col,
         (grand_top3 / grand_top3_denom) if grand_top3_denom else 0.0,
-        plain_fmt,
+        rate_fmt,
     )
     row += 1
 
