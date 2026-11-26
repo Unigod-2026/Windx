@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Space, Spin, Table, Tag, message } from "antd";
 import type { TableColumnsType } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import {
   createExport,
   deleteExport,
@@ -56,8 +57,10 @@ export default function DownloadHistoryTab({ projectId }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
-  // 轮询定时器挂在 ref 上 —— 组件卸载时要清掉,否则会对着已卸载的组件 setState。
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // 「拉一次 + 顺便决定要不要继续轮询」的入口。手动刷新按钮和自动轮询
+  // 走同一条路径,不会各自维护一套定时器。
+  const kickRef = useRef<(() => Promise<void>) | null>(null);
 
   // load 返回这一轮的列表 —— 轮询循环靠返回值判断「还有没有进行中的任务」,
   // 不靠 state(state 更新和 await 之间的时序不可靠)。
@@ -80,20 +83,48 @@ export default function DownloadHistoryTab({ projectId }: Props) {
   // 都会重建 effect 变成死循环。
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     const tick = async () => {
-      if (cancelled) return;
       const items = await load();
       if (cancelled) return;
+      // 只保留一个定时器 —— 连点刷新不会起出两条并行的轮询链。
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
       if (items.some((t) => isExportActive(t.status))) {
-        timerRef.current = setTimeout(tick, 3000);
+        timer = setTimeout(() => void tick(), 3000);
       }
     };
+
+    // 手动刷新:先把挂着的定时器撤掉再拉一次 —— 拉完由 tick 决定要不要
+    // 继续轮询(所以刷新后如果又有任务在生成,轮询会自动接上)。
+    kickRef.current = async () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      await tick();
+    };
+
     void tick();
+
     return () => {
       cancelled = true;
-      if (timerRef.current) clearTimeout(timerRef.current);
+      kickRef.current = null;
+      if (timer) clearTimeout(timer);
     };
   }, [load]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await kickRef.current?.();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleDownload = async (task: ExportTaskSummary) => {
     setBusyId(task.id);
@@ -236,10 +267,21 @@ export default function DownloadHistoryTab({ projectId }: Props) {
   return (
     <div className="dlt">
       <div className="dlt-head">
-        <div className="dlt-title">下载历史</div>
-        <div className="dlt-sub">
-          导出在后台生成，文件准备好后可以在这里下载。生成中的任务不会阻塞页面，超过
-          7 天的文件会自动清理。
+        <div className="dlt-head-row">
+          <div>
+            <div className="dlt-title">下载历史</div>
+            <div className="dlt-sub">
+              导出在后台生成，文件准备好后可以在这里下载。生成中的任务不会阻塞页面，超过
+              7 天的文件会自动清理。
+            </div>
+          </div>
+          <Button
+            icon={<ReloadOutlined />}
+            loading={refreshing}
+            onClick={() => void handleRefresh()}
+          >
+            刷新
+          </Button>
         </div>
       </div>
 
